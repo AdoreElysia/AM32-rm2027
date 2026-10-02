@@ -10,6 +10,10 @@
 #include "common.h"
 #include "targets.h"
 
+#ifdef USE_ADC_BEMF
+/* 本板走 adc_bemf.c 的软件过零，整个比较器实现不参与编译 */
+#else
+
 COMP_TypeDef* active_COMP = COMP2;
 uint32_t current_EXTI_LINE = LL_EXTI_LINE_18;
 uint8_t medium_speed_set;
@@ -132,3 +136,5 @@ medium_speed_set = 1;
 
 //	}
 //}
+
+#endif /* !USE_ADC_BEMF */

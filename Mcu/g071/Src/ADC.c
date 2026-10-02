@@ -6,7 +6,11 @@
  */
 #include "ADC.h"
 
-#ifdef USE_ADC_INPUT
+#ifdef USE_ADC_BEMF
+/* [0]电流 [1]电压 [2]温度 [3]VA [4]VB [5]VC [6]V0 —— 三相+V0 供软件过零用 */
+#include "adc_bemf.h"
+uint16_t ADCDataDMA[7];
+#elif defined(USE_ADC_INPUT)
 uint16_t ADCDataDMA[4];
 #else
 uint16_t ADCDataDMA[3];
@@ -33,6 +37,12 @@ void ADC_DMA_Callback()
     ADC_raw_temp = ADCDataDMA[2];
     ADC_raw_volts = ADCDataDMA[1];
     ADC_raw_current = ADCDataDMA[0];
+#ifdef USE_ADC_BEMF
+    bemf_adc_va = ADCDataDMA[3];
+    bemf_adc_vb = ADCDataDMA[4];
+    bemf_adc_vc = ADCDataDMA[5];
+    bemf_adc_v0 = ADCDataDMA[6];
+#endif
 #endif
 }
 
@@ -48,7 +58,9 @@ void enableADC_DMA()
         (uint32_t)&ADCDataDMA, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
 
     /* Set DMA transfer size */
-#ifdef USE_ADC_INPUT
+#ifdef USE_ADC_BEMF
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 7);
+#elif defined(USE_ADC_INPUT)
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 4);
 #else
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 3);
@@ -161,7 +173,11 @@ void ADC_Init(void)
      * Alignment and number of conversion)
      */
     ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
+    #ifdef USE_ADC_BEMF
+    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_7RANKS;
+#else
     ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_3RANKS;
+#endif
     ADC_REG_InitStruct.SequencerDiscont = LL_ADC_REG_SEQ_DISCONT_DISABLE;
     ADC_REG_InitStruct.ContinuousMode = LL_ADC_REG_CONV_SINGLE;
     ADC_REG_InitStruct.DMATransfer = LL_ADC_REG_DMA_TRANSFER_LIMITED;
@@ -171,7 +187,7 @@ void ADC_Init(void)
     LL_ADC_SetOverSamplingScope(ADC1, LL_ADC_OVS_DISABLE);
     LL_ADC_SetTriggerFrequencyMode(ADC1, LL_ADC_CLOCK_FREQ_MODE_LOW);
     LL_ADC_REG_SetSequencerConfigurable(ADC1, LL_ADC_REG_SEQ_CONFIGURABLE);
-    LL_ADC_SetClock(ADC1, LL_ADC_CLOCK_ASYNC_DIV4);
+    LL_ADC_SetClock(ADC1, LL_ADC_CLOCK_ASYNC_DIV2);
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_1,
         LL_ADC_SAMPLINGTIME_19CYCLES_5);
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_2,
@@ -196,4 +212,16 @@ void ADC_Init(void)
         LL_ADC_CHANNEL_TEMPSENSOR);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
         LL_ADC_SAMPLINGTIME_COMMON_2);
+
+#ifdef USE_ADC_BEMF
+    /* 三相 + 虚拟中性点（供软件过零；源阻抗 47K∥10K≈8.3k ⇒ 用 19.5 周期的 COMMON_1） */
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, BEMF_ADC_PHASE_A_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5, BEMF_ADC_PHASE_B_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_6, BEMF_ADC_PHASE_C_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7, BEMF_ADC_NEUTRAL_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+#endif
 }
