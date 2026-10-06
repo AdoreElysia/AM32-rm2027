@@ -252,6 +252,11 @@ an settings option)
 
 void zcfoundroutine(void);
 
+/* RM2027 开环调试开关：未定义时按 0 处理，这样既能用 #ifdef，也能直接写进 if 条件里 */
+#ifndef RM2027_OL_ARM_ONLY
+#define RM2027_OL_ARM_ONLY 0
+#endif
+
 // firmware build options !! fixed speed and duty cycle modes are not to be used
 // with sinusoidal startup !!
 
@@ -474,6 +479,16 @@ uint8_t running = 0;
 uint16_t advance = 0;
 uint8_t advancedivisor = 6;
 volatile char rising = 1;
+
+#if RM2027_OL_ARM_ONLY
+/* RM2027 强制开环参数（RAM 全局，可用调试器在线改，不必重烧）
+ * 步频 = 20000/ol_step_div Hz；erpm = 200000/ol_step_div；
+ * 机械转速 = 200000/(ol_step_div × 极对数)。 */
+uint16_t ol_step_div = 200;  /* 20kHz 拍数/步：200 ⇒ 100Hz/步 ⇒ 1000erpm ⇒ 6 极对 167RPM */
+uint16_t ol_input = 150;     /* 固定"油门"值：占空比 ≈ (ol_input-47)/2000 ≈ 5.2% */
+uint16_t ol_ticks = 0;       /* 当前这一步已经过的拍数 */
+uint32_t ol_steps = 0;       /* 观测用：累计换相步数 */
+#endif
 
 ////Space Vector PWM ////////////////
 // const int pwmSin[] ={128, 132, 136, 140, 143, 147, 151, 155, 159, 162, 166,
@@ -942,6 +957,9 @@ void PeriodElapsedCallback()
  */
 void interruptRoutine()
 {
+#if RM2027_OL_ARM_ONLY
+    return; /* 开环调试：过零中断路径不参与换相（换相由 olStepTick 独占） */
+#endif
 //   if (average_interval > 125) {
 //        if ((INTERVAL_TIMER_COUNT < 125) && (duty_cycle < 600) && (zero_crosses < 500)) { // should be impossible, desync?exit anyway
 //           return;
@@ -1140,6 +1158,11 @@ void setInput()
     } else {
         adjusted_input = newinput;
     }
+#if RM2027_OL_ARM_ONLY
+    /* ★ 油门只当启停开关：数值不参与调速。
+     *   未解锁时必须保持 0 —— 解锁判据就是 adjusted_input == 0（见 tenKhzRoutine）。 */
+    adjusted_input = (armed && newinput >= 48) ? ol_input : 0;
+#endif
 #ifndef BRUSHED_MODE
     if ((bemf_timeout_happened > bemf_timeout) && eepromBuffer.stuck_rotor_protection) {
         allOff();
@@ -1323,7 +1346,7 @@ if (!stepper_sine && armed) {
             }
         }
         if (!prop_brake_active) {
-            if (input >= 47 && (zero_crosses < (uint32_t)(30 >> eepromBuffer.stall_protection))) {
+            if (!RM2027_OL_ARM_ONLY && input >= 47 && (zero_crosses < (uint32_t)(30 >> eepromBuffer.stall_protection))) {
                 if (duty_cycle_setpoint < min_startup_duty) {
                     duty_cycle_setpoint = min_startup_duty;
                 }
@@ -1341,7 +1364,7 @@ if (!stepper_sine && armed) {
                 }
             }
 
-            if (stall_protection_adjust > 0 && input > 47) {
+            if (!RM2027_OL_ARM_ONLY && stall_protection_adjust > 0 && input > 47) {
 
                 duty_cycle_setpoint = duty_cycle_setpoint + (uint16_t)(stall_protection_adjust/10000);
             }
@@ -1349,6 +1372,30 @@ if (!stepper_sine && armed) {
     }
 #endif
 }
+
+#if RM2027_OL_ARM_ONLY
+/* ================== RM2027 强制开环步进器（DShot 仅解锁） ==================
+ * 由 tenKhzRoutine()（TIM6，20kHz）每 50µs 调用一次 —— 时间基准稳定，不受主循环抖动影响。
+ * 参数（ol_step_div / ol_input / ol_ticks / ol_steps）定义在文件上方的全局区。 */
+static void olStepTick(void)
+{
+    if (armed && running && input >= 47) {
+        /* 喂入已知步长（0.5µs 单位）⇒ e_com_time/e_rpm 遥测算得对，也避免 600000/0 除零 */
+        commutation_interval = (uint32_t)ol_step_div * 100;
+        if (++ol_ticks >= ol_step_div) {
+            ol_ticks = 0;
+            commutate(); /* ★ 本模式下唯一的换相入口，与 BEMF 无关 */
+            ol_steps++;
+        }
+    } else {
+        ol_ticks = 0;
+        if (running && input < 47) { /* 油门回 0 ⇒ 停机 */
+            allOff();
+            running = 0;
+        }
+    }
+}
+#endif
 
 void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
@@ -1417,7 +1464,7 @@ void tenKhzRoutine()
 
     if (!stepper_sine) {
 #ifndef CUSTOM_RAMP
-        if (old_routine && running) {
+        if (!RM2027_OL_ARM_ONLY && old_routine && running) {
 	//				send_LED_RGB(255, 0, 0);
             maskPhaseInterrupts();
             getBemfState();
@@ -1435,6 +1482,9 @@ void tenKhzRoutine()
                 }
             }
         }
+#endif
+#if RM2027_OL_ARM_ONLY
+        olStepTick(); /* ★ 开环调试：本函数独占换相，上面的 BEMF 轮询换相已关掉 */
 #endif
         if (one_khz_loop_counter > PID_LOOP_DIVIDER) { // 1khz PID loop
             PROCESS_ADC_FLAG = 1; // set flag to do new adc read at lower priority
@@ -1634,6 +1684,9 @@ void advanceincrement()
 
 void zcfoundroutine()
 { // only used in polling mode, blocking routine.
+#if RM2027_OL_ARM_ONLY
+    return; /* 开环调试：此路径不参与换相（双保险，防止别处调用它换相） */
+#endif
     thiszctime = INTERVAL_TIMER_COUNT;
     SET_INTERVAL_TIMER_COUNT(0);
     commutation_interval = (thiszctime + (3 * commutation_interval)) / 4;
@@ -1939,6 +1992,26 @@ int main(void)
   startup_max_duty_cycle = startup_max_duty_cycle + 400;
 #endif
 
+#if RM2027_OL_ARM_ONLY
+    /* ★ 开环调试：把本模式依赖的外部状态在 RAM 里钉成确定值（不写回 EEPROM）。
+     *   起因：本板 EEPROM 从第 17 字节起是 0xFF 擦除态 —— motor_poles、limits.current、
+     *   input_type、stuck_rotor_protection 等都是垃圾值，不能指望它。 */
+    eepromBuffer.bi_direction = 0;           /* 输入映射走最朴素的那一条 */
+    eepromBuffer.use_sine_start = 0;         /* 正弦启动会跟六步抢时序 */
+    eepromBuffer.stall_protection = 0;       /* 失速 PID 会按 commutation_interval 猛加占空比 */
+    eepromBuffer.stuck_rotor_protection = 0; /* 堵转保护会 allOff + 清零油门 */
+    eepromBuffer.low_voltage_cut_off = 0;    /* 台架电源偏低时别被低压保护停掉 */
+    eepromBuffer.variable_pwm = 0;           /* 否则 tim1_arr 随转速跳变、PWM 频率乱变 */
+    eepromBuffer.brake_on_zero_throttle = 0;
+    eepromBuffer.brake_on_stop = 0;
+    minimum_duty_cycle = 0;                  /* 清掉 eeprom / dead_time_override 留下的占空比地板 */
+    min_startup_duty = 0;                    /* 起步不要额外"踢一脚" */
+    startup_max_duty_cycle = 400;
+    tim1_arr = TIMER1_MAX_ARR;
+    old_routine = 1;                         /* 保持"非闭环"态 ⇒ 不会走 startMotor() */
+    zero_crosses = 0;
+#endif
+
     while (1) {
 e_com_time = ((commutation_intervals[0] + commutation_intervals[1] + commutation_intervals[2] + commutation_intervals[3] + commutation_intervals[4] + commutation_intervals[5]) + 4) >> 1; // COMMUTATION INTERVAL IS 0.5US INCREMENTS 
 
@@ -2069,7 +2142,7 @@ if(zero_crosses < 5){
         }
 #endif
         average_interval = e_com_time / 3;
-        if (desync_check && zero_crosses > 10) {
+        if (!RM2027_OL_ARM_ONLY && desync_check && zero_crosses > 10) {
             if ((getAbsDif(last_average_interval, average_interval) > average_interval >> 1) && (average_interval < 2000)) { // throttle resitricted before zc 20.
                 zero_crosses = 0;
                 desync_happened++;
@@ -2278,7 +2351,7 @@ if(zero_crosses < 5){
                 }
             }
 #endif
-            if (INTERVAL_TIMER_COUNT > 45000) {
+            if (!RM2027_OL_ARM_ONLY && INTERVAL_TIMER_COUNT > 45000) {
               zero_throttle_brake_active = 0;   // reset zero throttle brake on back emf timeout (rotation stop)
               if(running){
                 bemf_timeout_happened++;

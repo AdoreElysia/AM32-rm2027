@@ -2553,6 +2553,17 @@
 
 #ifdef RM2027_ESC_G071
 #define FILE_NAME "RM2027_ESC_G071"
+
+/* ★★ 强制开环 + DShot 仅解锁（台架调试模式，分支 1006-g071-openloop-arm-only）
+ *   目的：把【换相编排 + 门极/驱动链】与【无感过零判据】解耦，单独验证前者。
+ *         换相时刻由固定步频决定（tenKhzRoutine() 里的 olStepTick），BEMF 完全不参与；
+ *         DShot 只负责解锁与启停，油门数值不参与调速。
+ *   参数：ol_step_div / ol_input / ol_ticks / ol_steps，都是 RAM 全局，可在线改。
+ *         步频 = 20000/ol_step_div Hz；erpm = 200000/ol_step_div；
+ *         机械转速 = 200000/(ol_step_div × 极对数)。
+ *   退出：把 1 改成 0 重新编译即回到完整无感闭环，闭环代码未改动。
+ *   注意：本板 EEPROM 从第 17 字节起是 0xFF 擦除态，本模式在 main() 里把依赖项钉成确定值。 */
+#define RM2027_OL_ARM_ONLY 1
 #define FIRMWARE_NAME "RM2027 ESC "
 #define DEAD_TIME 60
 #define MILLIVOLT_PER_AMP 60          /* 3mΩ × 20V/V = 60 mV/A */
