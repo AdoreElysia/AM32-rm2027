@@ -4207,10 +4207,15 @@
 
 #ifdef HARDWARE_GROUP_G0_RM2027
 /* RM2027 自研电调板 —— STM32G071GBU6N + FD6288Q + INA240A1
- * 引脚依据：references/硬件手册/ESC_电调板_原理图_2026-09-24.pdf（已逐行核对 + 手册交叉验证）
+ * 引脚依据：references/硬件手册/ESC_电调板_原理图_2026-09-24.pdf
  * 本组 = AM32 原生 HARDWARE_GROUP_G0_K，仅一处不同：
  *   ① DShot 输入 : PB4 -> PA6 （同为 TIM3_CH1）
- */
+ *
+ * ★★ 不要按原理图把 PHASE_A_GPIO_LOW 改成 PB15 ★★
+ *   2026-09-24 版原理图把 A 相下管（U2 FD6288Q 的 LIN1）画在 PB15，与实际芯片封装不符
+ *   （原理图有误）。实物 A_LIN 接的是 PB1 —— 也就是原生 G0_K 的值，同样是 TIM1_CH3N。
+ *   按原理图改成 PB15 会让 A 相下管没有驱动（PB15 在板上悬空），六步换相缺步骤，
+ *   2026-10-06 已在实物上确认。 */
 #define MCU_G071
 #define USE_TIMER_3_CHANNEL_1
 #define INPUT_PIN LL_GPIO_PIN_6
