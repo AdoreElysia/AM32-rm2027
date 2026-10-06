@@ -4197,9 +4197,8 @@
 #ifdef HARDWARE_GROUP_G0_RM2027
 /* RM2027 自研电调板 —— STM32G071GBU6N + FD6288Q + INA240A1
  * 引脚依据：references/硬件手册/ESC_电调板_原理图_2026-09-24.pdf（已逐行核对 + 手册交叉验证）
- * 本组 = AM32 原生 HARDWARE_GROUP_G0_K，仅两处不同：
- *   ① PHASE_A_LOW: PB1 -> PB15（本板 TIM1_CH3N 走 PB15）
- *   ② DShot 输入 : PB4 -> PA6 （同为 TIM3_CH1）
+ * 本组 = AM32 原生 HARDWARE_GROUP_G0_K，仅一处不同：
+ *   ① DShot 输入 : PB4 -> PA6 （同为 TIM3_CH1）
  */
 #define MCU_G071
 #define USE_TIMER_3_CHANNEL_1
@@ -4224,7 +4223,7 @@
 #define PHASE_B_GPIO_HIGH LL_GPIO_PIN_9
 #define PHASE_B_GPIO_PORT_HIGH GPIOA
 
-#define PHASE_A_GPIO_LOW  LL_GPIO_PIN_15
+#define PHASE_A_GPIO_LOW  LL_GPIO_PIN_1
 #define PHASE_A_GPIO_PORT_LOW  GPIOB
 #define PHASE_A_GPIO_HIGH LL_GPIO_PIN_10
 #define PHASE_A_GPIO_PORT_HIGH GPIOA
