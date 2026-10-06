@@ -189,6 +189,9 @@ void adc_bemf_watchdog_for_phase(void)
  *   这里映射成 AWD 中断的关/开（顺带清标志，避免打断风暴）。 */
 void enableCompInterrupts(void)
 {
+#ifdef RM2027_FORCE_OPENLOOP
+    return;                  /* 开环模式：不使能 AWD 中断（换相由 10kHz 任务独占） */
+#endif
     LL_ADC_ClearFlag_AWD1(ADC1);
     LL_ADC_EnableIT_AWD1(ADC1);
 }

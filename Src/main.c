@@ -944,6 +944,9 @@ void PeriodElapsedCallback()
  */
 void interruptRoutine()
 {
+#ifdef RM2027_FORCE_OPENLOOP
+    return;                  /* 开环模式：过零中断路径不参与换相 */
+#endif
     /* 注：真正的换相打点在 commutate()（轮询/中断两条路径都经过它），
      * 这里不再重复记录，免得一次换相记两条。 */
 //   if (average_interval > 125) {
@@ -1354,11 +1357,61 @@ if (!stepper_sine && armed) {
 #endif
 }
 
+
+/* ==================== RM2027 强制开环任务 ==================== */
+#ifdef RM2027_FORCE_OPENLOOP
+/* 参数都放在 RAM 全局里：可在调试器里改，也可以改这里的默认值重编译 */
+uint16_t force_ol_duty       = 400;   /* 固定占空比（TIM1 计数，ARR≈2665 ⇒ 约 15%） */
+uint16_t force_ol_step_ticks = 400;   /* 当前"每步"的 10kHz 拍数（400 拍 = 40ms/步） */
+uint16_t force_ol_min_ticks  = 40;    /* ramp 目标：40 拍 = 4ms/步（约 42 电步/s） */
+uint32_t force_ol_ramp_steps = 300;   /* 用多少步把速度提到目标 */
+uint32_t force_ol_steps      = 0;     /* 已走的步数（观测用） */
+uint16_t force_ol_ticks      = 0;
+
+void forceOpenloopTask(void)          /* 由 10kHz 循环每 100µs 调一次 */
+{
+    if (!armed || adjusted_input < 48) {   /* 没解锁、或油门还没给 ⇒ 完全不动 */
+        return;
+    }
+
+    if (running == 0) {               /* 解锁且油门到位后，由本任务自己起步 */
+        running = 1;
+        old_routine = 0;
+        eepromBuffer.use_sine_start = 0;   /* 不要正弦启动（本模式自己拖） */
+        eepromBuffer.stall_protection = 0;  /* 不要失速重启（会强设 step=5 扰乱时序） */
+        eepromBuffer.rc_car_reverse = 0;
+        prop_brake_active = 0;
+        force_ol_steps = 0;
+        force_ol_ticks = 0;
+        force_ol_step_ticks = 400;
+        commutate();                  /* 第一步 */
+        return;
+    }
+
+    duty_cycle_setpoint = force_ol_duty;      /* 占空比固定，不跟油门 */
+
+    if (++force_ol_ticks < force_ol_step_ticks) {
+        return;
+    }
+    force_ol_ticks = 0;
+
+    commutate();                      /* ★ 不看过零，直接走下一步 */
+    force_ol_steps++;
+
+    if ((force_ol_steps < force_ol_ramp_steps) && (force_ol_step_ticks > force_ol_min_ticks)) {
+        force_ol_step_ticks--;        /* 逐步加速（开环 ramp） */
+    }
+}
+#endif
+
 void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
     duty_cycle = duty_cycle_setpoint;
     tenkhzcounter++;
     dbg_trace_tenkhz();     /* 黑匣子：记录时间拍（用来算 ADC 实际采样率） */
+#ifdef RM2027_FORCE_OPENLOOP
+    forceOpenloopTask();    /* ★ 强制开环：本任务独占换相，过零路径被下方短路 */
+#endif
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
@@ -1639,6 +1692,9 @@ void advanceincrement()
 
 void zcfoundroutine()
 { // only used in polling mode, blocking routine.
+#ifdef RM2027_FORCE_OPENLOOP
+    return;                  /* 开环模式：换相由 forceOpenloopTask 独占，过零不参与 */
+#endif
     dbg_trace_zerocross();   /* 黑匣子：记录一次过零（轮询模式路径） */
     thiszctime = INTERVAL_TIMER_COUNT;
     SET_INTERVAL_TIMER_COUNT(0);

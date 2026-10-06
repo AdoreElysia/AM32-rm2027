@@ -2553,6 +2553,15 @@
 
 #ifdef RM2027_ESC_G071
 #define FILE_NAME "RM2027_ESC_G071"
+
+/* ★★ 强制开环调试模式（2026-10-06，分支 rm2027-force-openloop）
+ *   作用：完全绕开 BEMF 过零判据、正弦启动、失步重启，用**固定六步时序**从慢到快
+ *         把电机硬拖起来。用来验证：
+ *           · 换相编排（每相应连续 2 步上管 PWM / 2 步下管常通 / 2 步悬空）
+ *           · 门极→FD6288Q→MOS 的驱动链、相序、正反转
+ *   验证完把这一行注释掉，即回到正常闭环（走 BEMF 过零）。
+ *   油门仍按正常流程：先发 0 让电调解锁，再给油门即开始 ramp。 */
+#define RM2027_FORCE_OPENLOOP
 #define FIRMWARE_NAME "RM2027 ESC "
 #define DEAD_TIME 60
 #define MILLIVOLT_PER_AMP 60          /* 3mΩ × 20V/V = 60 mV/A */
