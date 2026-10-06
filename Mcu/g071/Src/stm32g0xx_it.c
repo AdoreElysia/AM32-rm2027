@@ -31,6 +31,7 @@
 #include "targets.h"
 #include "comparator.h"
 #include "common.h"
+#include "dbg_trace.h"      /* RAM 黑匣子（在线调试用，见 Inc/dbg_trace.h） */
 
 /* USER CODE END Includes */
 
@@ -236,6 +237,23 @@ void DMA1_Channel2_3_IRQHandler(void)
  */
 void ADC1_COMP_IRQHandler(void)
 {
+  /* ★ 2026-10-06 新增：软件过零（ADC-BEMF）的**唯一触发源**就是 ADC 的模拟看门狗。
+   *   原来这里只处理 EXTI 17/18（比较器路径），而本板根本没用比较器
+   *   （USE_ADC_BEMF 把 comparator.c 整段排除了）⇒ AWD 标志永远没人清
+   *   ⇒ 中断反复重入（打断风暴），且过零事件从不触发换相。
+   *   这里放在最前面：清标志 → 计时门控（沿用 AM32 的"太早丢弃"保护）→ 换相。 */
+  if (LL_ADC_IsActiveFlag_AWD1(ADC1)) {
+    LL_ADC_ClearFlag_AWD1(ADC1);          /* 必须先清，否则同一事件反复进中断 */
+    dbg_trace_awd_irq();
+
+    if ((INTERVAL_TIMER->CNT) > (average_interval >> 1)) {
+      interruptRoutine();
+    } else {
+      dbg_trace_too_early();              /* 太早的过零：丢弃（等真正的过零） */
+    }
+    return;
+  }
+
   if (LL_EXTI_IsActiveFallingFlag_0_31(LL_EXTI_LINE_18)) {
     if((INTERVAL_TIMER->CNT) > (average_interval >> 1)){
       LL_EXTI_ClearFallingFlag_0_31(LL_EXTI_LINE_18);

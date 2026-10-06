@@ -11,6 +11,7 @@
 
 #include "serial_telemetry.h"
 #include "targets.h"
+#include "dbg_trace.h"
 
 #ifdef USE_LED_STRIP
 #include "WS2812.h"
@@ -326,6 +327,13 @@ void MX_TIM1_Init(void)
     TIM_OC_InitStruct.OCNState = LL_TIM_OCSTATE_DISABLE;
     LL_TIM_OC_Init(TIM1, LL_TIM_CHANNEL_CH4, &TIM_OC_InitStruct);
     LL_TIM_OC_DisableFast(TIM1, LL_TIM_CHANNEL_CH4);
+    /* ★ 2026-10-06：CH4 兼作【ADC 采样触发基准】。
+     *   PWM 是向上计数 + PWM1 ⇒ on-time = [0, CCRx]，off-time = [CCRx, ARR]，
+     *   所以安全采样点靠近周期末尾。把 CH4 极性取反 ⇒ OC4REF 在 CNT>=CCR4 时为高
+     *   ⇒ 它的【上升沿】正好落在 CNT=CCR4（off-time 里）⇒ 用它触发 ADC ✓
+     *   （极性取反只影响 OC4REF，不影响别的通道；CC4E 本来就是关的，不驱动引脚。）*/
+    LL_TIM_OC_SetPolarity(TIM1, LL_TIM_CHANNEL_CH4, LL_TIM_OCPOLARITY_LOW);
+    LL_TIM_SetTriggerOutput2(TIM1, LL_TIM_TRGO2_OC4);
 
     LL_TIM_OC_EnablePreload(TIM1, LL_TIM_CHANNEL_CH5);
     TIM_OC_InitStruct.OCState = LL_TIM_OCSTATE_DISABLE;
@@ -333,7 +341,10 @@ void MX_TIM1_Init(void)
     LL_TIM_OC_Init(TIM1, LL_TIM_CHANNEL_CH5, &TIM_OC_InitStruct);
     LL_TIM_OC_DisableFast(TIM1, LL_TIM_CHANNEL_CH5);
 
-    LL_TIM_SetTriggerOutput(TIM1, LL_TIM_TRGO_RESET);
+    /* ★ 2026-10-06：TRGO(1) 从 RESET 改成 OC4REF —— ADC 的外部触发源指向 TIM1_TRGO，
+     *   而 TRGO 源必须是 OC4REF（= CH4 比较事件 = 我们挑的 off-time 采样点），
+     *   原来 MMS=RESET(=000) 根本不会产生触发 ⇒ ADC 一次都不转换。 */
+    LL_TIM_SetTriggerOutput(TIM1, LL_TIM_TRGO_OC4REF);
     LL_TIM_SetTriggerOutput2(TIM1, LL_TIM_TRGO2_RESET);
     LL_TIM_DisableMasterSlaveMode(TIM1);
     TIM_BDTRInitStruct.OSSRState = LL_TIM_OSSR_DISABLE;
@@ -743,7 +754,11 @@ void enableCorePeripherals()
 #endif
     LL_TIM_CC_EnableChannel(TIM1,
         LL_TIM_CHANNEL_CH4); // timer used for timing adc read
-    TIM1->CCR4 = 100; // set in 10khz loop to match pwm cycle timed to end of pwm on
+    /* ★ ADC 采样点（TIM1 计数，0.94 µs/tick @64MHz 的计数率… 实为 1/64MHz）：
+     *   放在周期末尾前 500 tick ≈ 7.8 µs，落在 off-time 内；
+     *   BEMF 四个通道排在最前（见 ADC.c），它们的孔径时刻都在 off-time 里。
+     *   在线扫点：调试器写 TIM1->CCR4 (0x40012C40) 即可，不必重编。 */
+    TIM1->CCR4 = (uint16_t)(TIM1_AUTORELOAD - 700u);   /* 采样整体提前：BEMF 排在序列第 4~7 位，需留出它们的时间 */
 
     /* Enable counter */
     LL_TIM_EnableCounter(TIM1);
@@ -786,6 +801,7 @@ void enableCorePeripherals()
     ADC_Init();
     enableADC_DMA();
     activateADC();
+    dbg_trace_init();   /* RAM 黑匣子：打开记录（默认 enable=1，调试器可随时改 0 冻结） */
 #endif
 
 #ifndef MCU_F031

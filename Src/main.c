@@ -230,6 +230,7 @@ an settings option)
 #include "signal.h"
 #include "sounds.h"
 #include "targets.h"
+#include "dbg_trace.h"      /* RAM 黑匣子（在线调试用，见 Inc/dbg_trace.h） */
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
@@ -870,6 +871,7 @@ void getBemfState()
 
 void commutate()
 {
+    dbg_trace_commutation((uint8_t)step);   /* 黑匣子：真正的换相点（两类路径共用这里） */
     if (forward == 1) {
         step++;
         if (step > 6) {
@@ -942,6 +944,8 @@ void PeriodElapsedCallback()
  */
 void interruptRoutine()
 {
+    /* 注：真正的换相打点在 commutate()（轮询/中断两条路径都经过它），
+     * 这里不再重复记录，免得一次换相记两条。 */
 //   if (average_interval > 125) {
 //        if ((INTERVAL_TIMER_COUNT < 125) && (duty_cycle < 600) && (zero_crosses < 500)) { // should be impossible, desync?exit anyway
 //           return;
@@ -1354,6 +1358,7 @@ void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
     duty_cycle = duty_cycle_setpoint;
     tenkhzcounter++;
+    dbg_trace_tenkhz();     /* 黑匣子：记录时间拍（用来算 ADC 实际采样率） */
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
@@ -1634,6 +1639,7 @@ void advanceincrement()
 
 void zcfoundroutine()
 { // only used in polling mode, blocking routine.
+    dbg_trace_zerocross();   /* 黑匣子：记录一次过零（轮询模式路径） */
     thiszctime = INTERVAL_TIMER_COUNT;
     SET_INTERVAL_TIMER_COUNT(0);
     commutation_interval = (thiszctime + (3 * commutation_interval)) / 4;
