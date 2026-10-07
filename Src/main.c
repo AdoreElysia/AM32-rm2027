@@ -529,6 +529,14 @@ uint16_t ol_trip_ticks = 400;      /* 连续多少拍（20kHz ⇒ 400 = 20ms）�
 uint16_t ol_trip_count = 0;        /* 观测用：当前连续超限计数 */
 uint32_t ol_trips = 0;             /* 观测用：累计跳闸次数 */
 uint32_t ol_iphase_last = 0;       /* 观测用：最近一次反推出来的相电流（厘安，1 = 10mA） */
+
+/* ---- 运行时间上限：到点自动停机 ----
+ * 开环模式下所有保护（失速/堵转/失步）都失效，最坏情况是"忘了关"或"转子卡住还一直通电"。
+ * 这里给一次运行设个硬上限：进入驱动就开始累加（含对齐/斜坡/恒速），到点按跳闸同样的方式
+ * allOff + 锁存停机 ⇒ 不可能一直转下去。默认 3 秒。设 0 = 不限制。 */
+uint32_t ol_run_limit = 60000;     /* 20kHz 拍 ⇒ 60000 = 3.0 秒；0 = 不限制 */
+uint32_t ol_run_ticks = 0;         /* 本次已驱动的拍数 */
+uint32_t ol_timeouts = 0;          /* 观测用：因到时间上限而自动停机的次数 */
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1447,6 +1455,18 @@ static void olStepTick(void)
             ol_trip_count = 0;
         }
 
+        /* ---- 运行时间上限：到点自动停机（防止"忘了关"或"转子卡住还一直通电"）---- */
+        if (ol_run_limit > 0 && ++ol_run_ticks >= ol_run_limit) {
+            allOff();
+            running = 0;
+            ol_state = 0;
+            ol_input_cur = 0; /* 与跳闸同样锁存：要再跑必须重新解锁 */
+            ol_step_div_cur = ol_step_div;
+            ol_run_ticks = 0;
+            ol_timeouts++;
+            return;
+        }
+
         switch (ol_state) {
         case 0: /* 解锁：复位步序 → 对齐 */
             step = 1;
@@ -1511,6 +1531,7 @@ static void olStepTick(void)
         commutation_interval = (uint32_t)ol_step_div_cur * 100;
     } else {
         ol_ticks = 0;
+        ol_run_ticks = 0; /* 不在驱动 ⇒ 运行计时清零 */
         if (running && input < 47) { /* 油门回 0 ⇒ 停机，并复位起步序列 */
             allOff();
             running = 0;
@@ -2226,7 +2247,9 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
-                NVIC_SystemReset();
+#ifndef RM2027_OL_ARM_ONLY
+                NVIC_SystemReset(); /* 开环台架模式不复位：见下方 2 秒分支的说明 */
+#endif
             }
             if (signaltimeout > LOOP_FREQUENCY_HZ << 1) { // 2 second when not armed
                 allOff();
@@ -2239,7 +2262,16 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
+#ifndef RM2027_OL_ARM_ONLY
+                /* ★ 开环台架模式：信号丢失时只"停机 + 上锁"（上面已经做了 allOff/armed=0），
+                 *   不清零、不复位 MCU。原因：
+                 *   ① 复位会把 .data 段恢复成默认值 ⇒ 靠调试器预置的 RAM 参数每约 2 秒被冲掉，
+                 *      台架调试根本没法进行；
+                 *   ② 每次复位都会重新开机"嘀"一声，还会瞬间拉一下低边门极。
+                 *   注意：上锁（armed=0 ⇒ 绿灯灭）和 allOff() 都保留，所以"停 F1 就锁住"
+                 *   这个用法照旧有效，只是不再复位。 */
                 NVIC_SystemReset();
+#endif
             }
         }
 #ifdef USE_CUSTOM_LED
