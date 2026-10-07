@@ -2005,6 +2005,15 @@ int main(void)
     loadEEpromSettings();
 #endif
 
+    /* ★★ 上电就把六路门极显式关成"断开(coast)" —— 别依赖引脚的上电默认状态 ★★
+     * 为什么必须显式做：本板三路低边接的是 TIM1 的【互补输出】(PA7=CH1N / PB0=CH2N /
+     * PB1=CH3N)，而互补输出在 CCR=0 时电平是【高】⇒ 若不显式关闭，上电后低边 MOS
+     * 会一直通着（2026-10-07 实测：停机态 C 相下管引脚 100% 高、C 相被短到地），
+     * 用户一给母线电就听到持续啸叫；把六路门极强制成 GPIO 输出低后声音立刻消失。
+     * allOff() 会把三相都设成"高边关 + 低边关 + 引脚 GPIO 输出低"。
+     * 注：这一条也让"停机≠刹车"成为确定状态（本模式 brake_on_stop/brake_on_zero_throttle 都是 0）。 */
+    allOff();
+
     if (VERSION_MAJOR != eepromBuffer.version.major || VERSION_MINOR != eepromBuffer.version.minor || EEPROM_VERSION > eepromBuffer.eeprom_version) {
         eepromBuffer.version.major = VERSION_MAJOR;
         eepromBuffer.version.minor = VERSION_MINOR;
