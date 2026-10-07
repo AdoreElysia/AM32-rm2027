@@ -495,6 +495,8 @@ uint32_t ol_iphase_last = 0;                /* 观测：最近反推出来的相
 uint32_t ol_run_ticks = 0;                  /* 本次已驱动的拍数 */
 uint32_t ol_timeouts = 0;                   /* 观测：到时间上限自动停机的次数 */
 volatile uint8_t ol_led_off_req = 0;        /* 请求切"待命红"（WS2812 阻塞操作，交主循环执行）*/
+volatile uint8_t ol_led_on_req = 0;         /* 请求切"运行绿"：每次起步点一次（见 olStepTick）——
+                                             * 否则第一轮跑完变红后，之后每轮都会一直亮红灯 */
 volatile uint8_t ol_stop_reason = 0;        /* 0 无 / 1 到时间上限 / 2 过流跳闸 */
 uint32_t ol_cool_ticks = 0;                 /* 冷却已过的拍数 */
 #endif
@@ -1453,6 +1455,11 @@ static void olStepTick(void)
             /* 解锁后的第一拍：复位步序、门极钉住做"对齐"、把期望间隔设成对齐时长 */
             step = 1;
             comStep(1);
+            /* ★ 起步就请求点绿灯（主循环执行）。为什么"每次起步"都要点，而不是只在
+             *   "解锁序列"里点一次：停机/跳闸都会把灯设成暗红（见下方 ol_led_off_req），
+             *   而绿灯只在主循环的解锁序列里点过一次 ⇒ 第一轮跑完变红之后，后面每一轮
+             *   重跑都会一直亮红灯（2026-10-07 用户实测："转电机的时候 led 还是红灯"）。 */
+            ol_led_on_req = 1;
             ol_input_cur = OL_INPUT_START;
             ol_step_div_cur = (OL_STEP_DIV_START > OL_STEP_DIV) ? OL_STEP_DIV_START : OL_STEP_DIV;
             commutation_interval = (uint32_t)OL_ALIGN_TICKS * 100;   /* 0.5µs 单位 ⇒ 200ms */
@@ -1500,6 +1507,7 @@ static void olStepTick(void)
             ol_state = 0;
             ol_input_cur = OL_INPUT_RUN;
             ol_step_div_cur = OL_STEP_DIV;
+            ol_led_off_req = 1; /* 停机 ⇒ 点"待命红"（与跳闸/超时两条停机路径一致） */
         }
         /* 锁存解除条件之一：① !armed（彻底上锁）② newinput < 48（原始油门回到 0）。
          * 两者都成立时说明是"人为上锁/收油门"，可以恢复。
@@ -2261,9 +2269,15 @@ if(zero_crosses < 5){
             }
         }
 #ifdef RM2027_OL_ARM_ONLY
-        /* 跳闸/超时停机时请求的灭灯，在这里真正执行。
+        /* 起步/停机请求的灯色，在这里真正执行。
          * 为什么不在 olStepTick() 里直接调：WS2812 是阻塞位操作（约 30µs），
          * 而 olStepTick 跑在 20kHz（周期 50µs）的 TIM6 中断里，会打乱时序。 */
+        if (ol_led_on_req) {
+            ol_led_on_req = 0;
+#ifdef USE_LED_STRIP
+            send_LED_RGB(0, 255, 0); /* 绿 = 正在驱动（与解锁序列里那次绿灯同一约定） */
+#endif
+        }
         if (ol_led_off_req) {
             ol_led_off_req = 0;
 #ifdef USE_LED_STRIP
