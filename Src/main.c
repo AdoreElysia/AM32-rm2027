@@ -2183,12 +2183,11 @@ int main(void)
     eepromBuffer.comp_pwm = 0;
     temp_comp_pwm = 0;
     minimum_duty_cycle = 0;                  /* 清掉 eeprom / dead_time_override 留下的占空比地板 */
-    min_startup_duty = 350;                  /* ★ 闭环起步要"踢一脚"：0 是开环台架时钉的
-                                              * （开环的起步油门由 OL_INPUT_START 给），
-                                              * 闭环走的是 AM32 原生 startMotor() ⇒ 起步占空比
-                                              * 由 min_startup_duty 决定。这颗 9N12P 齿槽每 10°
-                                              * 一格、六步每步也是 10° ⇒ 不给足扭矩翻不过坡
-                                              * （用户实测：起三次才起来）。350 ≈ 17.6%。 */
+    min_startup_duty = 0;                    /* ★ 2026-10-07 撤回 350：用户实测"插着 ST-Link
+                                              * 母线被拉塌、拔掉正常"，而开环版（已知良性）里
+                                              * 唯一与之前"母线稳 12V"那批会话不同的、行为性的
+                                              * 改动就是这一行 ⇒ 先撤回到 0，把变量逐个排除。
+                                              * （闭环要用时再加回 350 并单独验证。）*/
     startup_max_duty_cycle = 400;
     tim1_arr = TIMER1_MAX_ARR;
     old_routine = 1;                         /* 保持"非闭环"态 ⇒ 不会走 startMotor() */
