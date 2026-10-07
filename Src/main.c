@@ -481,117 +481,23 @@ uint8_t advancedivisor = 6;
 volatile char rising = 1;
 
 #if RM2027_OL_ARM_ONLY
-/* RM2027 强制开环参数（RAM 全局，可用调试器在线改，不必重烧）
- * 步频 = 20000/ol_step_div Hz；erpm = 200000/ol_step_div；
- * 机械转速 = 200000/(ol_step_div × 极对数)。 */
-uint16_t ol_step_div = 9;    /* 20kHz 拍数/步：9 ⇒ 2222 步/秒 ⇒ erpm=200000/9 ⇒ 6 极对约 3700 RPM
-                              * ★ 2026-10-07 实测天花板：3030RPM（步长11）稳定运行 ✓；4760RPM（步长7）
-                              *   升到最后丢步、停在原地 ✗ ⇒ 开环能带动约 3000~4000RPM，就到此为止了。
-                              *   原因：开环是"按秒表硬推"，没有提前角、不看转子、不适应负载；真实电调
-                              *   能上几万转靠的是【提前角 + 闭环 BEMF 反馈】⇒ 该转闭环了。
-                              * 原注释（4760 那版）：
-                              * ★ 原则：目标转速必须明显低于"该占空比下的空载转速"，否则扭矩不够会丢步。
-                              *   空载转速 = 占空比 × 母线电压 × KV；17.6% × 12V × 4600KV ≈ 9700RPM ⇒ 定 5000
-                              *   有充足余量。原注释（167RPM 那版）：
-                              * ★ 2026-10-07 用户判断「开环频率没设对」——对的。167RPM 时反电动势只有 36mV
-                              *   （相对给出的 2.1V 可忽略）⇒ 电机就是个电阻，给多少电压就烧多少热，这是
-                              *   "转速小、全变热"的根因。反电动势 ∝ 转速 ⇒ 提速反而省电降温；而且约 900RPM
-                              *   以上转子动量就足以越过齿槽坡，不必再靠大电流硬翻。 */
-uint16_t ol_input = 400;     /* 恒速维持「油门」：17.6%（5000RPM 时反电动势 1.09V、给出 2.11V ⇒ 约 1.7A
-                              * ⇒ 维持发热仅约 1.7W，而 167RPM 那版同样的占空比要 7.4W）
-                              * ★ 实测记录（2026-10-07）：
-                              *   250（10.2%，2.0A ≈ 4.2mN·m）⇒ 【来回震荡、不转】
-                              *   400（17.6%，3.5A ≈ 7mN·m）⇒ 能转但严重丢步（3 秒只转 1.3 圈而磁场转 6.9 圈）
-                              * ★ 根因（用户手感反馈定位）：手转转子【没有摩擦涩感】，但【磁吸格感偏大】。
-                              *   这颗 9 槽 12 极电机的齿槽 = LCM(9,12) = 36 格/圈 ⇒ 每 10° 一格，
-                              *   而六步换相每步恰好也是 10° ⇒【每一步都要翻过一个齿槽坡】；
-                              *   电流不够翻坡 ⇒ 就原地来回摇。
-                              *   ⇒ 解法不是"一直大电流"（低速无反电动势，全变热），而是【起步踢一脚】：
-                              *     对齐+斜坡用 ol_start_input（大电流翻坡），转起来后降到本值维持
-                              *     —— 因为齿槽转矩在一圈内平均为零，维持只需克服摩擦（约 1mN·m）。 */
-uint16_t ol_ticks = 0;       /* 当前这一步已经过的拍数 */
-uint32_t ol_steps = 0;       /* 观测用：累计换相步数 */
-uint16_t ol_step_current[6]; /* 观测用：六步各自的反推相电流（索引 = step-1，单位厘安）
-                              * 用途：某一步读数明显偏低或为 0 ⇒ 那一对门极里有一路是死的。
-                              * 六步各用一对门极：1=A上B下 2=C上B下 3=C上A下 4=B上A下 5=B上C下 6=A上C下。
-                              * 需要电机通电、且低速/堵转时读数才明显。 */
-
-/* ---- 起步序列：对齐 → 斜坡 → 恒速 ----
- * 起因：ol_step_div 是常量 ⇒ 解锁瞬间就把换相节奏跳到目标值（100Hz/167RPM），
- *       而转子初始位置随机、又没有预定位，只能"追"这个已经在按目标节奏跳动的磁场
- *       ⇒ 起步抖动、偶尔失步；且 step 不复位，每次起步落在六步表哪一步都不同。
- * 四个阶段由 ol_state 串起来，全部在 olStepTick() 里推进：
- *   0 空闲（未解锁 / 已停机）  1 对齐   2 斜坡   3 恒速（= 改动前的行为）
- * 想退回"没有起步序列"的老行为：把 ol_align_ticks 和 ol_step_div_start 都设为 0 即可。 */
-uint8_t  ol_state = 0;             /* 见上 */
-uint16_t ol_align_ticks = 4000;    /* 对齐保持时间：20kHz 拍 ⇒ 4000 = 200ms；0 = 跳过对齐 */
-uint16_t ol_step_div_start = 4000; /* 斜坡起始步长：4000 拍 = 200ms/步（50erpm ⇒ 8.3 机械 RPM）；0 = 跳过斜坡
-                                    * ★ 2026-10-07 实测：起点 2000（16.7RPM）时转子一开始就跟不上
-                                    *   —— 3 秒只转了约 1.3 圈，而电流 3.5A 几乎全变成绕组发热。
-                                    *   所以把起点再放慢一倍。 */
-uint8_t  ol_ramp_shift = 4;        /* 每换相一次把步长缩短 1/2^shift（4 ⇒ 6.25%/步）
-                                    * 起点放慢到 4000 之后，用 4 才能让整条斜坡仍在约 3 秒内走完
-                                    * （4000 → 200 约 47 次换相、约 3.0 秒）。 */
-/* ★ 起步"踢一脚"：对齐+斜坡阶段给更大的电流，恒速再降下来维持。
- * 依据（2026-10-07 用户手感反馈）：这颗电机（9槽12极）的齿槽是 36 格/圈 = 每 10° 一格，
- *   而六步换相每步正好也是 10° ⇒ 【每一步都要翻过一个磁滞坡】。占空比 10.2%（约 4mN·m）
- *   翻不过去 ⇒ 表现就是"原地来回震荡、不转"（用户实测）。
- *   而齿槽转矩在一圈内平均为零 ⇒ 一旦转起来，维持只需要克服摩擦（约 1mN·m），
- *   所以"起步大电流 + 转起来后降下来"是最优解（真实电调的"起步踢一脚"同理）。 */
-uint16_t ol_start_input = 400;     /* 对齐+斜坡（约 3 秒）：17.6%（母线平均 0.62A < 1A ⇒ 不顶限流 ⇒ 起步不塌压）
-                                    * ★ 曾用 500（22.6%）：实测母线平均约 1A，正好顶到 1A 限流 ⇒ 电压被拉到
-                                    *   8V ⇒ 驱动变弱 ⇒ 用户反馈"起步很卡"。降到 400 即可避开。 */
-uint16_t ol_input_cur = 400;       /* 当前实际用的油门值（状态机维护）；由状态机更新 */
-uint16_t ol_step_div_cur = 200;    /* 当前实际步长（斜坡中变化）；初值同 ol_step_div */
-
-/* ---- 过流跳闸：本模式下唯一的运行保护 ----
- * 为什么必须补：AM32 的失速/堵转保护都依赖 BEMF，强制开环下全部失效；而开环恰好是
- * "转速越低电流越大"的工况（转速低 ⇒ BEMF 小 ⇒ 净电压几乎全加在绕组电阻上）。
- *
- * ★★ 关键：本板采到的是【母线平均电流】，不是【绕组相电流】★★
- *   依据：① 电流通道走软件触发（Mcu/g071/Src/ADC.c:175 TriggerSource = SOFTWARE），
- *   与 24kHz 斩波异步 ⇒ 采样点相对斩波相位的分布是随机的；② 再经 50 点滑动平均
- *   （main.c 里 numReadings = 50）⇒ 结果就是"占空比 × 相电流"的平均值。
- *   举例：占空比 5.15%、相电流 2.2A 时，这个数只有约 0.11A（差约 19 倍）。
- *   ⇒ 所以判据必须先把相电流反推出来：相电流 ≈ 母线平均电流 ÷ 占空比。
- *
- * 阈值按【真实相电流】给：本板电机（1404 级）取 8A 量级，具体上限请查电机规格。
- * 设 0 可关闭。注意这只是兜底 —— 第一道防线是【限流电源】+【降低母线电压】。 */
-uint16_t ol_trip_current = 800;    /* 相电流上限：800 = 8.0A；0 = 关闭 */
-uint16_t ol_trip_ticks = 400;      /* 连续多少拍（20kHz ⇒ 400 = 20ms）才跳闸 */
-uint16_t ol_trip_count = 0;        /* 观测用：当前连续超限计数 */
-uint32_t ol_trips = 0;             /* 观测用：累计跳闸次数 */
-uint32_t ol_iphase_last = 0;       /* 观测用：最近一次反推出来的相电流（厘安，1 = 10mA） */
-
-/* ---- 运行时间上限：到点自动停机 ----
- * 开环模式下所有保护（失速/堵转/失步）都失效，最坏情况是"忘了关"或"转子卡住还一直通电"。
- * 这里给一次运行设个硬上限：进入驱动就开始累加（含对齐/斜坡/恒速），到点按跳闸同样的方式
- * allOff + 锁存停机 ⇒ 不可能一直转下去。默认 3 秒。设 0 = 不限制。 */
-uint32_t ol_run_limit = 100000;    /* 20kHz 拍 ⇒ 100000 = 5.0 秒；0 = 不限制
-                                    * 斜坡本身约需 3 秒，要留约 2 秒恒速段才看得出"稳不稳"；
-                                    * 热上没问题：约 3.5A / 7.4W，5 秒 ≈ 37J ⇒ 绕组温升约 25℃。 */
-uint32_t ol_run_ticks = 0;         /* 本次已驱动的拍数 */
-uint32_t ol_timeouts = 0;          /* 观测用：因到时间上限而自动停机的次数 */
-volatile uint8_t ol_led_off_req = 0; /* 请求灭灯：跳闸/超时停机时在中断里置位，
-                                      * 由主循环真正执行（WS2812 是阻塞位操作 ~30µs，
-                                      * 不能在 20kHz 的 olStepTick 里做） */
-
-/* ---- 停机原因 + 冷却重跑 ----
- * ★ 2026-10-07 用户实测反馈的缺陷：到时间上限停机后，"油门回 0 才解除锁存"这个条件在用
- *   test_esc 那块 F103 测试板时【永远不成立】—— F1 是自动序列，爬到目标油门后一直保持
- *   （120），再也不会回到 0 ⇒ 锁存永远解不开，只能复位电驱板。
- * 所以把"到时间上限"的停法与"过流跳闸"的停法分开：
- *   ol_stop_reason = 1（到时间上限）⇒ 冷却 ol_cool_limit 拍后【自动解除锁存】，可以重跑；
- *   ol_stop_reason = 2（过流跳闸）  ⇒ 保持锁存，必须人为干预（油门回 0 / 彻底上锁）才恢复
- *                                    （那是故障，自动重跑会反复触发，更危险）。 */
-volatile uint8_t ol_stop_reason = 0; /* 见上 */
-uint32_t ol_cool_limit = 0;          /* 到时间上限停机后：0 = 【不自动重跑】（一次只跑一轮）；
-                                      * ★ 2026-10-07：曾设 40000（2 秒）用来解决"解不开锁"，但那样会变成
-                                      *   "跑 5 秒 → 停 2 秒 → 又跑" 无限循环 ⇒ 用户实测"转多次电机就发热"。
-                                      *   "解不开锁"的真正根因是 DShot 输入捕获 DMA 死了（见 5082696），
-                                      *   那条修好之后就不需要自动重跑了，恢复"一次一轮"最安全。原注释：
-                                      * 冷却完自动解除锁存；0 = 不自动重跑（退回"必须油门回 0"） */
-uint32_t ol_cool_ticks = 0;          /* 冷却已过的拍数 */
+/* ★ 按上游 AM32 的写法：板级/编译期配置统一放在 targets.h（见 RM2027_ESC_G071 块里的 OL_* 宏），
+ *   这里只保留【运行时状态】与【观测变量】。
+ *   起步序列（对齐 → 斜坡 → 恒速）的推进逻辑见 olStepTick()。 */
+uint16_t ol_ticks = 0;                      /* 当前这一步已经过的拍数 */
+uint32_t ol_steps = 0;                      /* 观测：累计换相步数 */
+uint16_t ol_step_current[6];                /* 观测：六步各自的反推相电流（索引 = step-1，厘安）*/
+uint8_t  ol_state = 0;                      /* 0 空闲 / 1 对齐 / 2 斜坡 / 3 恒速 */
+uint16_t ol_input_cur = OL_INPUT_RUN;       /* 当前实际用的油门刻度（状态机维护）*/
+uint16_t ol_step_div_cur = OL_STEP_DIV;     /* 当前实际步长（斜坡中变化；单位 20kHz 拍）*/
+uint16_t ol_trip_count = 0;                 /* 观测：过流连续超限计数 */
+uint32_t ol_trips = 0;                      /* 观测：累计过流跳闸次数 */
+uint32_t ol_iphase_last = 0;                /* 观测：最近反推出来的相电流（厘安）*/
+uint32_t ol_run_ticks = 0;                  /* 本次已驱动的拍数 */
+uint32_t ol_timeouts = 0;                   /* 观测：到时间上限自动停机的次数 */
+volatile uint8_t ol_led_off_req = 0;        /* 请求切"待命红"（WS2812 阻塞操作，交主循环执行）*/
+volatile uint8_t ol_stop_reason = 0;        /* 0 无 / 1 到时间上限 / 2 过流跳闸 */
+uint32_t ol_cool_ticks = 0;                 /* 冷却已过的拍数 */
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1265,7 +1171,7 @@ void setInput()
 #if RM2027_OL_ARM_ONLY
     /* ★ 油门只当启停开关：数值不参与调速。
      *   未解锁时必须保持 0 —— 解锁判据就是 adjusted_input == 0（见 tenKhzRoutine）。
-     *   用 ol_input_cur 而不是 ol_input：起步序列（对齐/斜坡）阶段要临时给更大的油门。 */
+     *   用 ol_input_cur 而不是 OL_INPUT_RUN：起步序列（对齐/斜坡）阶段要临时给更大的油门。 */
     adjusted_input = (armed && newinput >= 48) ? ol_input_cur : 0;
 #endif
 #ifndef BRUSHED_MODE
@@ -1481,27 +1387,28 @@ if (!stepper_sine && armed) {
 #if RM2027_OL_ARM_ONLY
 /* ================== RM2027 强制开环步进器（DShot 仅解锁） ==================
  * 由 tenKhzRoutine()（TIM6，20kHz）每 50µs 调用一次 —— 时间基准稳定，不受主循环抖动影响。
- * 参数（ol_step_div / ol_input / ol_ticks / ol_steps / ol_state …）定义在文件上方的全局区。
+ * 参数（OL_STEP_DIV / OL_INPUT_RUN / ol_ticks / ol_steps / ol_state …）定义在文件上方的全局区。
  *
  * 起步序列（ol_state）：0 空闲 → 1 对齐 → 2 斜坡 → 3 恒速
- *   1 对齐：不换相，门极钉在 comStep(1)，持续 ol_align_ticks 拍 —— 转子被拉到已知位置并
+ *   1 对齐：不换相，门极钉在 comStep(1)，持续 OL_ALIGN_TICKS 拍 —— 转子被拉到已知位置并
  *           停住。顺带把 step 复位成 1，所以每次起步的第一组门极都一样（波形可重复）。
- *   2 斜坡：从 ol_step_div_start 起，每换相一次把步长按 1/2^ol_ramp_shift 缩短，
- *           到 ol_step_div 转恒速。转子就不用"追"一个已按目标节奏跳动的磁场。
+ *   2 斜坡：从 OL_STEP_DIV_START 起，每换相一次把步长按 1/2^OL_RAMP_SHIFT 缩短，
+ *           到 OL_STEP_DIV 转恒速。转子就不用"追"一个已按目标节奏跳动的磁场。
  *   3 恒速：与改动前完全一致。 */
 static void olStepTick(void)
 {
     if (armed && running && input >= 47) {
         /* ---- 过流跳闸（见上方参数区说明）：先把相电流反推出来，再比阈值 ----
          * 相电流 ≈ 实测母线平均电流 ÷ 占空比；duty_cycle 是 0..2000 的口径。 */
-        if (ol_trip_current > 0 && duty_cycle > 0 && (ol_iphase_last =
-                ((uint32_t)actual_current * 2000) / (uint32_t)duty_cycle) > ol_trip_current) {
-            if (++ol_trip_count > ol_trip_ticks) {
+#if OL_TRIP_CURRENT > 0   /* 0 = 关闭过流跳闸 ⇒ 用预处理器判断（编译期常量） */
+        if (duty_cycle > 0 && (ol_iphase_last =
+                ((uint32_t)actual_current * 2000) / (uint32_t)duty_cycle) > OL_TRIP_CURRENT) {
+            if (++ol_trip_count > OL_TRIP_TICKS) {
                 allOff();
                 running = 0;
                 ol_state = 0;
                 ol_input_cur = 0; /* ★ 关键：不清零的话主循环会立刻把 running 又置 1 重启 */
-                ol_step_div_cur = ol_step_div;
+                ol_step_div_cur = OL_STEP_DIV;
                 ol_trip_count = 0;
                 ol_trips++;
                 ol_stop_reason = 2; /* 过流跳闸：保持锁存（故障，不能自动重跑） */
@@ -1511,45 +1418,48 @@ static void olStepTick(void)
         } else {
             ol_trip_count = 0;
         }
+#endif
 
         /* ---- 运行时间上限：到点自动停机（防止"忘了关"或"转子卡住还一直通电"）---- */
-        if (ol_run_limit > 0 && ++ol_run_ticks >= ol_run_limit) {
+#if OL_RUN_LIMIT > 0      /* 0 = 不限制 ⇒ 用预处理器判断 */
+        if (++ol_run_ticks >= OL_RUN_LIMIT) {
             allOff();
             running = 0;
             ol_state = 0;
             ol_input_cur = 0; /* 与跳闸同样锁存：要再跑必须重新解锁 */
-            ol_step_div_cur = ol_step_div;
+            ol_step_div_cur = OL_STEP_DIV;
             ol_run_ticks = 0;
             ol_timeouts++;
             ol_stop_reason = 1; /* 到时间上限：冷却后自动解除锁存（否则被永久锁死） */
             ol_led_off_req = 1; /* 停机 ⇒ 灭灯（主循环执行） */
             return;
         }
+#endif
 
         switch (ol_state) {
         case 0: /* 解锁：复位步序 → 对齐 */
             step = 1;
             comStep(1);
             ol_ticks = 0;
-            ol_input_cur = ol_start_input;
-            ol_step_div_cur = (ol_step_div_start > ol_step_div) ? ol_step_div_start : ol_step_div;
-            if (ol_align_ticks > 0) {
+            ol_input_cur = OL_INPUT_START;
+            ol_step_div_cur = (OL_STEP_DIV_START > OL_STEP_DIV) ? OL_STEP_DIV_START : OL_STEP_DIV;
+            if (OL_ALIGN_TICKS > 0) {
                 ol_state = 1;
-            } else if (ol_step_div_cur > ol_step_div) {
+            } else if (ol_step_div_cur > OL_STEP_DIV) {
                 ol_state = 2;
             } else {
-                ol_input_cur = ol_input;
+                ol_input_cur = OL_INPUT_RUN;
                 ol_state = 3;
             }
             break;
 
         case 1: /* 对齐保持：门极不动 */
-            if (++ol_ticks >= ol_align_ticks) {
+            if (++ol_ticks >= OL_ALIGN_TICKS) {
                 ol_ticks = 0;
-                if (ol_step_div_cur > ol_step_div) {
+                if (ol_step_div_cur > OL_STEP_DIV) {
                     ol_state = 2;
                 } else {
-                    ol_input_cur = ol_input;
+                    ol_input_cur = OL_INPUT_RUN;
                     ol_state = 3;
                 }
             }
@@ -1557,7 +1467,7 @@ static void olStepTick(void)
 
         case 2: /* 斜坡：边换相边缩短步长 */
             if (++ol_ticks >= ol_step_div_cur) {
-                uint16_t dec = (uint16_t)(ol_step_div_cur >> ol_ramp_shift);
+                uint16_t dec = (uint16_t)(ol_step_div_cur >> OL_RAMP_SHIFT);
                 ol_ticks = 0;
                 ol_step_current[step - 1] = (uint16_t)ol_iphase_last; /* 观测：本步相电流 */
                 commutate();
@@ -1565,11 +1475,11 @@ static void olStepTick(void)
                 if (dec == 0) {
                     dec = 1;
                 }
-                if ((uint32_t)ol_step_div_cur > (uint32_t)ol_step_div + dec) {
+                if ((uint32_t)ol_step_div_cur > (uint32_t)OL_STEP_DIV + dec) {
                     ol_step_div_cur -= dec;
                 } else {
-                    ol_step_div_cur = ol_step_div;
-                    ol_input_cur = ol_input; /* 斜坡结束 ⇒ 回到运行油门 */
+                    ol_step_div_cur = OL_STEP_DIV;
+                    ol_input_cur = OL_INPUT_RUN; /* 斜坡结束 ⇒ 回到运行油门 */
                     ol_state = 3;
                 }
             }
@@ -1595,31 +1505,33 @@ static void olStepTick(void)
             allOff();
             running = 0;
             ol_state = 0;
-            ol_input_cur = ol_input;
-            ol_step_div_cur = ol_step_div;
+            ol_input_cur = OL_INPUT_RUN;
+            ol_step_div_cur = OL_STEP_DIV;
         }
         /* 锁存解除条件之一：① !armed（彻底上锁）② newinput < 48（原始油门回到 0）。
          * 两者都成立时说明是"人为上锁/收油门"，可以恢复。
          * 注意：用 test_esc 那块 F103 测试板时 F1 爬到目标油门后一直保持 120，
          * ② 永远不会成立 ⇒ 所以"到时间上限"那一类停机改由下面的冷却逻辑自动解除。 */
         if (!armed || newinput < 48) {
-            ol_input_cur = ol_input;
-            ol_step_div_cur = ol_step_div;
+            ol_input_cur = OL_INPUT_RUN;
+            ol_step_div_cur = OL_STEP_DIV;
             ol_trip_count = 0;
             ol_stop_reason = 0;
             ol_cool_ticks = 0;
         }
-        /* ★ "到时间上限"停机的自动重跑：冷却 ol_cool_limit 拍后解除锁存。
+        /* ★ "到时间上限"停机的自动重跑：冷却 OL_COOL_LIMIT 拍后解除锁存。
          *   这样"跑 N 秒 → 停 M 秒 → 又跑 N 秒"，既不会一直转、也不会被永久锁死。
          *   过流跳闸（ol_stop_reason == 2）不在此列：必须人为干预才恢复。 */
-        if (ol_stop_reason == 1 && ol_cool_limit > 0) {
-            if (++ol_cool_ticks >= ol_cool_limit) {
-                ol_input_cur = ol_input;
-                ol_step_div_cur = ol_step_div;
+#if OL_COOL_LIMIT > 0    /* 0 = 不自动重跑 ⇒ 用预处理器判断 */
+        if (ol_stop_reason == 1) {
+            if (++ol_cool_ticks >= OL_COOL_LIMIT) {
+                ol_input_cur = OL_INPUT_RUN;
+                ol_step_div_cur = OL_STEP_DIV;
                 ol_stop_reason = 0;
                 ol_cool_ticks = 0;
             }
         }
+#endif
         if (ol_stop_reason == 0) {
             ol_cool_ticks = 0;
         }

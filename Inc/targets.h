@@ -2554,16 +2554,32 @@
 #ifdef RM2027_ESC_G071
 #define FILE_NAME "RM2027_ESC_G071"
 
-/* ★★ 强制开环 + DShot 仅解锁（台架调试模式，分支 1006-g071-openloop-arm-only）
+/* ★★ 强制开环 + DShot 仅解锁（台架调试模式）
  *   目的：把【换相编排 + 门极/驱动链】与【无感过零判据】解耦，单独验证前者。
  *         换相时刻由固定步频决定（tenKhzRoutine() 里的 olStepTick），BEMF 完全不参与；
  *         DShot 只负责解锁与启停，油门数值不参与调速。
- *   参数：ol_step_div / ol_input / ol_ticks / ol_steps，都是 RAM 全局，可在线改。
- *         步频 = 20000/ol_step_div Hz；erpm = 200000/ol_step_div；
- *         机械转速 = 200000/(ol_step_div × 极对数)。
  *   退出：把 1 改成 0 重新编译即回到完整无感闭环，闭环代码未改动。
- *   注意：本板 EEPROM 从第 17 字节起是 0xFF 擦除态，本模式在 main() 里把依赖项钉成确定值。 */
+ *   注意：本板 EEPROM 从第 17 字节起是 0xFF 擦除态，本模式在 main() 里把依赖项钉成确定值。
+ *   单位约定（★ 和上游的 commutation_interval 不同，别混）：
+ *         ol_step_div 的单位是 【20kHz 拍】（50µs/拍）；
+ *         步频 = 20000/OL_STEP_DIV Hz；erpm = 200000/OL_STEP_DIV；
+ *         机械转速 = 200000/(OL_STEP_DIV × 极对数)。
+ *   上游的 commutation_interval 单位是 0.5µs/拍（= 这里的值 × 100）。 */
 #define RM2027_OL_ARM_ONLY 1
+
+/* ---- 台架开环配置（按上游 AM32 写法：板级/编译期常量统一放 targets.h；
+ *      main.c 只保留运行时状态与观测量。改这些值需重新编译，不像 EEPROM 参数可在配置器改）---- */
+#define OL_STEP_DIV        9       /* 目标步长：9 拍 = 450µs/步 ⇒ 约 3700 机械 RPM（6 极对）*/
+#define OL_STEP_DIV_START  4000    /* 斜坡起始步长：4000 拍 = 200ms/步 ⇒ 约 8.3 机械 RPM */
+#define OL_RAMP_SHIFT      4       /* 每换相一次步长缩短 1/2^4（6.25%），使斜坡仍约 3 秒走完 */
+#define OL_ALIGN_TICKS     4000    /* 对齐保持：4000 拍 = 200ms（先把转子拉到已知位置）*/
+#define OL_INPUT_RUN       400     /* 恒速油门刻度 ⇒ 占空比 ≈ (400-47)/2000 ≈ 17.6% */
+#define OL_INPUT_START     400     /* 对齐+斜坡油门刻度：同为 17.6%（母线平均 0.62A，不顶 1A 限流）*/
+#define OL_RUN_LIMIT       100000  /* 运行上限：100000 拍 = 5.0 秒，到点自动停机（0 = 不限制）*/
+#define OL_COOL_LIMIT      0       /* 停机后冷却拍数：0 = 不自动重跑（一次只跑一轮）*/
+#define OL_TRIP_CURRENT    800     /* 过流阈值：800 厘安 = 8.0A 相电流（0 = 关闭）*/
+#define OL_TRIP_TICKS      400     /* 连续超限多少拍才跳闸：400 拍 = 20ms */
+
 #define FIRMWARE_NAME "RM2027 ESC "
 #define DEAD_TIME 60
 #define MILLIVOLT_PER_AMP 60          /* 3mΩ × 20V/V = 60 mV/A */
