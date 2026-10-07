@@ -2570,7 +2570,7 @@
  *     即"MCU 一跑就塌"⇒ 怀疑是闭环新路径让半桥直通。为保证用户能正常供上电，
  *     先烧回这版【已知良性】的开环行为；闭环代码（R2）都还在，只是不参与。
  *   查清直通原因后再把这行改回 0 转闭环。 */
-#define RM2027_OL_ARM_ONLY 1
+#define RM2027_OL_ARM_ONLY 0
 
 /* ★ 台架参数钉死开关（2026-10-07 从 RM2027_OL_ARM_ONLY 里拆出来）
  *   本板 EEPROM 从第 17 字节起是 0xFF 擦除态 ⇒ motor_poles / limits.current / input_type
