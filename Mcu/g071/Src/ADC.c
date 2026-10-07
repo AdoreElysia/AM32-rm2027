@@ -123,6 +123,15 @@ void activateADC(void)
         while (LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0) {
         }
         ADC->CCR |= ADC_CCR_TSEN;
+
+#ifdef USE_ADC_BEMF
+        /* ★ 首次"武装"硬件触发（必须在 ADEN=1 之后才能写 ADSTART）。
+         *   之后每一帧都在 DMA 完成中断里重新武装 —— 原因见 stm32g0xx_it.c
+         *   DMA1_Channel2_3_IRQHandler 里的说明：本 ADC 的 ADSTART 每帧结束会被
+         *   硬件自动清零，不重新写就等于"只有第一帧"。
+         *   注：这里写的时候 ADC 尚未开始转换（ADSTART=0、ADDIS=0）✓ */
+        LL_ADC_REG_StartConversion(ADC1);
+#endif
     }
 }
 void ADC_Init(void)
@@ -204,9 +213,30 @@ void ADC_Init(void)
     LL_ADC_REG_Init(ADC1, &ADC_REG_InitStruct);
     // LL_ADC_REG_SetTriggerEdge(ADC1, LL_ADC_REG_TRIG_EXT_FALLING);
     LL_ADC_SetOverSamplingScope(ADC1, LL_ADC_OVS_DISABLE);
+    /* 注（实测结论，别再被这行误导）：这行的意图是"触发频率低 ⇒ 开 CFGR2.LFTRIG"，
+     * 但传进去的 LL_ADC_CLOCK_FREQ_MODE_LOW 是【CCR 里的 LFMEN 位】、不是 CFGR2 的
+     * LFTRIG 位，于是 MODIFY_REG 反而把 LFTRIG 清成 0。上机实测：LFTRIG=0 时
+     * TIM1_CH4 触发照样能用（真正的门槛是 ADSTART 必须先被软件置 1，见 activateADC()
+     * 与 stm32g0xx_it.c 的 DMA 完成中断），所以这里【保持原样不动】—— 改它没有收益、
+     * 只会多一个变量。 */
     LL_ADC_SetTriggerFrequencyMode(ADC1, LL_ADC_CLOCK_FREQ_MODE_LOW);
     LL_ADC_REG_SetSequencerConfigurable(ADC1, LL_ADC_REG_SEQ_CONFIGURABLE);
-    LL_ADC_SetClock(ADC1, LL_ADC_CLOCK_ASYNC_DIV2);
+    /* ★ ADC 时钟必须钉死，因为一帧 7 通道的总耗时要能塞进 PWM 导通期里。
+     *   实测：改之前 ADC 时钟 ≈ 64MHz（RCC ADCSEL 复位态选的源 + 预分频=1）
+     *        ⇒ 一帧只要 5.8µs，但 64MHz 超了 G0 数据手册的 ADC 上限 35MHz@VDD≥2.7V。
+     *   现在：异步时钟 + 预分频 ÷2 = 32MHz ✓ 在规格内。
+     *        一帧 = 6 个 32 周期通道 + 温度 173 周期 = 365 周期 ⇒ 11.6µs。
+     *        ⇒ 触发后 2.3~4.3µs 采完 4 路 BEMF；电流落在 4.3~4.8µs（导通期前半，
+     *          台架 17.6% 占空比的导通期是 7.3µs ⇒ 余量充足）；
+     *          温度通道尾巴伸到关断期——它是最慢的量，无所谓。
+     *   ⚠ 两个易错点（改的时候别踩）：
+     *     ① LL_ADC_SetClock() 写的是 CFGR2.CKMODE = bit[31:30]，参数只能取
+     *        LL_ADC_CLOCK_SYNC_PCLK_* 或 LL_ADC_CLOCK_ASYNC；而"÷2/÷4…"是 CCR.PRESC，
+     *        归 LL_ADC_SetCommonClock() 管。原来把 LL_ADC_CLOCK_ASYNC_DIV2 喂给
+     *        SetClock() ⇒ CKMODE 没变、PRESC 也没设，时钟频率全看 RCC 复位值。
+     *     ② ADCSEL 若被改（RCC_CCIPR bit[31:30]），这里算好的帧时长就整体变。 */
+    LL_ADC_SetClock(ADC1, LL_ADC_CLOCK_ASYNC);
+    LL_ADC_SetCommonClock(__LL_ADC_COMMON_INSTANCE(ADC1), LL_ADC_CLOCK_ASYNC_DIV2);
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_1,
         LL_ADC_SAMPLINGTIME_19CYCLES_5);
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_2,

@@ -212,6 +212,18 @@ void DMA1_Channel2_3_IRQHandler(void)
     if (LL_DMA_IsActiveFlag_TC2(DMA1) == 1) {
         LL_DMA_ClearFlag_GI2(DMA1);
         ADC_DMA_Callback();
+#ifdef USE_ADC_BEMF
+        /* ★★ 重新"武装"下一次硬件触发 —— 本板 ADC 采样能连续跑起来的关键一行 ★★
+         *   G0 这个 ADC（和 L4/G4 同款 IP）在 EXTEN≠0（外部触发）时的规矩：
+         *     ① 触发检测必须先由软件写 ADSTART=1 才"武装"；
+         *        ADSTART=0 期间到达的触发会被【直接丢弃】（不报错、不留痕）。
+         *     ② 而 ADSTART 在【序列结束时会由硬件自动清零】⇒ 只武装一次的话，
+         *        只有第一帧采样能跑，之后 24kHz 的 TIM1_CH4 触发全被丢掉。
+         *   ⇒ 就在"一帧 DMA 搬完"这里重新武装（此刻 ADSTART 已由硬件清零，无竞争）。
+         *   实测证据：武装一次后 EOS 置位、DMA 搬满 7 个字；400ms 内不再有第二帧。
+         *   注：这样每帧的开销只是 1 次寄存器写；采样时刻仍由 TIM1_CH4（CCR4）决定。 */
+        LL_ADC_REG_StartConversion(ADC1);
+#endif
     }
     if (LL_DMA_IsActiveFlag_TE2(DMA1) == 1) {
         LL_DMA_ClearFlag_TE2(DMA1);
