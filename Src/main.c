@@ -488,6 +488,21 @@ uint16_t ol_step_div = 200;  /* 20kHz 拍数/步：200 ⇒ 100Hz/步 ⇒ 1000erp
 uint16_t ol_input = 150;     /* 固定"油门"值：占空比 ≈ (ol_input-47)/2000 ≈ 5.2% */
 uint16_t ol_ticks = 0;       /* 当前这一步已经过的拍数 */
 uint32_t ol_steps = 0;       /* 观测用：累计换相步数 */
+
+/* ---- 起步序列：对齐 → 斜坡 → 恒速 ----
+ * 起因：ol_step_div 是常量 ⇒ 解锁瞬间就把换相节奏跳到目标值（100Hz/167RPM），
+ *       而转子初始位置随机、又没有预定位，只能"追"这个已经在按目标节奏跳动的磁场
+ *       ⇒ 起步抖动、偶尔失步；且 step 不复位，每次起步落在六步表哪一步都不同。
+ * 四个阶段由 ol_state 串起来，全部在 olStepTick() 里推进：
+ *   0 空闲（未解锁 / 已停机）  1 对齐   2 斜坡   3 恒速（= 改动前的行为）
+ * 想退回"没有起步序列"的老行为：把 ol_align_ticks 和 ol_step_div_start 都设为 0 即可。 */
+uint8_t  ol_state = 0;             /* 见上 */
+uint16_t ol_align_ticks = 4000;    /* 对齐保持时间：20kHz 拍 ⇒ 4000 = 200ms；0 = 跳过对齐 */
+uint16_t ol_step_div_start = 2000; /* 斜坡起始步长：2000 拍 = 100ms/步（≈100erpm）；0 = 跳过斜坡 */
+uint8_t  ol_ramp_shift = 5;        /* 每换相一次把步长缩短 1/2^shift（5 ⇒ 约 3.1%/步） */
+uint16_t ol_start_input = 200;     /* 对齐+斜坡阶段的"油门"：比 ol_input 大，用来扛静摩擦 */
+uint16_t ol_input_cur = 150;       /* 当前实际用的油门值（状态机维护）；初值同 ol_input */
+uint16_t ol_step_div_cur = 200;    /* 当前实际步长（斜坡中变化）；初值同 ol_step_div */
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1160,8 +1175,9 @@ void setInput()
     }
 #if RM2027_OL_ARM_ONLY
     /* ★ 油门只当启停开关：数值不参与调速。
-     *   未解锁时必须保持 0 —— 解锁判据就是 adjusted_input == 0（见 tenKhzRoutine）。 */
-    adjusted_input = (armed && newinput >= 48) ? ol_input : 0;
+     *   未解锁时必须保持 0 —— 解锁判据就是 adjusted_input == 0（见 tenKhzRoutine）。
+     *   用 ol_input_cur 而不是 ol_input：起步序列（对齐/斜坡）阶段要临时给更大的油门。 */
+    adjusted_input = (armed && newinput >= 48) ? ol_input_cur : 0;
 #endif
 #ifndef BRUSHED_MODE
     if ((bemf_timeout_happened > bemf_timeout) && eepromBuffer.stuck_rotor_protection) {
@@ -1376,22 +1392,85 @@ if (!stepper_sine && armed) {
 #if RM2027_OL_ARM_ONLY
 /* ================== RM2027 强制开环步进器（DShot 仅解锁） ==================
  * 由 tenKhzRoutine()（TIM6，20kHz）每 50µs 调用一次 —— 时间基准稳定，不受主循环抖动影响。
- * 参数（ol_step_div / ol_input / ol_ticks / ol_steps）定义在文件上方的全局区。 */
+ * 参数（ol_step_div / ol_input / ol_ticks / ol_steps / ol_state …）定义在文件上方的全局区。
+ *
+ * 起步序列（ol_state）：0 空闲 → 1 对齐 → 2 斜坡 → 3 恒速
+ *   1 对齐：不换相，门极钉在 comStep(1)，持续 ol_align_ticks 拍 —— 转子被拉到已知位置并
+ *           停住。顺带把 step 复位成 1，所以每次起步的第一组门极都一样（波形可重复）。
+ *   2 斜坡：从 ol_step_div_start 起，每换相一次把步长按 1/2^ol_ramp_shift 缩短，
+ *           到 ol_step_div 转恒速。转子就不用"追"一个已按目标节奏跳动的磁场。
+ *   3 恒速：与改动前完全一致。 */
 static void olStepTick(void)
 {
     if (armed && running && input >= 47) {
-        /* 喂入已知步长（0.5µs 单位）⇒ e_com_time/e_rpm 遥测算得对，也避免 600000/0 除零 */
-        commutation_interval = (uint32_t)ol_step_div * 100;
-        if (++ol_ticks >= ol_step_div) {
+        switch (ol_state) {
+        case 0: /* 解锁：复位步序 → 对齐 */
+            step = 1;
+            comStep(1);
             ol_ticks = 0;
-            commutate(); /* ★ 本模式下唯一的换相入口，与 BEMF 无关 */
-            ol_steps++;
+            ol_input_cur = ol_start_input;
+            ol_step_div_cur = (ol_step_div_start > ol_step_div) ? ol_step_div_start : ol_step_div;
+            if (ol_align_ticks > 0) {
+                ol_state = 1;
+            } else if (ol_step_div_cur > ol_step_div) {
+                ol_state = 2;
+            } else {
+                ol_input_cur = ol_input;
+                ol_state = 3;
+            }
+            break;
+
+        case 1: /* 对齐保持：门极不动 */
+            if (++ol_ticks >= ol_align_ticks) {
+                ol_ticks = 0;
+                if (ol_step_div_cur > ol_step_div) {
+                    ol_state = 2;
+                } else {
+                    ol_input_cur = ol_input;
+                    ol_state = 3;
+                }
+            }
+            break;
+
+        case 2: /* 斜坡：边换相边缩短步长 */
+            if (++ol_ticks >= ol_step_div_cur) {
+                uint16_t dec = (uint16_t)(ol_step_div_cur >> ol_ramp_shift);
+                ol_ticks = 0;
+                commutate();
+                ol_steps++;
+                if (dec == 0) {
+                    dec = 1;
+                }
+                if ((uint32_t)ol_step_div_cur > (uint32_t)ol_step_div + dec) {
+                    ol_step_div_cur -= dec;
+                } else {
+                    ol_step_div_cur = ol_step_div;
+                    ol_input_cur = ol_input; /* 斜坡结束 ⇒ 回到运行油门 */
+                    ol_state = 3;
+                }
+            }
+            break;
+
+        case 3:
+        default: /* 恒速（原行为）；ol_state 出现意外值时也走这条最保守的路 */
+            ol_state = 3;
+            if (++ol_ticks >= ol_step_div_cur) {
+                ol_ticks = 0;
+                commutate(); /* ★ 本模式下唯一的换相入口，与 BEMF 无关 */
+                ol_steps++;
+            }
+            break;
         }
+        /* 喂入已知步长（0.5µs 单位）⇒ e_com_time/e_rpm 遥测算得对，也避免 600000/0 除零 */
+        commutation_interval = (uint32_t)ol_step_div_cur * 100;
     } else {
         ol_ticks = 0;
-        if (running && input < 47) { /* 油门回 0 ⇒ 停机 */
+        if (running && input < 47) { /* 油门回 0 ⇒ 停机，并复位起步序列 */
             allOff();
             running = 0;
+            ol_state = 0;
+            ol_input_cur = ol_input;
+            ol_step_div_cur = ol_step_div;
         }
     }
 }
