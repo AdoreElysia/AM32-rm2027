@@ -18,6 +18,10 @@ extern volatile uint16_t bemf_adc_v0;   /* PA3 = V0_SENSE  */
  *   ADC-DMA 完成中断里读它（Mcu/g071/Src/stm32g0xx_it.c）。 */
 extern volatile uint8_t bemf_irq_armed;
 
+/* ★ 过零极性开关：运行时改（调试器写 1/0）即可试两种极性，不用重编译。
+ *   首次上闭环若"不转/反转/一冲就停"，先翻它。 */
+extern volatile uint8_t bemf_polarity_invert;
+
 void     adc_bemf_set_hysteresis(uint16_t hyst_lsb);
 uint16_t adc_bemf_get_hysteresis(void);
 int16_t  adc_bemf_get_delta(void);      /* 当前悬空相 − V0（有符号） */

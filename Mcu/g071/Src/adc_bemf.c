@@ -83,6 +83,13 @@ int16_t adc_bemf_get_delta(void)
     return (int16_t)(vph - (int16_t)bemf_adc_v0);
 }
 
+/* ★ 极性开关（运行时可改，不用重编译）：上机第一次跑闭环时，正确极性是"50/50 猜"的
+ *   ——本板 A/B 相没有比较器可比对，只能与"照抄比较器约定"的代码对照。
+ *   若一上电就出现"不转 / 反转 / 一冲就停"，在调试器里把本变量改成 1（或改回 0）再试一次。
+ *   它同时作用于两条读法：轮询（main.c getBemfState）与中断（stm32g0xx_it.c），
+ *   因为两者都经过 getCompOutputLevel()。 */
+volatile uint8_t bemf_polarity_invert = 0;
+
 /* ★ 施密特滞回比较器（取代 active_COMP->CSR >> 30 & 1）
  * 注意极性：Src/main.c 里用的是 `!getCompOutputLevel()`，此处沿用 comparator.c 的约定。
  */
@@ -98,7 +105,7 @@ uint8_t getCompOutputLevel(void)
     }
 
     /* 落在 ±hyst 之间 ⇒ 保持原状态（这就是滞回） */
-    return bemf_state;
+    return bemf_polarity_invert ? (uint8_t)!bemf_state : bemf_state;
 }
 
 /* ★★ AWD（模拟看门狗）：把阈值比较放进 ADC 硬件

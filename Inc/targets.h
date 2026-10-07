@@ -2565,7 +2565,12 @@
  *         步频 = 20000/OL_STEP_DIV Hz；erpm = 200000/OL_STEP_DIV；
  *         机械转速 = 200000/(OL_STEP_DIV × 极对数)。
  *   上游的 commutation_interval 单位是 0.5µs/拍（= 这里的值 × 100）。 */
-#define RM2027_OL_ARM_ONLY 1
+/* ★★ 开环独占开关（台架调试用）：1 = 只跑"对齐+斜坡+恒速"的强制开环、闭环不参与。
+ *   2026-10-07 起置 0 ⇒ 走完整无感闭环：
+ *     起步阶段用轮询（读的也是 ADC 版过零值 getCompOutputLevel()）、
+ *     两次过零后由 NO_POLLING_START 切到中断模式，过零事件来自 ADC-DMA 完成中断。
+ *   要回到纯开环对比：把它改回 1 重新编译即可（闭环代码不受影响）。 */
+#define RM2027_OL_ARM_ONLY 0
 
 /* ★ 台架参数钉死开关（2026-10-07 从 RM2027_OL_ARM_ONLY 里拆出来）
  *   本板 EEPROM 从第 17 字节起是 0xFF 擦除态 ⇒ motor_poles / limits.current / input_type
