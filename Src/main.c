@@ -507,14 +507,21 @@ uint16_t ol_step_div_cur = 200;    /* 当前实际步长（斜坡中变化）；
 /* ---- 过流跳闸：本模式下唯一的运行保护 ----
  * 为什么必须补：AM32 的失速/堵转保护都依赖 BEMF，强制开环下全部失效；而开环恰好是
  * "转速越低电流越大"的工况（转速低 ⇒ BEMF 小 ⇒ 净电压几乎全加在绕组电阻上）。
- * 一旦转子卡住 / 一相断线 / 轴承卡死，电流会一直持续，没有任何机制来切。
- * 判据用 actual_current（单位厘安，1 = 10mA，与 main.c 里电流口径一致），
- * 连续 ol_trip_ticks 拍超限就立即全关停机、并把油门值清零（见 olStepTick）。
- * 阈值只是兜底：第一道防线仍然是【限流电源】。设 0 可关闭。 */
-uint16_t ol_trip_current = 600;    /* 跳闸电流：600 = 6.0A；0 = 关闭 */
+ *
+ * ★★ 关键：本板采到的是【母线平均电流】，不是【绕组相电流】★★
+ *   依据：① 电流通道走软件触发（Mcu/g071/Src/ADC.c:175 TriggerSource = SOFTWARE），
+ *   与 24kHz 斩波异步 ⇒ 采样点相对斩波相位的分布是随机的；② 再经 50 点滑动平均
+ *   （main.c 里 numReadings = 50）⇒ 结果就是"占空比 × 相电流"的平均值。
+ *   举例：占空比 5.15%、相电流 2.2A 时，这个数只有约 0.11A（差约 19 倍）。
+ *   ⇒ 所以判据必须先把相电流反推出来：相电流 ≈ 母线平均电流 ÷ 占空比。
+ *
+ * 阈值按【真实相电流】给：本板电机（1404 级）取 8A 量级，具体上限请查电机规格。
+ * 设 0 可关闭。注意这只是兜底 —— 第一道防线是【限流电源】+【降低母线电压】。 */
+uint16_t ol_trip_current = 800;    /* 相电流上限：800 = 8.0A；0 = 关闭 */
 uint16_t ol_trip_ticks = 400;      /* 连续多少拍（20kHz ⇒ 400 = 20ms）才跳闸 */
 uint16_t ol_trip_count = 0;        /* 观测用：当前连续超限计数 */
 uint32_t ol_trips = 0;             /* 观测用：累计跳闸次数 */
+uint32_t ol_iphase_last = 0;       /* 观测用：最近一次反推出来的相电流（厘安，1 = 10mA） */
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1415,8 +1422,10 @@ if (!stepper_sine && armed) {
 static void olStepTick(void)
 {
     if (armed && running && input >= 47) {
-        /* ---- 过流跳闸（见上方参数区的说明）---- */
-        if (ol_trip_current > 0 && actual_current > (int16_t)ol_trip_current) {
+        /* ---- 过流跳闸（见上方参数区说明）：先把相电流反推出来，再比阈值 ----
+         * 相电流 ≈ 实测母线平均电流 ÷ 占空比；duty_cycle 是 0..2000 的口径。 */
+        if (ol_trip_current > 0 && duty_cycle > 0 && (ol_iphase_last =
+                ((uint32_t)actual_current * 2000) / (uint32_t)duty_cycle) > ol_trip_current) {
             if (++ol_trip_count > ol_trip_ticks) {
                 allOff();
                 running = 0;
