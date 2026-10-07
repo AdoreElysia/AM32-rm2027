@@ -2004,6 +2004,21 @@ int main(void)
     eepromBuffer.variable_pwm = 0;           /* 否则 tim1_arr 随转速跳变、PWM 频率乱变 */
     eepromBuffer.brake_on_zero_throttle = 0;
     eepromBuffer.brake_on_stop = 0;
+    /* ---- 本板电机参数（只写 RAM）：HSKRC 1404-4600KV，9N12P（9 槽 12 磁钢 ⇒ 6 对极）。
+     *   motor_poles 存的是【磁极数 = 磁钢片数】，不是极对数 —— 代码内部再 /2 才得极对数：
+     *   DroneCAN.c:1128 `pkt.rpm = (e_rpm * 200) / eepromBuffer.motor_poles` 只有取磁极数时才成立。
+     *   motor_kv 存压缩字节 (KV-20)/40：114 → 4580KV、115 → 4620KV，最接近铭牌 4600。
+     *   注：low/high_rpm_level 等派生量已在 loadEEpromSettings() 里按擦除态算过（现为 0 =
+     *   低转速油门限制失效），这里不重算 —— 对 5% 占空比的台架测试无影响；要让它真正生效
+     *   需把这两项写进 EEPROM（写之前先确认 rc_car_reverse 非 0，见下条）。 */
+    eepromBuffer.motor_kv = 114;
+    eepromBuffer.motor_poles = 12;
+    /* ---- 堵直通隐患：temp_comp_pwm 非 0 时 phaseXPWM() 会把低边栅极常开
+     *   （Mcu/g071/Src/phaseouts.c:139 的 else 分支），与高边斩波叠加就是半桥直通。
+     *   擦除态 eepromBuffer.comp_pwm = 0xFF（非 0），目前只靠 rc_car_reverse 那条路径
+     *   （main.c:1890）把它清 0。这里两个都显式钉死，免得以后保存设置后关系被破坏。 */
+    eepromBuffer.comp_pwm = 0;
+    temp_comp_pwm = 0;
     minimum_duty_cycle = 0;                  /* 清掉 eeprom / dead_time_override 留下的占空比地板 */
     min_startup_duty = 0;                    /* 起步不要额外"踢一脚" */
     startup_max_duty_cycle = 400;
