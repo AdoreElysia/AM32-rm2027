@@ -2379,7 +2379,13 @@ if(zero_crosses < 5){
            send_esc_info_flag = 0;
         }
         if (PROCESS_ADC_FLAG == 1) { // for adc and telemetry set adc counter at 1khz loop rate
+#ifndef USE_ADC_BEMF
+          /* 非 ADC-BEMF 的板子：本循环自己"先取上一轮结果、再踢一脚"软件触发。
+           * ADC-BEMF 板子这两件事都不做 —— 结果由 DMA 完成中断在每个 PWM 周期搬一次，
+           * 触发由 TIM1_CH4 硬件给（见 ADC.c）。这里再搬一次反而可能读到"搬一半"的数组
+           * （四路 BEMF 必须来自同一次扫描）。 */
           ADC_DMA_Callback(); // common to all, Call ADC_DMA callback to get raw data
+#endif
 #ifdef NO_CURRENT_SENSE
           ADC_raw_current = 0;
 #endif
@@ -2387,7 +2393,9 @@ if(zero_crosses < 5){
           ADC_raw_volts = 0;
 #endif          
 #if defined(STMICRO)
+#ifndef USE_ADC_BEMF
             LL_ADC_REG_StartConversion(ADC1);
+#endif
 #ifdef USE_ADC_1_2
           LL_ADC_REG_StartConversion(ADC2);
 #endif          

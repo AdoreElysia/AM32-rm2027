@@ -743,7 +743,18 @@ void enableCorePeripherals()
 #endif
     LL_TIM_CC_EnableChannel(TIM1,
         LL_TIM_CHANNEL_CH4); // timer used for timing adc read
-    TIM1->CCR4 = 100; // set in 10khz loop to match pwm cycle timed to end of pwm on
+    /* ★ CH4 只当"采样时刻发生器"用，不接任何引脚（没配 AF，内部 OC4REF 照样有效）。
+     *   设成 PWM2 模式：OC4REF 在 CNT < CCR4 时为低、CNT ≥ CCR4 时为高
+     *   ⇒ 它的【上升沿正好落在 CNT == CCR4】；ADC 就以 TIM1_CH4 的上升沿为触发
+     *   （见 ADC.c 的 TriggerSource）⇒ CCR4 的数值 = "高边开通(CNT=0)后多久开始采样"。
+     *   板级取值在 targets.h 的 ADC_TRIGGER_CCR4（RM2027 块），要按示波器实测调。
+     *   注：这里不用"sweep CCR4 跟踪占空比"那套（上游注释 "timed to end of pwm on"），
+     *   因为固定延时既能避开开关振铃、又落在导通期内，且 BEMF 差值本身与驱动状态无关。 */
+#ifndef ADC_TRIGGER_CCR4
+#define ADC_TRIGGER_CCR4 100 /* 没定义就退回原值：100 拍 ≈ 1.56µs */
+#endif
+    LL_TIM_OC_SetMode(TIM1, LL_TIM_CHANNEL_CH4, LL_TIM_OCMODE_PWM2);
+    TIM1->CCR4 = ADC_TRIGGER_CCR4;
 
     /* Enable counter */
     LL_TIM_EnableCounter(TIM1);

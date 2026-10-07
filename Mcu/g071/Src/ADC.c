@@ -7,7 +7,10 @@
 #include "ADC.h"
 
 #ifdef USE_ADC_BEMF
-/* [0]电流 [1]电压 [2]温度 [3]VA [4]VB [5]VC [6]V0 —— 三相+V0 供软件过零用 */
+/* ★ 扫描顺序（rank1..7）= [0]VA [1]VB [2]VC [3]V0 [4]电流 [5]电压 [6]温度
+ *   为什么 BEMF 排最前：采样时刻被 TIM1_CH4 钉死在"高边开通后 ADC_TRIGGER_CCR4 拍"，
+ *   而整条扫描必须排在同一个导通期内（见 ADC_Init 里 rank 顺序的说明）。
+ *   —— 顺序改了，ADC_DMA_Callback() 的下标必须跟着改，两处是一体。 */
 #include "adc_bemf.h"
 uint16_t ADCDataDMA[7];
 #elif defined(USE_ADC_INPUT)
@@ -34,14 +37,19 @@ void ADC_DMA_Callback()
     ADC_raw_input = ADCDataDMA[0];
 
 #else
+#ifdef USE_ADC_BEMF
+    /* 顺序见文件头注释：VA VB VC V0 电流 电压 温度 */
+    bemf_adc_va = ADCDataDMA[0];
+    bemf_adc_vb = ADCDataDMA[1];
+    bemf_adc_vc = ADCDataDMA[2];
+    bemf_adc_v0 = ADCDataDMA[3];
+    ADC_raw_current = ADCDataDMA[4];
+    ADC_raw_volts = ADCDataDMA[5];
+    ADC_raw_temp = ADCDataDMA[6];
+#else
     ADC_raw_temp = ADCDataDMA[2];
     ADC_raw_volts = ADCDataDMA[1];
     ADC_raw_current = ADCDataDMA[0];
-#ifdef USE_ADC_BEMF
-    bemf_adc_va = ADCDataDMA[3];
-    bemf_adc_vb = ADCDataDMA[4];
-    bemf_adc_vc = ADCDataDMA[5];
-    bemf_adc_v0 = ADCDataDMA[6];
 #endif
 #endif
 }
@@ -172,7 +180,18 @@ void ADC_Init(void)
     /** Configure the global features of the ADC (Clock, Resolution, Data
      * Alignment and number of conversion)
      */
+#ifdef USE_ADC_BEMF
+    /* ★ 触发源：TIM1_CH4（硬件、与 PWM 同频同步）—— 取代原来的 1kHz 软件触发。
+     *   CH4 只当"采样时刻发生器"，不接引脚：peripherals.c 里把它设成 PWM2 模式，
+     *   于是 OC4REF 的上升沿正好落在 CNT == CCR4 ⇒ CCR4 的数值就是
+     *   "高边开通(CNT=0)后多久开始采样"（板级常量 ADC_TRIGGER_CCR4，targets.h）。
+     *   ⇒ 采样点固定压在导通期内、离开关沿足够远；而且每个 PWM 周期都刷一次
+     *   （24kHz），闭环判过零要的就是这个刷新率 —— 1kHz 在 3700RPM 下
+     *     （换相窗口仅 450µs）连一个点都落不进去。 */
+    ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_EXT_TIM1_CH4;
+#else
     ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
+#endif
     #ifdef USE_ADC_BEMF
     ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_7RANKS;
 #else
@@ -200,6 +219,43 @@ void ADC_Init(void)
     ADC_InitStruct.LowPowerMode = LL_ADC_LP_MODE_NONE;
     LL_ADC_Init(ADC1, &ADC_InitStruct);
 
+#ifdef USE_ADC_BEMF
+    /* ★ 扫描顺序（rank1..7）：VA VB VC V0 → 电流 → 电压 → 温度
+     *
+     * 为什么重排（原来 BEMF 压在 rank4~7、前面还夹着最慢的温度通道）：
+     *   温度通道要 160.5 个采样周期（≈5.4µs），排在中间会把 4 路 BEMF 推到触发后
+     *   7~11µs；而采样时刻被钉死在"高边开通后 ADC_TRIGGER_CCR4 拍"，台架占空比
+     *   17.6% 时导通期只有 7.3µs ⇒ 原来那 4 路正好撞上下降沿的振铃，读数是废的。
+     * 现在：
+     *   ① 4 路 BEMF 在 rank1~4，触发后 ~4µs 内全部采完（彼此相差 <1µs，可视为同时）；
+     *   ② 电流顺延到 ~5.6µs —— 导通期靠后的位置，正是母线采样电阻（U5）该采的时刻。
+     * 四路必须"同一状态"：过零判据比较的是【悬空相 − V0】，两个通道得在同一时刻采。
+     *
+     * 源阻抗（按网表实算）：相通道 = R1∥R2∥R12 = 47k∥10k∥4.7k ≈ 3.0k
+     * （早先注释写的 8.3k 漏了 R12 那只 4.7k 到 GND 的电阻）⇒ 19.5 周期绰绰有余，
+     * 采样时间保持不动（COMMON_1 是全部通道共用的一个设置）。 */
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_A_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, BEMF_ADC_PHASE_B_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, BEMF_ADC_PHASE_C_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, BEMF_ADC_NEUTRAL_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5, CURRENT_ADC_CHANNEL);
+    LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL,
+        LL_ADC_SAMPLINGTIME_COMMON_1);
+
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_6, VOLTAGE_ADC_CHANNEL);
+    LL_ADC_SetChannelSamplingTime(ADC1, VOLTAGE_ADC_CHANNEL,
+        LL_ADC_SAMPLINGTIME_COMMON_1);
+
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7,
+        LL_ADC_CHANNEL_TEMPSENSOR);
+    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
+        LL_ADC_SAMPLINGTIME_COMMON_2);
+#else
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, CURRENT_ADC_CHANNEL);
     LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL,
         LL_ADC_SAMPLINGTIME_COMMON_1);
@@ -212,16 +268,5 @@ void ADC_Init(void)
         LL_ADC_CHANNEL_TEMPSENSOR);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
         LL_ADC_SAMPLINGTIME_COMMON_2);
-
-#ifdef USE_ADC_BEMF
-    /* 三相 + 虚拟中性点（供软件过零；源阻抗 47K∥10K≈8.3k ⇒ 用 19.5 周期的 COMMON_1） */
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, BEMF_ADC_PHASE_A_CH);
-    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5, BEMF_ADC_PHASE_B_CH);
-    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_6, BEMF_ADC_PHASE_C_CH);
-    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7, BEMF_ADC_NEUTRAL_CH);
-    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
 #endif
 }

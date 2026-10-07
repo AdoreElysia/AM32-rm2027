@@ -4274,6 +4274,19 @@
 #define BEMF_AWD_PHASE_A_CH LL_ADC_AWD_CHANNEL_5_REG
 #define BEMF_AWD_PHASE_B_CH LL_ADC_AWD_CHANNEL_4_REG
 #define BEMF_AWD_PHASE_C_CH LL_ADC_AWD_CHANNEL_2_REG
+
+/* ★ ADC 采样时刻：高边开通（TIM1 的 CNT=0）之后多少拍开始采。
+ *   TIM1 预分频 = 0 ⇒ 1 拍 = 1/64MHz = 15.6ns；24kHz PWM 的 ARR = 2665，一个周期 2666 拍。
+ *   取值要同时满足两条（这就是"采样点必须和 PWM 同步"的全部理由）：
+ *     ① 大于栅极/体二极管开关振铃：死区 DEAD_TIME = 60 拍 ≈ 0.94µs，再加振铃余量
+ *        ⇒ 150 拍 ≈ 2.3µs 起；
+ *     ② 整条扫描必须排在同一个导通期内：4 路 BEMF 在前（约 4µs，见 ADC.c 的 rank 顺序）
+ *        + 电流/电压 ≈ 1µs ⇒ 150 拍时全部落在 2.3~7.3µs；台架占空比 17.6% 的导通期
+ *        是 7.3µs ⇒ 刚好放得下（这也是为什么不能把温度通道排在前面）。
+ *   ⚠ 占空比低于约 (CCR4 + 扫描长度)/ARR ≈ 27% 时，尾巴上的通道会落进关断期。
+ *     BEMF 差值本身与驱动状态无关（已按网表推导过），所以不是致命问题，但读数会"跳"，
+ *     上机第一件事就是看四路码是否随占空比抖动（抖 ⇒ 往后挪或把占空比提上去）。 */
+#define ADC_TRIGGER_CCR4 150
 #endif
 
 #ifdef HARDWARE_GROUP_G0_L
