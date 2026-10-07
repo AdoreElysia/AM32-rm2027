@@ -503,6 +503,18 @@ uint8_t  ol_ramp_shift = 5;        /* 每换相一次把步长缩短 1/2^shift�
 uint16_t ol_start_input = 200;     /* 对齐+斜坡阶段的"油门"：比 ol_input 大，用来扛静摩擦 */
 uint16_t ol_input_cur = 150;       /* 当前实际用的油门值（状态机维护）；初值同 ol_input */
 uint16_t ol_step_div_cur = 200;    /* 当前实际步长（斜坡中变化）；初值同 ol_step_div */
+
+/* ---- 过流跳闸：本模式下唯一的运行保护 ----
+ * 为什么必须补：AM32 的失速/堵转保护都依赖 BEMF，强制开环下全部失效；而开环恰好是
+ * "转速越低电流越大"的工况（转速低 ⇒ BEMF 小 ⇒ 净电压几乎全加在绕组电阻上）。
+ * 一旦转子卡住 / 一相断线 / 轴承卡死，电流会一直持续，没有任何机制来切。
+ * 判据用 actual_current（单位厘安，1 = 10mA，与 main.c 里电流口径一致），
+ * 连续 ol_trip_ticks 拍超限就立即全关停机、并把油门值清零（见 olStepTick）。
+ * 阈值只是兜底：第一道防线仍然是【限流电源】。设 0 可关闭。 */
+uint16_t ol_trip_current = 600;    /* 跳闸电流：600 = 6.0A；0 = 关闭 */
+uint16_t ol_trip_ticks = 400;      /* 连续多少拍（20kHz ⇒ 400 = 20ms）才跳闸 */
+uint16_t ol_trip_count = 0;        /* 观测用：当前连续超限计数 */
+uint32_t ol_trips = 0;             /* 观测用：累计跳闸次数 */
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1403,6 +1415,22 @@ if (!stepper_sine && armed) {
 static void olStepTick(void)
 {
     if (armed && running && input >= 47) {
+        /* ---- 过流跳闸（见上方参数区的说明）---- */
+        if (ol_trip_current > 0 && actual_current > (int16_t)ol_trip_current) {
+            if (++ol_trip_count > ol_trip_ticks) {
+                allOff();
+                running = 0;
+                ol_state = 0;
+                ol_input_cur = 0; /* ★ 关键：不清零的话主循环会立刻把 running 又置 1 重启 */
+                ol_step_div_cur = ol_step_div;
+                ol_trip_count = 0;
+                ol_trips++;
+                return;
+            }
+        } else {
+            ol_trip_count = 0;
+        }
+
         switch (ol_state) {
         case 0: /* 解锁：复位步序 → 对齐 */
             step = 1;
@@ -1471,6 +1499,13 @@ static void olStepTick(void)
             ol_state = 0;
             ol_input_cur = ol_input;
             ol_step_div_cur = ol_step_div;
+        }
+        /* 跳闸后 ol_input_cur 被清零（= 锁存），必须彻底上锁才复位，防止"跳了又自动重启"。
+         * 所以恢复步骤是：油门回 0 → 等 ESC 上锁 → 再重新解锁。跳闸次数看 ol_trips。 */
+        if (!armed) {
+            ol_input_cur = ol_input;
+            ol_step_div_cur = ol_step_div;
+            ol_trip_count = 0;
         }
     }
 }
