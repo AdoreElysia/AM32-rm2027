@@ -485,9 +485,16 @@ volatile char rising = 1;
  * 步频 = 20000/ol_step_div Hz；erpm = 200000/ol_step_div；
  * 机械转速 = 200000/(ol_step_div × 极对数)。 */
 uint16_t ol_step_div = 200;  /* 20kHz 拍数/步：200 ⇒ 100Hz/步 ⇒ 1000erpm ⇒ 6 极对 167RPM */
-uint16_t ol_input = 150;     /* 固定"油门"值：占空比 ≈ (ol_input-47)/2000 ≈ 5.2% */
+uint16_t ol_input = 400;     /* 运行"油门"：占空比 ≈ (ol_input-47)/2000 ≈ 17.6%
+                              * ★ 2026-10-07 首次带电机上电实测：原值 150（5.2%）扭矩不够 ——
+                              *   7.7% 时相电流只有 1.18A ≈ 2.4mN·m，与齿槽转矩同一个量级，
+                              *   表现是"电机只轻微抖动、不转"。故运行/起步一起提到约 2.3 倍电流。 */
 uint16_t ol_ticks = 0;       /* 当前这一步已经过的拍数 */
 uint32_t ol_steps = 0;       /* 观测用：累计换相步数 */
+uint16_t ol_step_current[6]; /* 观测用：六步各自的反推相电流（索引 = step-1，单位厘安）
+                              * 用途：某一步读数明显偏低或为 0 ⇒ 那一对门极里有一路是死的。
+                              * 六步各用一对门极：1=A上B下 2=C上B下 3=C上A下 4=B上A下 5=B上C下 6=A上C下。
+                              * 需要电机通电、且低速/堵转时读数才明显。 */
 
 /* ---- 起步序列：对齐 → 斜坡 → 恒速 ----
  * 起因：ol_step_div 是常量 ⇒ 解锁瞬间就把换相节奏跳到目标值（100Hz/167RPM），
@@ -500,8 +507,8 @@ uint8_t  ol_state = 0;             /* 见上 */
 uint16_t ol_align_ticks = 4000;    /* 对齐保持时间：20kHz 拍 ⇒ 4000 = 200ms；0 = 跳过对齐 */
 uint16_t ol_step_div_start = 2000; /* 斜坡起始步长：2000 拍 = 100ms/步（≈100erpm）；0 = 跳过斜坡 */
 uint8_t  ol_ramp_shift = 5;        /* 每换相一次把步长缩短 1/2^shift（5 ⇒ 约 3.1%/步） */
-uint16_t ol_start_input = 200;     /* 对齐+斜坡阶段的"油门"：比 ol_input 大，用来扛静摩擦 */
-uint16_t ol_input_cur = 150;       /* 当前实际用的油门值（状态机维护）；初值同 ol_input */
+uint16_t ol_start_input = 400;     /* 对齐+斜坡阶段的"油门"：与 ol_input 取齐（同样要扛齿槽转矩） */
+uint16_t ol_input_cur = 400;       /* 当前实际用的油门值（状态机维护）；初值同 ol_input */
 uint16_t ol_step_div_cur = 200;    /* 当前实际步长（斜坡中变化）；初值同 ol_step_div */
 
 /* ---- 过流跳闸：本模式下唯一的运行保护 ----
@@ -1473,6 +1480,7 @@ static void olStepTick(void)
             if (++ol_ticks >= ol_step_div_cur) {
                 uint16_t dec = (uint16_t)(ol_step_div_cur >> ol_ramp_shift);
                 ol_ticks = 0;
+                ol_step_current[step - 1] = (uint16_t)ol_iphase_last; /* 观测：本步相电流 */
                 commutate();
                 ol_steps++;
                 if (dec == 0) {
@@ -1493,6 +1501,7 @@ static void olStepTick(void)
             ol_state = 3;
             if (++ol_ticks >= ol_step_div_cur) {
                 ol_ticks = 0;
+                ol_step_current[step - 1] = (uint16_t)ol_iphase_last; /* 观测：本步相电流 */
                 commutate(); /* ★ 本模式下唯一的换相入口，与 BEMF 无关 */
                 ol_steps++;
             }
