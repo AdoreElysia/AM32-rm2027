@@ -14,6 +14,10 @@ extern volatile uint16_t bemf_adc_vb;   /* PA4 = VB_SENSE */
 extern volatile uint16_t bemf_adc_vc;   /* PA2 = VC_SENSE */
 extern volatile uint16_t bemf_adc_v0;   /* PA3 = V0_SENSE  */
 
+/* ★ 过零检测的"武装"标志（取代比较器的 EXTI）：换相后置 1、认到过零清 0。
+ *   ADC-DMA 完成中断里读它（Mcu/g071/Src/stm32g0xx_it.c）。 */
+extern volatile uint8_t bemf_irq_armed;
+
 void     adc_bemf_set_hysteresis(uint16_t hyst_lsb);
 uint16_t adc_bemf_get_hysteresis(void);
 int16_t  adc_bemf_get_delta(void);      /* 当前悬空相 − V0（有符号） */

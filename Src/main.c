@@ -983,15 +983,22 @@ void interruptRoutine()
 //            return;
 //        }
 //    }
-        for (int i = 0; i < filter_level; i++) {
+        /* 滤波：本板是"ADC 版过零"，采样值每个 PWM 周期（41.7µs）才刷新一次 ⇒
+         * 上游那个"连续读 filter_level 次"的循环在这里只会读到同一个值、没有滤波作用
+         * 还白添延迟 ⇒ 改成只读一次。抗噪由三层负责：
+         *   ① adc_bemf.c 的施密特滞回（BEMF_HYST_LSB，默认 8 码 ≈ 相侧 100mV）
+         *   ② 调用点的门槛"距上次换相已过半个周期"（见 stm32g0xx_it.c 的 DMA 中断）
+         *   ③ "每步只认一次"的武装标志（bemf_irq_armed）
+         * （filter_level 这个变量在【轮询模式/起步】那条路径里仍在用，别删。）*/
 #if defined(MCU_F031) || defined(MCU_G031)
-            if (((current_GPIO_PORT->IDR & current_GPIO_PIN) == !(rising))) {
-#else
-            if (getCompOutputLevel() == rising) {
-#endif
-                return;
-            }
+        if ((current_GPIO_PORT->IDR & current_GPIO_PIN) == !(rising)) {
+            return;
         }
+#else
+        if (getCompOutputLevel() == rising) {
+            return;
+        }
+#endif
     __disable_irq();
     maskPhaseInterrupts();
     lastzctime = thiszctime;
@@ -2144,10 +2151,14 @@ int main(void)
   startup_max_duty_cycle = startup_max_duty_cycle + 400;
 #endif
 
-#if RM2027_OL_ARM_ONLY
-    /* ★ 开环调试：把本模式依赖的外部状态在 RAM 里钉成确定值（不写回 EEPROM）。
+#if RM2027_BENCH_PIN_EEPROM
+    /* ★ 台架模式：把依赖的外部状态在 RAM 里钉成确定值（不写回 EEPROM）。
      *   起因：本板 EEPROM 从第 17 字节起是 0xFF 擦除态 —— motor_poles、limits.current、
-     *   input_type、stuck_rotor_protection 等都是垃圾值，不能指望它。 */
+     *   input_type、stuck_rotor_protection 等都是垃圾值，不能指望它。
+     *   ★ 2026-10-07 从 RM2027_OL_ARM_ONLY 里【拆出来】独立成一个开关：
+     *     开环（OL）与"闭环"切换时，这段钉死参数必须【一直保留】——
+     *     RM2027_OL_ARM_ONLY 一旦关掉（转闭环），若这段也跟着消失，
+     *     motor_poles/limits 就变成擦除态的垃圾值，转速/限流全乱。 */
     eepromBuffer.bi_direction = 0;           /* 输入映射走最朴素的那一条 */
     eepromBuffer.use_sine_start = 0;         /* 正弦启动会跟六步抢时序 */
     eepromBuffer.stall_protection = 0;       /* 失速 PID 会按 commutation_interval 猛加占空比 */

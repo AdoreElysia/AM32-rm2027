@@ -31,6 +31,9 @@
 #include "targets.h"
 #include "comparator.h"
 #include "common.h"
+#ifdef USE_ADC_BEMF
+#include "adc_bemf.h"   /* ★ 本板过零检测的武装标志 bemf_irq_armed（替代比较器 EXTI）*/
+#endif
 
 /* USER CODE END Includes */
 
@@ -223,6 +226,26 @@ void DMA1_Channel2_3_IRQHandler(void)
          *   实测证据：武装一次后 EOS 置位、DMA 搬满 7 个字；400ms 内不再有第二帧。
          *   注：这样每帧的开销只是 1 次寄存器写；采样时刻仍由 TIM1_CH4（CCR4）决定。 */
         LL_ADC_REG_StartConversion(ADC1);
+        /* ★★ 过零判据就放在这里（= 用"每帧采完"替代比较器的 EXTI）★★
+         *   为什么放这儿：四路 BEMF（含悬空相与 V0）就是这一帧刚采进来的，
+         *   在这里判等于"用最新鲜的数据判过零"，且天然与 PWM 同步（采样点固定在
+         *   高边开通后 ADC_TRIGGER_CCR4 拍）。判据与上游比较器中断同构：
+         *     ① bemf_irq_armed —— 换相后由 enableCompInterrupts() 置 1；
+         *        认到一次过零就清 0 ⇒【每步只认一次】，同一个过零点不会被反复触发
+         *        （这是取代 EXTI 后必须自己做的一件事）。
+         *     ② INTERVAL_TIMER->CNT > average_interval>>1 —— 距上次换相太近的
+         *        翻转一律当噪声丢掉（上游 EXTI 处理器里同样的门槛）。
+         *     ③ getCompOutputLevel() == !rising —— 极性沿用 main.c getBemfState()
+         *        的上游约定（rising 步期望 getCompOutputLevel()==0）。
+         *        ⚠ 这条是"照抄比较器约定"猜的（本板 A/B 相没有比较器可比对）：
+         *          上机若出现"换相方向反/不转/一冲就停"，第一个就把它反过来试。
+         *     ④ 认到后调 interruptRoutine()（上游现成的：记 thiszctime、算 waitTime、
+         *        用 COM_TIMER 定时换相），闭环时刻精度由它保证。 */
+        if (bemf_irq_armed && (INTERVAL_TIMER->CNT > (average_interval >> 1))
+            && (getCompOutputLevel() == !rising)) {
+            bemf_irq_armed = 0;
+            interruptRoutine();
+        }
 #endif
     }
     if (LL_DMA_IsActiveFlag_TE2(DMA1) == 1) {

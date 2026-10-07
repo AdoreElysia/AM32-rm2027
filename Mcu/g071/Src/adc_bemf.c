@@ -27,13 +27,27 @@ volatile uint16_t bemf_adc_vc = 2048;
 volatile uint16_t bemf_adc_v0 = 2048;
 
 /* ---- 施密特滞回阈值（ADC 码，12 位） ----
- * 1 LSB ≈ 3.3V/4096 = 0.806 mV；相电压衰减 10/57 = 0.1754
- * ⇒ 8 LSB(ADC) ≈ 6.4 mV ⇒ 折算到相电压侧 ≈ 37 mV
- * 初值 8，上机按波形再调（低速往下调、噪声大往上调）。
+ * 换算（按网表实算，别再套"47K∥10K"那个旧口径）：
+ *   1 LSB ≈ 3.3V/4096 = 0.806 mV；相电压→采样脚的传递系数 0.0637
+ *   ⇒ H LSB ⇒ 相侧 ≈ H × 0.806 / 0.0637 ≈ H × 12.7 mV
+ *   ⇒ 8 LSB ≈ 100 mV 相侧（闭环在 3700RPM 时悬空相的 delta ≈ ±32 码 ⇒ 余量 4 倍）
+ * 低速起步时 delta 会小到几个码，届时把 BEMF_HYST_LSB 调到 2~4（按噪声定）。
  */
-static uint16_t bemf_hyst  = 8;
+#ifndef BEMF_HYST_LSB
+#define BEMF_HYST_LSB 8
+#endif
+static uint16_t bemf_hyst  = BEMF_HYST_LSB;
 static uint8_t  bemf_state = 0;      /* 滞回后的稳定状态 */
 static uint8_t  active_phase = 0;    /* 0=A(PA5)  1=B(PA4)  2=C(PA2) */
+
+/* ★ 过零检测的"武装"标志（取代比较器的 EXTI 使能/屏蔽）
+ *   comparator.c 是用 EXTI 中断来报"悬空相过零"的；本板没有比较器通路，
+ *   改成在【ADC-DMA 完成中断】里判（见 Mcu/g071/Src/stm32g0xx_it.c）。
+ *   语义与上游一致：换相后 PeriodElapsedCallback()/commutate() 调
+ *   enableCompInterrupts() 武装；一旦认到过零就由检测端清零，
+ *   直到下一次换相再武装 ⇒【每步只认一次过零】(否则同一个过零点会被反复触发)。
+ */
+volatile uint8_t bemf_irq_armed = 0;
 
 void adc_bemf_set_hysteresis(uint16_t hyst_lsb) { bemf_hyst = hyst_lsb; }
 uint16_t adc_bemf_get_hysteresis(void)          { return bemf_hyst; }
@@ -120,8 +134,16 @@ void adc_bemf_watchdog_for_phase(void)
     }
 }
 
-/* 触发源改为定时器 / ADC-DMA 中断 ⇒ 不再需要 EXTI 使能/屏蔽 */
-void enableCompInterrupts(void) { }
-void maskPhaseInterrupts(void) { }
+/* ★ 用软件"武装标志"取代比较器的 EXTI 使能/屏蔽（接口名保持与 comparator.c 相同，
+ *   main.c 一行不用改）：
+ *     enableCompInterrupts() —— 换相后调用（上游：PeriodElapsedCallback() 里）⇒ 允许认过零
+ *     maskPhaseInterrupts()  —— 认到过零/停机等场合调用 ⇒ 禁止认过零
+ *   真正判过零的地方是 ADC-DMA 完成中断（每帧一次，见 stm32g0xx_it.c）：
+ *     条件 = bemf_irq_armed && !zcfound && 距上次换相已过半个周期
+ *            && getCompOutputLevel() == !rising   ⇒ 认过零 ⇒ 清标志 + interruptRoutine()
+ *   （极性沿用 main.c getBemfState() 的上游约定：rising 步期望 getCompOutputLevel()==0。
+ *    若上机出现"换相方向反/不转"，第一个要试的就是把这个 `!rising` 反过来。） */
+void enableCompInterrupts(void) { bemf_irq_armed = 1; }
+void maskPhaseInterrupts(void) { bemf_irq_armed = 0; }
 
 #endif /* USE_ADC_BEMF */

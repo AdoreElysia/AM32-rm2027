@@ -2567,6 +2567,26 @@
  *   上游的 commutation_interval 单位是 0.5µs/拍（= 这里的值 × 100）。 */
 #define RM2027_OL_ARM_ONLY 1
 
+/* ★ 台架参数钉死开关（2026-10-07 从 RM2027_OL_ARM_ONLY 里拆出来）
+ *   本板 EEPROM 从第 17 字节起是 0xFF 擦除态 ⇒ motor_poles / limits.current / input_type
+ *   等都是垃圾值。这个开关负责在 main() 里把依赖项在 RAM 里钉成确定值。
+ *   它与"开环 / 闭环"无关 ⇒ 必须【始终为 1】：转闭环（RM2027_OL_ARM_ONLY=0）时也要保留，
+ *   否则 motor_poles/limits 变回擦除态的垃圾值，转速与限流全乱。 */
+#define RM2027_BENCH_PIN_EEPROM 1
+
+/* ★ 闭环必须的开关：过零检测从"轮询"切到"中断"的时机
+ *   上游默认（不定义时）是：低转速用轮询（zcfoundroutine 忙等）、转速上来后切中断模式。
+ *   本板没有比较器、中断源是 ADC-DMA 完成中断（见 stm32g0xx_it.c）⇒ 期望行为是
+ *   "起步阶段轮询（读的也是同一份 ADC 值）、两次过零后固定走中断模式" —— 这正是
+ *   NO_POLLING_START 的语义。顺带绕开 polling_mode_changeover / rc_car_reverse
+ *   那一堆按擦除态 eeprom 算出来的垃圾阈值（它们会让 old_routine 在 167rpm 就切走，
+ *   而本板切过去、没有比较器 ⇒ 再也不换相）。 */
+#define NO_POLLING_START
+
+/* 施密特滞回（ADC 码）。adc_bemf.c 里 12.7mV/码（相侧）；8 码 ≈ 100mV。
+ * 3700RPM 时悬空相 delta ≈ ±32 码（余量 4 倍）⇒ 8 够用；低速起步如丢步可降到 2~4。 */
+#define BEMF_HYST_LSB 8
+
 /* ---- 台架开环配置（按上游 AM32 写法：板级/编译期常量统一放 targets.h；
  *      main.c 只保留运行时状态与观测量。改这些值需重新编译，不像 EEPROM 参数可在配置器改）---- */
 #define OL_STEP_DIV        9       /* 目标步长：9 拍 = 450µs/步 ⇒ 约 3700 机械 RPM（6 极对）*/
