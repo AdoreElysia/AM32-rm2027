@@ -537,6 +537,9 @@ uint32_t ol_iphase_last = 0;       /* 观测用：最近一次反推出来的相
 uint32_t ol_run_limit = 60000;     /* 20kHz 拍 ⇒ 60000 = 3.0 秒；0 = 不限制 */
 uint32_t ol_run_ticks = 0;         /* 本次已驱动的拍数 */
 uint32_t ol_timeouts = 0;          /* 观测用：因到时间上限而自动停机的次数 */
+volatile uint8_t ol_led_off_req = 0; /* 请求灭灯：跳闸/超时停机时在中断里置位，
+                                      * 由主循环真正执行（WS2812 是阻塞位操作 ~30µs，
+                                      * 不能在 20kHz 的 olStepTick 里做） */
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1449,6 +1452,7 @@ static void olStepTick(void)
                 ol_step_div_cur = ol_step_div;
                 ol_trip_count = 0;
                 ol_trips++;
+                ol_led_off_req = 1; /* 停机 ⇒ 灭灯（主循环执行），避免"绿灯亮着但已停"的错觉 */
                 return;
             }
         } else {
@@ -1464,6 +1468,7 @@ static void olStepTick(void)
             ol_step_div_cur = ol_step_div;
             ol_run_ticks = 0;
             ol_timeouts++;
+            ol_led_off_req = 1; /* 停机 ⇒ 灭灯（主循环执行） */
             return;
         }
 
@@ -2247,6 +2252,13 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
+#ifdef USE_LED_STRIP
+                /* ★ 显式灭灯：原来"掉信号就上锁"时这一步是靠下面的 NVIC_SystemReset() 顺手
+                 *   把 LED 复位掉的；台架模式不再复位，所以要自己关 —— 否则 armed 已经清零、
+                 *   门极也全关，但绿灯（已解锁指示）还亮着，看上去像"没上锁"。
+                 *   只在这个 1→0 的跳变处发一次，不在下面的 2 秒分支里重复发（那会每轮都刷）。 */
+                send_LED_RGB(0, 0, 0);
+#endif
 #ifndef RM2027_OL_ARM_ONLY
                 NVIC_SystemReset(); /* 开环台架模式不复位：见下方 2 秒分支的说明 */
 #endif
@@ -2274,6 +2286,17 @@ if(zero_crosses < 5){
 #endif
             }
         }
+#ifdef RM2027_OL_ARM_ONLY
+        /* 跳闸/超时停机时请求的灭灯，在这里真正执行。
+         * 为什么不在 olStepTick() 里直接调：WS2812 是阻塞位操作（约 30µs），
+         * 而 olStepTick 跑在 20kHz（周期 50µs）的 TIM6 中断里，会打乱时序。 */
+        if (ol_led_off_req) {
+            ol_led_off_req = 0;
+#ifdef USE_LED_STRIP
+            send_LED_RGB(0, 0, 0);
+#endif
+        }
+#endif
 #ifdef USE_CUSTOM_LED
         if ((input >= 47) && (input < 1947)) {
             if (ledcounter > (2000 >> forward)) {
