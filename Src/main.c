@@ -1509,9 +1509,14 @@ static void olStepTick(void)
             ol_input_cur = ol_input;
             ol_step_div_cur = ol_step_div;
         }
-        /* 跳闸后 ol_input_cur 被清零（= 锁存），必须彻底上锁才复位，防止"跳了又自动重启"。
-         * 所以恢复步骤是：油门回 0 → 等 ESC 上锁 → 再重新解锁。跳闸次数看 ol_trips。 */
-        if (!armed) {
+        /* 跳闸后 ol_input_cur 被清零（= 锁存），必须满足恢复条件才复位，防止"跳了又自动重启"。
+         * 恢复条件（二者之一即可）：
+         *   ① !armed        —— 彻底上锁（DShot 停了、或低压切断）
+         *   ② newinput < 48 —— 原始油门回到 0
+         * ② 是必需的：像 test_esc 那块 F103 测试板会【持续发帧】（油门 0 也是有效帧），
+         * armed 因此永远不掉 ⇒ 只靠 ① 的话跳闸后根本解不开，只能整机复位。
+         * 跳闸次数看 ol_trips。 */
+        if (!armed || newinput < 48) {
             ol_input_cur = ol_input;
             ol_step_div_cur = ol_step_div;
             ol_trip_count = 0;
