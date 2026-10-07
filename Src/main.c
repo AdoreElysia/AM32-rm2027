@@ -2309,9 +2309,15 @@ if(zero_crosses < 5){
                  *   只在这个 1→0 的跳变处发一次，不在下面"每轮都执行"的 2 秒分支里重复发。 */
                 send_LED_RGB(125, 0, 0);
 #endif
-#ifndef RM2027_OL_ARM_ONLY
-                NVIC_SystemReset(); /* 开环台架模式不复位：见下方 2 秒分支的说明 */
-#endif
+                /* ★★ 这个复位【必须保留】，不能省！（2026-10-07 实测定位的严重缺陷）
+                 *   为什么：掉信号后这里只做了 resetInputCaptureTimer() + 清 dma_buffer，
+                 *   而这【不足以重新武装输入捕获的 DMA】—— 实测 DMA1_CH1->CNDTR 会停在 0
+                 *   （传输计数已用完），从此再也收不到任何 DShot 帧 ⇒ ESC 变成"聋子"：
+                 *   现象就是"怎么都解锁不了、只能复位电驱板""必须断电重上电才能再收到信号"。
+                 *   上游正是靠这次 NVIC_SystemReset() 把输入捕获 + DMA 完整重新初始化。
+                 *   （曾为"保住调试器预置的 RAM 参数"把它改成不复位 —— 那是错的、也是本次
+                 *     一系列怪现象的根因；现在参数都写进固件默认值了，复位不再有害。） */
+                NVIC_SystemReset();
             }
             if (signaltimeout > LOOP_FREQUENCY_HZ << 1) { // 2 second when not armed
                 allOff();
@@ -2324,16 +2330,10 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
-#ifndef RM2027_OL_ARM_ONLY
-                /* ★ 开环台架模式：信号丢失时只"停机 + 上锁"（上面已经做了 allOff/armed=0），
-                 *   不清零、不复位 MCU。原因：
-                 *   ① 复位会把 .data 段恢复成默认值 ⇒ 靠调试器预置的 RAM 参数每约 2 秒被冲掉，
-                 *      台架调试根本没法进行；
-                 *   ② 每次复位都会重新开机"嘀"一声，还会瞬间拉一下低边门极。
-                 *   注意：上锁（armed=0 ⇒ 绿灯灭）和 allOff() 都保留，所以"停 F1 就锁住"
-                 *   这个用法照旧有效，只是不再复位。 */
+                /* 同上：这里也必须复位（未解锁状态下信号丢失超过 2 秒）。
+                 * 原理与上面 0.5 秒分支完全一样：不复位 ⇒ 输入捕获 DMA 停在 CNDTR=0，
+                 * 之后永远收不到 DShot ⇒ "只能复位电驱板才能解锁"。 */
                 NVIC_SystemReset();
-#endif
             }
         }
 #ifdef RM2027_OL_ARM_ONLY
