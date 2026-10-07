@@ -453,9 +453,17 @@ void MX_TIM2_Init(void)
     /* USER CODE BEGIN TIM2_Init 1 */
 
     /* USER CODE END TIM2_Init 1 */
-    TIM_InitStruct.Prescaler = 31;
+    TIM_InitStruct.Prescaler = 31;                     /* 64MHz/32 = 2MHz ⇒ 0.5µs/拍（全工程的时间单位）*/
     TIM_InitStruct.CounterMode = LL_TIM_COUNTERMODE_UP;
-    TIM_InitStruct.Autoreload = 65535;
+    /* ★★ 必须是"自由运行"：ARR 原来是 65535 ⇒ 计数器每 65536 拍（32.8ms）就绕回。
+     *   而开环的"对齐/斜坡"用的期望间隔是 OL_ALIGN_TICKS×100 = 400000 拍（200ms）
+     *   ⇒ `INTERVAL_TIMER_COUNT >= commutation_interval` 永远不成立 ⇒ 状态机卡在
+     *   "对齐"里出不来：转子只被磁场拉一下就定住，跑满 5 秒上限才停（ol_steps=0、
+     *   ol_timeouts=1 就是这个签名）。上游那个固定阈值 45000 恰恰是故意压在
+     *   16 位绕回以下的，R2 把时间基准换成 INTERVAL_TIMER_COUNT 时漏了这条前提。
+     *   STM32G0 的 TIM2 是【32 位】定时器 ⇒ ARR 给满即可，0.5µs/拍下可计 ~35 分钟，
+     *   任何实际换相间隔都用不到绕回。 */
+    TIM_InitStruct.Autoreload = 0xFFFFFFFFUL;
     TIM_InitStruct.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
     LL_TIM_Init(TIM2, &TIM_InitStruct);
     LL_TIM_DisableARRPreload(TIM2);
