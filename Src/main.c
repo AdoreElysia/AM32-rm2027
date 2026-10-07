@@ -484,7 +484,6 @@ volatile char rising = 1;
 /* ★ 按上游 AM32 的写法：板级/编译期配置统一放在 targets.h（见 RM2027_ESC_G071 块里的 OL_* 宏），
  *   这里只保留【运行时状态】与【观测变量】。
  *   起步序列（对齐 → 斜坡 → 恒速）的推进逻辑见 olStepTick()。 */
-uint16_t ol_ticks = 0;                      /* 当前这一步已经过的拍数 */
 uint32_t ol_steps = 0;                      /* 观测：累计换相步数 */
 uint16_t ol_step_current[6];                /* 观测：六步各自的反推相电流（索引 = step-1，厘安）*/
 uint8_t  ol_state = 0;                      /* 0 空闲 / 1 对齐 / 2 斜坡 / 3 恒速 */
@@ -1385,16 +1384,23 @@ if (!stepper_sine && armed) {
 }
 
 #if RM2027_OL_ARM_ONLY
-/* ================== RM2027 强制开环步进器（DShot 仅解锁） ==================
- * 由 tenKhzRoutine()（TIM6，20kHz）每 50µs 调用一次 —— 时间基准稳定，不受主循环抖动影响。
- * 参数（OL_STEP_DIV / OL_INPUT_RUN / ol_ticks / ol_steps / ol_state …）定义在文件上方的全局区。
+/* ================== RM2027 强制开环（DShot 仅解锁） ==================
+ * 由 tenKhzRoutine()（TIM6，20kHz）调用 —— 只是"轮询频率"，不是时间基准。
  *
+ * ★★ 时间基准与 AM32 原生的开环一致（这是本函数与上游对齐的关键）★★
+ *   AM32 原生也有一段开环：它的兜底路径（主循环里）就是
+ *       if (INTERVAL_TIMER_COUNT > 45000) { ... zcfoundroutine(); }   // 强制换相
+ *   用的正是【INTERVAL_TIMER（TIM2，0.5µs/拍）+ commutation_interval】。
+ *   本函数沿用同一套：等 INTERVAL_TIMER_COUNT >= commutation_interval 就换相，只是把
+ *   固定阈值 45000 换成【随斜坡变化的期望间隔】。换相动作、时间量、计数器全用上游机制。
+ *
+ * 配置常量（OL_*）在 targets.h；运行时状态与观测量在文件上方的全局区。
  * 起步序列（ol_state）：0 空闲 → 1 对齐 → 2 斜坡 → 3 恒速
- *   1 对齐：不换相，门极钉在 comStep(1)，持续 OL_ALIGN_TICKS 拍 —— 转子被拉到已知位置并
- *           停住。顺带把 step 复位成 1，所以每次起步的第一组门极都一样（波形可重复）。
+ *   1 对齐：不换相，门极钉在 comStep(1)，等满 OL_ALIGN_TICKS 对应的时间 —— 转子被拉到
+ *           已知位置并停住；顺带把 step 复位成 1，所以每次起步的第一组门极都一样。
  *   2 斜坡：从 OL_STEP_DIV_START 起，每换相一次把步长按 1/2^OL_RAMP_SHIFT 缩短，
- *           到 OL_STEP_DIV 转恒速。转子就不用"追"一个已按目标节奏跳动的磁场。
- *   3 恒速：与改动前完全一致。 */
+ *           到 OL_STEP_DIV 转恒速。
+ *   3 恒速：保持 OL_STEP_DIV。 */
 static void olStepTick(void)
 {
     if (armed && running && input >= 47) {
@@ -1436,70 +1442,57 @@ static void olStepTick(void)
         }
 #endif
 
-        switch (ol_state) {
-        case 0: /* 解锁：复位步序 → 对齐 */
+        /* ★★ 时间基准：与 AM32 原生开环用同一套东西 ★★
+         *   AM32 原生也有一段开环 —— 它的兜底路径（主循环里）就是：
+         *        if (INTERVAL_TIMER_COUNT > 45000) { ... zcfoundroutine(); }   // 强制换相
+         *   用的正是【INTERVAL_TIMER（TIM2，0.5µs/拍）+ commutation_interval】。
+         *   这里唯一的不同：把固定阈值 45000 换成【随斜坡变化的期望间隔】。
+         *   ⇒ 换相动作（commutate()）、时间量（commutation_interval）、计数器
+         *     （INTERVAL_TIMER_COUNT）全部沿用上游机制，不再自己数 20kHz 拍。 */
+        if (ol_state == 0) {
+            /* 解锁后的第一拍：复位步序、门极钉住做"对齐"、把期望间隔设成对齐时长 */
             step = 1;
             comStep(1);
-            ol_ticks = 0;
             ol_input_cur = OL_INPUT_START;
             ol_step_div_cur = (OL_STEP_DIV_START > OL_STEP_DIV) ? OL_STEP_DIV_START : OL_STEP_DIV;
-            if (OL_ALIGN_TICKS > 0) {
-                ol_state = 1;
-            } else if (ol_step_div_cur > OL_STEP_DIV) {
-                ol_state = 2;
-            } else {
+            commutation_interval = (uint32_t)OL_ALIGN_TICKS * 100;   /* 0.5µs 单位 ⇒ 200ms */
+            SET_INTERVAL_TIMER_COUNT(0);
+            ol_state = (OL_ALIGN_TICKS > 0) ? 1 : ((ol_step_div_cur > OL_STEP_DIV) ? 2 : 3);
+            if (ol_state == 3) {
                 ol_input_cur = OL_INPUT_RUN;
-                ol_state = 3;
             }
-            break;
-
-        case 1: /* 对齐保持：门极不动 */
-            if (++ol_ticks >= OL_ALIGN_TICKS) {
-                ol_ticks = 0;
-                if (ol_step_div_cur > OL_STEP_DIV) {
-                    ol_state = 2;
-                } else {
+        } else if (INTERVAL_TIMER_COUNT >= commutation_interval) {
+            /* 期望间隔用完 ⇒ 到点了 */
+            SET_INTERVAL_TIMER_COUNT(0);
+            if (ol_state == 1) {
+                /* 对齐结束（这一段只等时间、不换相）⇒ 转入斜坡 */
+                ol_state = (ol_step_div_cur > OL_STEP_DIV) ? 2 : 3;
+                if (ol_state == 3) {
                     ol_input_cur = OL_INPUT_RUN;
-                    ol_state = 3;
                 }
-            }
-            break;
-
-        case 2: /* 斜坡：边换相边缩短步长 */
-            if (++ol_ticks >= ol_step_div_cur) {
-                uint16_t dec = (uint16_t)(ol_step_div_cur >> OL_RAMP_SHIFT);
-                ol_ticks = 0;
+            } else {
                 ol_step_current[step - 1] = (uint16_t)ol_iphase_last; /* 观测：本步相电流 */
                 commutate();
                 ol_steps++;
-                if (dec == 0) {
-                    dec = 1;
-                }
-                if ((uint32_t)ol_step_div_cur > (uint32_t)OL_STEP_DIV + dec) {
-                    ol_step_div_cur -= dec;
-                } else {
-                    ol_step_div_cur = OL_STEP_DIV;
-                    ol_input_cur = OL_INPUT_RUN; /* 斜坡结束 ⇒ 回到运行油门 */
-                    ol_state = 3;
+                if (ol_state == 2) {
+                    /* 斜坡：每换一次相，把步长按 1/2^OL_RAMP_SHIFT 缩短 */
+                    uint16_t dec = (uint16_t)(ol_step_div_cur >> OL_RAMP_SHIFT);
+                    if (dec == 0) {
+                        dec = 1;
+                    }
+                    if ((uint32_t)ol_step_div_cur > (uint32_t)OL_STEP_DIV + dec) {
+                        ol_step_div_cur -= dec;
+                    } else {
+                        ol_step_div_cur = OL_STEP_DIV;
+                        ol_input_cur = OL_INPUT_RUN; /* 斜坡结束 ⇒ 回到运行油门 */
+                        ol_state = 3;
+                    }
                 }
             }
-            break;
-
-        case 3:
-        default: /* 恒速（原行为）；ol_state 出现意外值时也走这条最保守的路 */
-            ol_state = 3;
-            if (++ol_ticks >= ol_step_div_cur) {
-                ol_ticks = 0;
-                ol_step_current[step - 1] = (uint16_t)ol_iphase_last; /* 观测：本步相电流 */
-                commutate(); /* ★ 本模式下唯一的换相入口，与 BEMF 无关 */
-                ol_steps++;
-            }
-            break;
+            /* 期望间隔换算到 0.5µs 单位：既是下一步的时间基准，也让 erpm/e_com_time 遥测算得对 */
+            commutation_interval = (uint32_t)ol_step_div_cur * 100;
         }
-        /* 喂入已知步长（0.5µs 单位）⇒ e_com_time/e_rpm 遥测算得对，也避免 600000/0 除零 */
-        commutation_interval = (uint32_t)ol_step_div_cur * 100;
     } else {
-        ol_ticks = 0;
         ol_run_ticks = 0; /* 不在驱动 ⇒ 运行计时清零 */
         if (running && input < 47) { /* 油门回 0 ⇒ 停机，并复位起步序列 */
             allOff();
