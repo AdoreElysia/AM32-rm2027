@@ -547,6 +547,19 @@ uint32_t ol_timeouts = 0;          /* 观测用：因到时间上限而自动停
 volatile uint8_t ol_led_off_req = 0; /* 请求灭灯：跳闸/超时停机时在中断里置位，
                                       * 由主循环真正执行（WS2812 是阻塞位操作 ~30µs，
                                       * 不能在 20kHz 的 olStepTick 里做） */
+
+/* ---- 停机原因 + 冷却重跑 ----
+ * ★ 2026-10-07 用户实测反馈的缺陷：到时间上限停机后，"油门回 0 才解除锁存"这个条件在用
+ *   test_esc 那块 F103 测试板时【永远不成立】—— F1 是自动序列，爬到目标油门后一直保持
+ *   （120），再也不会回到 0 ⇒ 锁存永远解不开，只能复位电驱板。
+ * 所以把"到时间上限"的停法与"过流跳闸"的停法分开：
+ *   ol_stop_reason = 1（到时间上限）⇒ 冷却 ol_cool_limit 拍后【自动解除锁存】，可以重跑；
+ *   ol_stop_reason = 2（过流跳闸）  ⇒ 保持锁存，必须人为干预（油门回 0 / 彻底上锁）才恢复
+ *                                    （那是故障，自动重跑会反复触发，更危险）。 */
+volatile uint8_t ol_stop_reason = 0; /* 见上 */
+uint32_t ol_cool_limit = 40000;      /* 到时间上限停机后的冷却：20kHz 拍 ⇒ 40000 = 2.0 秒；
+                                      * 冷却完自动解除锁存；0 = 不自动重跑（退回"必须油门回 0"） */
+uint32_t ol_cool_ticks = 0;          /* 冷却已过的拍数 */
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1459,6 +1472,7 @@ static void olStepTick(void)
                 ol_step_div_cur = ol_step_div;
                 ol_trip_count = 0;
                 ol_trips++;
+                ol_stop_reason = 2; /* 过流跳闸：保持锁存（故障，不能自动重跑） */
                 ol_led_off_req = 1; /* 停机 ⇒ 灭灯（主循环执行），避免"绿灯亮着但已停"的错觉 */
                 return;
             }
@@ -1475,6 +1489,7 @@ static void olStepTick(void)
             ol_step_div_cur = ol_step_div;
             ol_run_ticks = 0;
             ol_timeouts++;
+            ol_stop_reason = 1; /* 到时间上限：冷却后自动解除锁存（否则被永久锁死） */
             ol_led_off_req = 1; /* 停机 ⇒ 灭灯（主循环执行） */
             return;
         }
@@ -1551,17 +1566,30 @@ static void olStepTick(void)
             ol_input_cur = ol_input;
             ol_step_div_cur = ol_step_div;
         }
-        /* 跳闸后 ol_input_cur 被清零（= 锁存），必须满足恢复条件才复位，防止"跳了又自动重启"。
-         * 恢复条件（二者之一即可）：
-         *   ① !armed        —— 彻底上锁（DShot 停了、或低压切断）
-         *   ② newinput < 48 —— 原始油门回到 0
-         * ② 是必需的：像 test_esc 那块 F103 测试板会【持续发帧】（油门 0 也是有效帧），
-         * armed 因此永远不掉 ⇒ 只靠 ① 的话跳闸后根本解不开，只能整机复位。
-         * 跳闸次数看 ol_trips。 */
+        /* 锁存解除条件之一：① !armed（彻底上锁）② newinput < 48（原始油门回到 0）。
+         * 两者都成立时说明是"人为上锁/收油门"，可以恢复。
+         * 注意：用 test_esc 那块 F103 测试板时 F1 爬到目标油门后一直保持 120，
+         * ② 永远不会成立 ⇒ 所以"到时间上限"那一类停机改由下面的冷却逻辑自动解除。 */
         if (!armed || newinput < 48) {
             ol_input_cur = ol_input;
             ol_step_div_cur = ol_step_div;
             ol_trip_count = 0;
+            ol_stop_reason = 0;
+            ol_cool_ticks = 0;
+        }
+        /* ★ "到时间上限"停机的自动重跑：冷却 ol_cool_limit 拍后解除锁存。
+         *   这样"跑 N 秒 → 停 M 秒 → 又跑 N 秒"，既不会一直转、也不会被永久锁死。
+         *   过流跳闸（ol_stop_reason == 2）不在此列：必须人为干预才恢复。 */
+        if (ol_stop_reason == 1 && ol_cool_limit > 0) {
+            if (++ol_cool_ticks >= ol_cool_limit) {
+                ol_input_cur = ol_input;
+                ol_step_div_cur = ol_step_div;
+                ol_stop_reason = 0;
+                ol_cool_ticks = 0;
+            }
+        }
+        if (ol_stop_reason == 0) {
+            ol_cool_ticks = 0;
         }
     }
 }
