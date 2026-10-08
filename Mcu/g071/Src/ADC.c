@@ -237,8 +237,22 @@ void ADC_Init(void)
      *     ② ADCSEL 若被改（RCC_CCIPR bit[31:30]），这里算好的帧时长就整体变。 */
     LL_ADC_SetClock(ADC1, LL_ADC_CLOCK_ASYNC);
     LL_ADC_SetCommonClock(__LL_ADC_COMMON_INSTANCE(ADC1), LL_ADC_CLOCK_ASYNC_DIV2);
+    /* ★★ COMMON_1 的采样时间是"BEMF 四路能不能塞进导通期"的直接决定项（2026-10-07 实测）：
+     *   19.5 周期时实测四路 BEMF（rank1~4）要 ~3.6µs ≈ 230 拍，判据是
+     *       CCR4 + 230 < 导通期长度(= duty×ARR)
+     *   ⇒ 占空比低于约 (CCR4+230)/2665 ≈ 14% 时，扫描尾巴（VC/V0）就落进关断期：
+     *     导通期一结束，被驱动的两相被拉低、星点塌下来，于是悬空相和 V0 都读成 0
+     *     ⇒ delta = 悬空相 − V0 ≈ 0 ⇒ 永远判不出过零 ⇒ 闭环锁不上。
+     *     实测证据（CCR4=150、duty 17.6% 时）：vb(先采) 能读到 1053≈VBAT，
+     *     而 vc、v0（后采）恒为 0；把触发提前到 CCR4=60 后立刻自洽：
+     *     vb=717 vc=1051 v0=588 ⇒ (4+717+1051)/3 = 590 ≈ v0 ✓ ⇒ 采样正确。
+     *   改小到 7.5 周期 ⇒ 四路 BEMF 只需 ~2.5µs（160 拍），低占空比余量大幅改善。
+     *   7.5 周期 @32MHz = 234ns；相采样网络源阻抗 ~3.0k、采样电容 ~5pF
+     *   ⇒ τ≈15ns ⇒ 234ns ≈ 15τ（12 位只需 ~8.3τ）⇒ 精度足够。
+     *   （COMMON_1 也管电流/电压通道：电压分压源阻 ~4.3k ⇒ τ≈21ns ⇒ 11τ ✓；
+     *     温度通道在 COMMON_2（160.5 周期）不受影响。） */
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_1,
-        LL_ADC_SAMPLINGTIME_19CYCLES_5);
+        LL_ADC_SAMPLINGTIME_7CYCLES_5);
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_2,
         LL_ADC_SAMPLINGTIME_160CYCLES_5);
     LL_ADC_DisableIT_EOC(ADC1);
