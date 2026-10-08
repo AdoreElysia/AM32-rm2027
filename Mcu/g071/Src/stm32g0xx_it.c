@@ -241,7 +241,21 @@ void DMA1_Channel2_3_IRQHandler(void)
          *          上机若出现"换相方向反/不转/一冲就停"，第一个就把它反过来试。
          *     ④ 认到后调 interruptRoutine()（上游现成的：记 thiszctime、算 waitTime、
          *        用 COM_TIMER 定时换相），闭环时刻精度由它保证。 */
-        if (bemf_irq_armed && (INTERVAL_TIMER->CNT > (average_interval >> 1))
+        /* ★★ 2026-10-07 深夜实测加的【上界】：只卡下界不够用。
+         *   证据（live 模式 300ms 连采 40 次，R35 那一行）：一次"过零"是在上一步之后
+         *   约 8.7ms 才被认到的（当时正常步长只有 45µs，即 190 倍），却被当成有效值
+         *   ⇒ zcfoundroutine 的 ci=(thiszctime+3·ci)/4 把 ci 从 92 一次顶到 4450
+         *   （实测 ci=4447、thiszctime=17529；公式算得 4450 ⇒ 对到个位数）
+         *   ⇒ 下一步 waitTime=ci/2≈2200 拍 ⇒ 闭环从 eRPM 2158 瞬间掉进 eRPM 40 的爬行，
+         *      之后约 1~3 秒才慢慢爬回来 ⇒ 听感就是"在转但一直抖、转速慢"。
+         *   物理依据：真过零只会出现在"上次换相之后的半个到一个步长"附近
+         *   （average_interval ≈ 一个步长），迟到超过 2 个步长的"过零"一定是假的
+         *   ⇒ 丢掉它、**保持武装**（本周期/下周期再判），实在没有就交给 22.5ms 超时兜底。
+         *   average_interval < 50 拍（起步/异常）时上界没有意义，不卡。 */
+        if (bemf_irq_armed
+            && (INTERVAL_TIMER->CNT > (average_interval >> 1))
+            && ((average_interval < 50)
+                || (INTERVAL_TIMER->CNT < ((uint32_t)average_interval << 1)))
             && (getCompOutputLevel() == !rising)) {
             bemf_irq_armed = 0;
             interruptRoutine();
