@@ -1010,6 +1010,16 @@ void interruptRoutine()
 
 void startMotor()
 {
+#if !RM2027_OL_ARM_ONLY
+    /* ★ 闭环起步前必须把 old_routine 清 0（2026-10-07 定位的"起不来"根因之一）。
+     *   为什么：换相链要自己续接，靠的是 PeriodElapsedCallback() 里那句
+     *     `if (!old_routine) enableCompInterrupts();`
+     *   —— old_routine 为 1 时过零中断不再被重新武装，闭环只走一步就断。
+     *   而 old_routine 恰恰会在"已解锁 + 零油门 + 停止"时被零油门分支钉成 1
+     *   （那是上游给"老轮询换相"板子留的语义；本板没有比较器，走中断闭环，不适用）。
+     *   解锁又【必须】先有一段零油门 ⇒ 不在这里清，头一次起步就会被解锁过程污染。 */
+    old_routine = 0;
+#endif
     if (running == 0) {
         commutate();
         commutation_interval = 10000;
@@ -1247,9 +1257,21 @@ if (!stepper_sine && armed) {
         if (input >= 47 + (80 * eepromBuffer.use_sine_start)) {
             if (running == 0) {
                 allOff();
-                if (!old_routine) {
+#if RM2027_OL_ARM_ONLY
+                if (!old_routine) {   /* 开环：换相由 olStepTick() 独占，不必走 startMotor() */
                     startMotor();
                 }
+#else
+                /* ★ 闭环：从"停止"给油【无条件】走 startMotor()（2026-10-07 定位的
+                 *   "解锁后推不动转子"根因）。
+                 *   上游这里门控 `if (!old_routine)`，语义是"old_routine==1 时由老轮询换相
+                 *   自己起步"。但本板没有比较器、老轮询起步不可靠；更要命的是解锁【必须】
+                 *   先有一段零油门，而"已解锁 + 零油门 + 停止"会把 old_routine 钉成 1
+                 *   （见下面零油门分支）⇒ 这道门控会让"解锁后的头一次给油"什么都不做：
+                 *   现象是 armed=1、running=1、duty 有值，但电机不换相、推不动。
+                 *   startMotor() 内部会先清 old_routine，故放在这里做首次 commutate()。 */
+                startMotor();
+#endif
                 running = 1;
                 last_duty_cycle = min_startup_duty;
             }
@@ -2190,7 +2212,14 @@ int main(void)
                                               * （闭环要用时再加回 350 并单独验证。）*/
     startup_max_duty_cycle = 400;
     tim1_arr = TIMER1_MAX_ARR;
-    old_routine = 1;                         /* 保持"非闭环"态 ⇒ 不会走 startMotor() */
+#if RM2027_OL_ARM_ONLY
+    old_routine = 1;                         /* ★ 只有开环模式才钉"非闭环"态。
+                                              * 闭环模式必须留 0：主循环里 `if (!old_routine)
+                                              * startMotor();` —— 钉成 1 就等于禁止起步
+                                              * （2026-10-07 实测：闭环起不来的死锁点）。 */
+#else
+    old_routine = 0;                         /* 闭环：允许 startMotor() 走 AM32 原生起步 */
+#endif
     zero_crosses = 0;
 #endif
 
@@ -2362,7 +2391,19 @@ if(zero_crosses < 5){
 #endif
         average_interval = e_com_time / 3;
         if (!RM2027_OL_ARM_ONLY && desync_check && zero_crosses > 10) {
-            if ((getAbsDif(last_average_interval, average_interval) > average_interval >> 1) && (average_interval < 2000)) { // throttle resitricted before zc 20.
+            /* ★ 失步判据必须只在"换相间隔【变长】"时才成立（2026-10-07 实测修正）。
+             *   上游用的是 |Δ| > 50%（两个方向都算）。但本板闭环起步的加速斜坡，靠的就是
+             *   换相间隔【连续大幅缩短】—— PeriodElapsedCallback 的
+             *       ci = (ci + ((lastzctime+thiszctime)>>1)) >> 1
+             *   本来就是"每转把 ci 往过零时刻拉近一半" ⇒ 健康加速天然满足 |Δ| > 50%
+             *   ⇒ 被误判成失步 ⇒ running=0 复位 ⇒ 电机"冲到 2272eRPM 又被拽回去重起"
+             *   ⇒ 现象就是【在转、但很抖、永远跑不稳】。
+             *   实测：duty≈290、e_rpm=2272 处被复位，掉到 38 后重新爬（2026-10-07）。
+             *   物理上真正的失步 = 转子跟不上换相 ⇒ 换相间隔变长 ⇒ 只认这个方向即可。
+             *   （这样也顺带排掉"首次跨越 average_interval<2000 那条界"时的假触发。） */
+            if ((average_interval > last_average_interval) &&
+                (getAbsDif(last_average_interval, average_interval) > (average_interval >> 1)) &&
+                (average_interval < 2000)) { // throttle resitricted before zc 20.
                 zero_crosses = 0;
                 desync_happened++;
                 if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
@@ -2585,13 +2626,51 @@ if(zero_crosses < 5){
                 
                 temp_comp_pwm = eepromBuffer.comp_pwm;
                 maskPhaseInterrupts();
-                old_routine = 1;
+#if RM2027_OL_ARM_ONLY
+                old_routine = 1;   /* 开环：本分支不参与换相（换相由 olStepTick 独占） */
+#else
+                /* ★★ 闭环（本板 = ADC 中断闭环）绝不能退回轮询态、也不能把过零中断留在屏蔽态。
+                 *   为什么：maskPhaseInterrupts() 之后，唯一会重新武装过零判据的地方是
+                 *   PeriodElapsedCallback()（main.c 里 `if (!old_routine) enableCompInterrupts();`），
+                 *   而那个函数要靠 interruptRoutine()（= 认到过零）才能被调用 ⇒ 死锁：
+                 *     屏蔽 ⇒ 认不到过零 ⇒ 没人重新武装 ⇒ 只能再等下一次超时硬踹一次。
+                 *   实测（2026-10-07）：old_routine 恒 1、bemf_irq_armed 恒 0、
+                 *   bemf_timeout_happened 以 ~20 次/秒 稳定上涨 ⇒ 换相完全由本分支硬踹驱动
+                 *   ⇒ 20 步/秒（约 33 RPM）"缓慢蹭着转 + 一直抖"、母线约 1 A、e_rpm 恒 8。
+                 *   上游这里写 old_routine=1 是给"有比较器、能退回轮询"的板子留的语义；
+                 *   本板三相里只有 C 相能进比较器（见 Inc/targets.h 的 USE_ADC_BEMF 注释），
+                 *   轮询起步不可靠 ⇒ 必须留在中断模式。 */
+                old_routine = 0;
+#endif
                 if (input < 48) {
                     running = 0;
                     commutation_interval = 5000;
                 }
                 zero_crosses = 0;
+#if RM2027_OL_ARM_ONLY
                 zcfoundroutine();
+#else
+                /* ★★ 闭环：这里只做"强制换相一次"，【不能】走 zcfoundroutine()。
+                 *   为什么：zcfoundroutine() 会写 `thiszctime = INTERVAL_TIMER_COUNT`
+                 *   （本次超时时刻 ≈45000），而这个【假的过零时刻】随后被
+                 *   interruptRoutine() 复制进 lastzctime，再被 PeriodElapsedCallback 的
+                 *      ci = (ci + ((lastzctime + thiszctime) >> 1)) >> 1
+                 *   平滑进 commutation_interval ⇒ ci 被不断【拉大】⇒ 加速斜坡起不来
+                 *   ⇒ 只能继续靠本分支每 20~50ms 硬踹一次（自锁）。
+                 *   实测（2026-10-07）：ci 在 21000~37000 徘徊不降、e_rpm 恒 6~8、
+                 *   bemf_timeout_happened 以 ~20 次/秒 稳定上涨；而 lastzctime 与
+                 *   thiszctime 的配对（如 45005/18643）证明过零本身是认到了的
+                 *   （interruptRoutine 确实被调用）⇒ 卡的就是这里的时间污染。 */
+                commutate();
+                SET_INTERVAL_TIMER_COUNT(0);
+#endif
+#if !RM2027_OL_ARM_ONLY
+                /* 硬踹完立刻把过零判据交还给中断闭环，否则下一次过零照样认不出来。
+                 * 安全：zcfoundroutine() 开头刚做过 SET_INTERVAL_TIMER_COUNT(0)
+                 * （见其函数体），而中断端的门槛是 INTERVAL_TIMER->CNT > average_interval/2
+                 * ⇒ 刚踹完不会立刻误认过零。 */
+                enableCompInterrupts();
+#endif
               }
             }
         } else { // stepper sine
