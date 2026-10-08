@@ -251,6 +251,8 @@ an settings option)
 #include "version.h"
 
 void zcfoundroutine(void);
+void commutate(void);
+extern volatile uint16_t duty_cycle;
 
 /* RM2027 开环调试开关：未定义时按 0 处理，这样既能用 #ifdef，也能直接写进 if 条件里 */
 #ifndef RM2027_OL_ARM_ONLY
@@ -480,10 +482,10 @@ uint16_t advance = 0;
 uint8_t advancedivisor = 6;
 volatile char rising = 1;
 
-#if RM2027_OL_ARM_ONLY
 /* ★ 按上游 AM32 的写法：板级/编译期配置统一放在 targets.h（见 RM2027_ESC_G071 块里的 OL_* 宏），
  *   这里只保留【运行时状态】与【观测变量】。
- *   起步序列（对齐 → 斜坡 → 恒速）的推进逻辑见 olStepTick()。 */
+ *   起步序列（对齐 → 斜坡 → 恒速）的推进逻辑见 olStepTick()。
+ *   ★ 2026-10-08：这组变量改成【无条件编译】—— 闭环的"开环起步链"（见下）也复用它们。 */
 uint32_t ol_steps = 0;                      /* 观测：累计换相步数 */
 uint16_t ol_step_current[6];                /* 观测：六步各自的反推相电流（索引 = step-1，厘安）*/
 uint8_t  ol_state = 0;                      /* 0 空闲 / 1 对齐 / 2 斜坡 / 3 恒速 */
@@ -499,6 +501,126 @@ volatile uint8_t ol_led_on_req = 0;         /* 请求切"运行绿"：每次起�
                                              * 否则第一轮跑完变红后，之后每轮都会一直亮红灯 */
 volatile uint8_t ol_stop_reason = 0;        /* 0 无 / 1 到时间上限 / 2 过流跳闸 */
 uint32_t ol_cool_ticks = 0;                 /* 冷却已过的拍数 */
+volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑（ISR 也要读，故无条件定义）*/
+/* ↑ 这一组是"开环版 / 闭环开环起步链"共用的运行时状态。闭环也要用（起步链复用它们），
+ *   所以下面的起步链代码【不能】再包在 #if RM2027_OL_ARM_ONLY 里。 */
+
+#if !RM2027_OL_ARM_ONLY
+
+/* ================== 闭环的"开环起步"（正统三段式，2026-10-08 加） ==================
+ * 为什么要它：本板过零只能靠 ADC + 软件施密特（没有比较器通路，见 targets.h 的
+ *   USE_ADC_BEMF 注释）。而施密特有个硬门槛 BEMF_HYST_LSB 码（≈相侧 50mV），
+ *   对应电机 ~300~500 机械 RPM —— 低于这个转速，反电势跨不过门槛、状态不翻转、
+ *   认不到过零。于是"起步就进闭环"会自锁：认不到过零 ⇒ 不缩短换相间隔 ⇒
+ *   永远靠 22.5ms 超时硬踹 ⇒ 转速上不去 ⇒ 更认不到。实测（2026-10-08）：
+ *   zc 恒 0、bemf_timeout_happened 猛涨、step 每 22.5ms 才走一步（≈7 RPM）。
+ *
+ * 正统做法（与上游 AM32 一致，只是把"比较器认过零"换成"ADC 认过零"）：
+ *   ① 对齐：comStep(1) 把转子钉到已知位置
+ *   ② 开环斜坡：固定时基硬踹，步长由 OL_STEP_DIV_START 逐次缩短到 OL_STEP_DIV
+ *   ③ 认到 N 次过零 ⇒ 交棒给闭环（old_routine=0），此后由过零中断驱动换相
+ * 三段里只有第 ③ 段需要反电势 —— 而那时电机已被踹到斜坡末端，反电势足够大、
+ * 判据稳定可认。 */
+#define OL_STARTUP_ALIGN   0   /* 阶段码：先对齐 */
+#define OL_STARTUP_RAMP    1   /* 阶段码：开环斜坡 */
+#define OL_STARTUP_ZC_NEED 3   /* 认到几次过零才交棒（防误交） */
+
+static uint8_t   ol_startup_stage = OL_STARTUP_ALIGN;
+static uint8_t   ol_startup_zc = 0;    /* 本起步过程累计认到的过零数 */
+static uint32_t  ol_startup_ticks = 0; /* 本起步过程已跑的拍数（安全上限用） */
+static uint16_t  ol_startup_trip = 0;  /* 过流连续超限计数 */
+
+/* 起步期间：允许过零中断"认边沿"，但不许它直接驱动换相（换相由本链独占），
+ * 也不许主循环那条 22.5ms 超时兜底插手（否则会和本链的时基打架）。 */
+#define OL_STARTUP_ACTIVE() (ol_startup_arm != 0)
+
+/* 给 ISR 用的"数一次过零"出口（ISR 在 stm32g0xx_it.c，不能直接写 static 变量） */
+void ol_startup_zc_inc(void)
+{
+    if (ol_startup_zc < 250) {
+        ol_startup_zc++;
+    }
+}
+
+/* 由主循环每轮调用（与 olStepTick 同层）。返回时若已交棒，ol_startup_arm 已清 0。 */
+static void olStartupTick(void)
+{
+    if (!OL_STARTUP_ACTIVE() || !running || input < 47) {
+        return;
+    }
+
+    /* ---- 安全①：过流（起步时反电势几乎为 0，最容易吃到堵转电流） ---- */
+#if OL_TRIP_CURRENT > 0
+    if (duty_cycle > 0
+        && ((uint32_t)actual_current * 2000) / (uint32_t)duty_cycle > OL_TRIP_CURRENT) {
+        if (++ol_startup_trip > OL_TRIP_TICKS) {
+            allOff();
+            running = 0;
+            ol_startup_arm = 0;
+            return;
+        }
+    } else {
+        ol_startup_trip = 0;
+    }
+#endif
+
+    /* ---- 安全②：总时长上限（斜坡跑完仍没交棒 ⇒ 放弃起步、停机，绝不无限硬踹） ---- */
+    if (++ol_startup_ticks > 4000000UL) {
+        allOff();
+        running = 0;
+        ol_startup_arm = 0;
+        return;
+    }
+
+    /* 期望间隔换算成 0.5µs 单位（TIM2 的拍），既当时间基准又给遥测算 eRPM */
+    commutation_interval = (uint32_t)ol_step_div_cur * 100;
+
+    /* ---- 阶段推进 ---- */
+    if (ol_startup_stage == OL_STARTUP_ALIGN) {
+        /* 对齐：门极在 startMotor() 里已钉在 comStep(1)，这里只计时 */
+        if (INTERVAL_TIMER_COUNT >= commutation_interval) {
+            SET_INTERVAL_TIMER_COUNT(0);
+            ol_startup_stage = OL_STARTUP_RAMP;
+            /* 进斜坡：开始武装过零判据（只用来"数"过零，换相仍由本链独占） */
+            ol_input_cur = OL_INPUT_START;
+            enableCompInterrupts();
+        }
+    } else {
+        /* 开环斜坡：到点就换相一次，并把步长按 1/2^OL_RAMP_SHIFT 缩短 */
+        if (INTERVAL_TIMER_COUNT >= commutation_interval) {
+            SET_INTERVAL_TIMER_COUNT(0);
+            commutate();
+            ol_steps++;
+            if (ol_step_div_cur > OL_STEP_DIV) {
+                uint16_t dec = (uint16_t)(ol_step_div_cur >> OL_RAMP_SHIFT);
+                if (dec == 0) {
+                    dec = 1;
+                }
+                if ((uint32_t)ol_step_div_cur > (uint32_t)OL_STEP_DIV + dec) {
+                    ol_step_div_cur -= dec;
+                } else {
+                    ol_step_div_cur = OL_STEP_DIV;
+                }
+            }
+        }
+    }
+
+    /* ---- 交棒判据：斜坡跑到底 + 已认到足够多次过零 ---- */
+    if (ol_step_div_cur <= OL_STEP_DIV && ol_startup_zc >= OL_STARTUP_ZC_NEED) {
+        ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
+        old_routine = 0;
+        enableCompInterrupts();
+    }
+}
+#endif /* !RM2027_OL_ARM_ONLY */
+
+#if RM2027_OL_ARM_ONLY
+/* 开环独占版：给闭环起步链提供空实现，主循环/ISR 不必分叉。
+ * （主循环里两条路是 #if 分开的，这里只为消掉"定义了没用"的告警。） */
+#undef  OL_STARTUP_ACTIVE
+#define OL_STARTUP_ACTIVE() (0)
+__attribute__((unused)) static void olStartupTick(void) { }
+__attribute__((unused)) void ol_startup_zc_inc(void) { }
 #endif
 
 ////Space Vector PWM ////////////////
@@ -1011,22 +1133,41 @@ void interruptRoutine()
 void startMotor()
 {
 #if !RM2027_OL_ARM_ONLY
-    /* ★ 闭环起步前必须把 old_routine 清 0（2026-10-07 定位的"起不来"根因之一）。
-     *   为什么：换相链要自己续接，靠的是 PeriodElapsedCallback() 里那句
-     *     `if (!old_routine) enableCompInterrupts();`
-     *   —— old_routine 为 1 时过零中断不再被重新武装，闭环只走一步就断。
-     *   而 old_routine 恰恰会在"已解锁 + 零油门 + 停止"时被零油门分支钉成 1
-     *   （那是上游给"老轮询换相"板子留的语义；本板没有比较器，走中断闭环，不适用）。
-     *   解锁又【必须】先有一段零油门 ⇒ 不在这里清，头一次起步就会被解锁过程污染。 */
-    old_routine = 0;
+    /* ★★ 2026-10-08 改：起步不再直接进闭环，改走"正统三段式"开环起步 ★★
+     *   原先这里把 old_routine 清 0 直接进闭环 —— 但本板过零靠 ADC 软件施密特，
+     *   有 BEMF_HYST_LSB 的硬门槛，静止/极低速时认不到过零 ⇒ 直接进闭环会自锁
+     *   （实测：zc 恒 0、靠 22.5ms 超时硬踹、step 每 22.5ms 才一步 ≈7 RPM）。
+     *   现在：起步先开环（对齐 → 斜坡，固定时基硬踹），等电机被踹到斜坡末端、
+     *   过零能稳定认到之后再交棒给闭环。判据与交棒动作见 olStartupTick()。
+     *   注意此间 old_routine 置 1 是【故意】的语义："不要走中断闭环换相"；
+     *   但主循环那条 22.5ms 超时兜底必须让开（见其调用处加的条件），
+     *   否则两套时基会打架。 */
+    old_routine = 1;
 #endif
     if (running == 0) {
         commutate();
         commutation_interval = 10000;
         SET_INTERVAL_TIMER_COUNT(5000);
         running = 1;
+#if !RM2027_OL_ARM_ONLY
+        /* 进入/重置开环起步链：对齐阶段先钉住门极并计时 */
+        ol_startup_arm   = 1;
+        ol_startup_stage = OL_STARTUP_ALIGN;
+        ol_startup_zc    = 0;
+        ol_startup_ticks = 0;
+        ol_startup_trip  = 0;
+        ol_step_div_cur  = (OL_STEP_DIV_START > OL_STEP_DIV) ? OL_STEP_DIV_START : OL_STEP_DIV;
+        ol_input_cur     = OL_INPUT_START;
+        commutation_interval = (uint32_t)OL_ALIGN_TICKS * 100;   /* 0.5µs 单位 ⇒ 对齐时长 */
+        SET_INTERVAL_TIMER_COUNT(0);
+        /* 先不武装过零：对齐期间门极不动、电压还没到悬空态，此时认的"边沿"都是假的。
+         * 进斜坡后再武装（见 ol_startup_stage 切换处）。 */
+        maskPhaseInterrupts();
+#endif
     }
+#if RM2027_OL_ARM_ONLY
     enableCompInterrupts();
+#endif
 }
 
 void setInput()
@@ -1191,6 +1332,13 @@ void setInput()
      *   未解锁时必须保持 0 —— 解锁判据就是 adjusted_input == 0（见 tenKhzRoutine）。
      *   用 ol_input_cur 而不是 OL_INPUT_RUN：起步序列（对齐/斜坡）阶段要临时给更大的油门。 */
     adjusted_input = (armed && newinput >= 48) ? ol_input_cur : 0;
+#else
+    /* ★ 闭环的"开环起步"阶段同理：这两段（对齐/斜坡）的油门要用 ol_input_cur
+     *   （OL_INPUT_START），否则起步扭矩按用户油门算，解锁后刚给一点油就可能推不动。
+     *   交棒后 ol_startup_arm 清 0，这里就恢复成"按用户油门"。 */
+    if (OL_STARTUP_ACTIVE()) {
+        adjusted_input = ol_input_cur;
+    }
 #endif
 #ifndef BRUSHED_MODE
     if ((bemf_timeout_happened > bemf_timeout) && eepromBuffer.stuck_rotor_protection) {
@@ -1636,7 +1784,10 @@ void tenKhzRoutine()
 
     if (!stepper_sine) {
 #ifndef CUSTOM_RAMP
-        if (!RM2027_OL_ARM_ONLY && old_routine && running) {
+        /* ★ 闭环的"开环起步"期间要跳过这段轮询换相：它只在 old_routine=1 时跑，
+         *   而起步链故意把 old_routine 置 1（表示"先别走中断闭环"），
+         *   若不跳过，轮询也会来插一脚、和起步链的固定时基打架。 */
+        if (!RM2027_OL_ARM_ONLY && !OL_STARTUP_ACTIVE() && old_routine && running) {
 	//				send_LED_RGB(255, 0, 0);
             maskPhaseInterrupts();
             getBemfState();
@@ -1657,6 +1808,8 @@ void tenKhzRoutine()
 #endif
 #if RM2027_OL_ARM_ONLY
         olStepTick(); /* ★ 开环调试：本函数独占换相，上面的 BEMF 轮询换相已关掉 */
+#else
+        olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
 #endif
         if (one_khz_loop_counter > PID_LOOP_DIVIDER) { // 1khz PID loop
             PROCESS_ADC_FLAG = 1; // set flag to do new adc read at lower priority
@@ -2213,12 +2366,15 @@ int main(void)
     startup_max_duty_cycle = 400;
     tim1_arr = TIMER1_MAX_ARR;
 #if RM2027_OL_ARM_ONLY
-    old_routine = 1;                         /* ★ 只有开环模式才钉"非闭环"态。
-                                              * 闭环模式必须留 0：主循环里 `if (!old_routine)
-                                              * startMotor();` —— 钉成 1 就等于禁止起步
-                                              * （2026-10-07 实测：闭环起不来的死锁点）。 */
+    old_routine = 1;                         /* 开环独占版：换相由 olStepTick 独占 */
 #else
-    old_routine = 0;                         /* 闭环：允许 startMotor() 走 AM32 原生起步 */
+    /* ★ 2026-10-08 改：闭环不再在这里把 old_routine 钉成 0。
+     *   原来钉 0 是为了让主循环 `if (!old_routine) startMotor();` 能起步，
+     *   但那样起步就直接进中断闭环了（本板认不到低速过零 ⇒ 自锁）。
+     *   现在起步由 startMotor() 里置 1 + 走开环起步链（olStartupTick）来完成，
+     *   起步链跑完才把它清 0 交给闭环。这里保持"不参与起步"的初值即可，
+     *   真正的起步门控在 startMotor() 里无条件执行（见那里的说明）。 */
+    old_routine = 1;
 #endif
     zero_crosses = 0;
 #endif
@@ -2619,7 +2775,10 @@ if(zero_crosses < 5){
                 }
             }
 #endif
-            if (!RM2027_OL_ARM_ONLY && INTERVAL_TIMER_COUNT > 45000) {
+            /* ★ 起步链（olStartupTick）期间把这条 22.5ms 超时兜底让开：
+             *   起步链本身在按固定时基换相，兜底再来"硬踹"会打乱它的节奏；
+             *   而兜底原本要解决的就是"没人换相"，起步链在跑时这个问题不存在。 */
+            if (!RM2027_OL_ARM_ONLY && !OL_STARTUP_ACTIVE() && INTERVAL_TIMER_COUNT > 45000) {
               zero_throttle_brake_active = 0;   // reset zero throttle brake on back emf timeout (rotation stop)
               if(running){
                 bemf_timeout_happened++;

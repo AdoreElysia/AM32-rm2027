@@ -226,39 +226,61 @@ void DMA1_Channel2_3_IRQHandler(void)
          *   实测证据：武装一次后 EOS 置位、DMA 搬满 7 个字；400ms 内不再有第二帧。
          *   注：这样每帧的开销只是 1 次寄存器写；采样时刻仍由 TIM1_CH4（CCR4）决定。 */
         LL_ADC_REG_StartConversion(ADC1);
-        /* ★★ 过零判据就放在这里（= 用"每帧采完"替代比较器的 EXTI）★★
-         *   为什么放这儿：四路 BEMF（含悬空相与 V0）就是这一帧刚采进来的，
-         *   在这里判等于"用最新鲜的数据判过零"，且天然与 PWM 同步（采样点固定在
-         *   高边开通后 ADC_TRIGGER_CCR4 拍）。判据与上游比较器中断同构：
-         *     ① bemf_irq_armed —— 换相后由 enableCompInterrupts() 置 1；
-         *        认到一次过零就清 0 ⇒【每步只认一次】，同一个过零点不会被反复触发
-         *        （这是取代 EXTI 后必须自己做的一件事）。
-         *     ② INTERVAL_TIMER->CNT > average_interval>>1 —— 距上次换相太近的
-         *        翻转一律当噪声丢掉（上游 EXTI 处理器里同样的门槛）。
-         *     ③ getCompOutputLevel() == !rising —— 极性沿用 main.c getBemfState()
-         *        的上游约定（rising 步期望 getCompOutputLevel()==0）。
-         *        ⚠ 这条是"照抄比较器约定"猜的（本板 A/B 相没有比较器可比对）：
-         *          上机若出现"换相方向反/不转/一冲就停"，第一个就把它反过来试。
-         *     ④ 认到后调 interruptRoutine()（上游现成的：记 thiszctime、算 waitTime、
-         *        用 COM_TIMER 定时换相），闭环时刻精度由它保证。 */
-        /* ★★ 2026-10-07 深夜实测加的【上界】：只卡下界不够用。
-         *   证据（live 模式 300ms 连采 40 次，R35 那一行）：一次"过零"是在上一步之后
-         *   约 8.7ms 才被认到的（当时正常步长只有 45µs，即 190 倍），却被当成有效值
-         *   ⇒ zcfoundroutine 的 ci=(thiszctime+3·ci)/4 把 ci 从 92 一次顶到 4450
-         *   （实测 ci=4447、thiszctime=17529；公式算得 4450 ⇒ 对到个位数）
-         *   ⇒ 下一步 waitTime=ci/2≈2200 拍 ⇒ 闭环从 eRPM 2158 瞬间掉进 eRPM 40 的爬行，
-         *      之后约 1~3 秒才慢慢爬回来 ⇒ 听感就是"在转但一直抖、转速慢"。
-         *   物理依据：真过零只会出现在"上次换相之后的半个到一个步长"附近
-         *   （average_interval ≈ 一个步长），迟到超过 2 个步长的"过零"一定是假的
-         *   ⇒ 丢掉它、**保持武装**（本周期/下周期再判），实在没有就交给 22.5ms 超时兜底。
-         *   average_interval < 50 拍（起步/异常）时上界没有意义，不卡。 */
-        if (bemf_irq_armed
-            && (INTERVAL_TIMER->CNT > (average_interval >> 1))
-            && ((average_interval < 50)
-                || (INTERVAL_TIMER->CNT < ((uint32_t)average_interval << 1)))
-            && (getCompOutputLevel() == !rising)) {
-            bemf_irq_armed = 0;
-            interruptRoutine();
+        /* ★★ 过零判据（2026-10-08 改成【边沿检测】）★★
+         *   为什么改：原先是拿"电平"跟 `!rising` 比、并用
+         *   `INTERVAL_TIMER->CNT > average_interval>>1` 当时间门槛。
+         *   把数量算出来就露馅了 —— average_interval 的单位是【拍】，
+         *   而 e_com_time = 3×单个换相步、average_interval = e_com_time/3
+         *   ⇒ average_interval 恰好 = 1 个换相步 ⇒ `>> 1` 的门槛 = 【0.5 个换相步】。
+         *   而真过零（悬空相 BEMF 穿过 V0）物理上就发生在【换相后约半个步长】——
+         *   于是门槛正好压在真过零那一刻：采样点落前一点就"被判成噪声丢掉"，
+         *   落后一点才认 ⇒ 同一步时认时不认 ⇒ 换相相位前后乱掉。
+         *   （实测波形 C 相缺 0V / B 相缺 12V，就是换相相位错的典型相貌；
+         *     开环之所以正常，是因为开环下 interruptRoutine() 整个短路、
+         *     这段判据根本不参与 —— 见 main.c 的 #if RM2027_OL_ARM_ONLY。）
+         *   改法（等价上游比较器 EXTI 的语义）：不在"电平"上做时间门槛，而是
+         *   **只在状态真的翻转（边沿）那一帧报过零**。这样无论采样点落在过零的
+         *   哪一侧，翻转事件都一定被报出一次 ⇒ 不再受 41.7µs 采样相位影响。
+         *   三条判据：
+         *     ① bemf_irq_armed —— 换相后武装、认到一次即清 ⇒【每步只认一次】。
+         *     ② 边沿标志与 rising 一致（rising 步期望上升沿）—— 极性沿用
+         *        main.c getBemfState() 的上游约定。
+         *     ③ 上界（R3-c 那次的结论保留）：迟到超过 2 个步长的"过零"一定是假的，
+         *        丢掉但不解除武装，交给 22.5ms 超时兜底。下界【不再需要】——
+         *        换相瞬间的振铃由施密特滞回（BEMF_HYST_LSB）挡，
+         *        且 changeCompInput() 已在换相时清掉上一相的边沿残留。 */
+        {
+            uint8_t edge_rise = 0, edge_fall = 0;
+
+            /* 读边沿 + 就地清掉同向标志（同一个过零点只报一次） */
+            adc_bemf_take_edges(&edge_rise, &edge_fall, 0, 0);
+
+            if (bemf_irq_armed
+                && ((rising && edge_rise) || (!rising && edge_fall))
+                && ((average_interval < 50)
+                    || (INTERVAL_TIMER->CNT < ((uint32_t)average_interval << 1)))) {
+                /* 消费掉本次边沿：同向清掉、反向也清（换相后重新开始记） */
+                adc_bemf_take_edges(0, 0, 1, 1);
+                bemf_irq_armed = 0;
+#ifdef USE_ADC_BEMF
+                /* ★★ 闭环的"开环起步"期间（ol_startup_arm=1）：只【数】过零，
+                 *   不驱动换相 —— 换相由 olStartupTick() 的固定时基独占，
+                 *   两套时基同时动手会把换相节奏打乱。
+                 *   等斜坡跑到底且累计认到 OL_STARTUP_ZC_NEED 次，由 olStartupTick()
+                 *   交棒（old_routine=0），从这里开始才由 interruptRoutine() 驱动换相。 */
+                extern volatile uint8_t ol_startup_arm;
+                extern uint8_t ol_startup_zc_inc(void);
+                if (ol_startup_arm) {
+                    ol_startup_zc_inc();
+                    /* 重新武装，好让斜坡期间能连续数（每步只认一次 ⇒ 由换相清零） */
+                    bemf_irq_armed = 1;
+                } else {
+                    interruptRoutine();
+                }
+#else
+                interruptRoutine();
+#endif
+            }
         }
 #endif
     }

@@ -40,6 +40,18 @@ static uint16_t bemf_hyst  = BEMF_HYST_LSB;
 static uint8_t  bemf_state = 0;      /* 滞回后的稳定状态 */
 static uint8_t  active_phase = 0;    /* 0=A(PA5)  1=B(PA4)  2=C(PA2) */
 
+/* ★★ 过零的【边沿】标志（等价上游比较器 EXTI 的边沿语义）★★
+ *   为什么必须有它：本板没有比较器，过零只能在 ADC-DMA 完成中断里"看电平"判。
+ *   而真过零（悬空相 BEMF 穿过中点）发生在【换相后约半个步长】，本板工作点上
+ *   往往正好压在 ISR 那条时间门槛的边界上 ⇒ 用"电平"判会出现"这一步认到、
+ *   下一步认不到"，换相相位前后乱掉（实测波形 C 相缺 0V / B 相缺 12V 就是这个）。
+ *   改成边沿检测后：只要状态真的翻转了一次，就一定会被报出一次，
+ *   与采样周期多长无关 —— 这正是上游 EXTI 锁存边沿的等价物。
+ *   bemf_rising_edge：本次调用是否发生了 0→1 翻转。
+ */
+static uint8_t  bemf_edge_rise = 0;
+static uint8_t  bemf_edge_fall = 0;
+
 /* ★ 过零检测的"武装"标志（取代比较器的 EXTI 使能/屏蔽）
  *   comparator.c 是用 EXTI 中断来报"悬空相过零"的；本板没有比较器通路，
  *   改成在【ADC-DMA 完成中断】里判（见 Mcu/g071/Src/stm32g0xx_it.c）。
@@ -57,6 +69,12 @@ uint16_t adc_bemf_get_hysteresis(void)          { return bemf_hyst; }
  */
 void changeCompInput(void)
 {
+    /* ★ 换相（切到新的悬空相）⇒ 把上一相的边沿标志清掉。
+     *   否则"上一步末尾残留的翻转"会被下一步当成自己的过零报出去。
+     *   这一步等价于上游比较器切输入时重新 arm EXTI。 */
+    bemf_edge_rise = 0;
+    bemf_edge_fall = 0;
+
     if (step == 1 || step == 4) {
         active_phase = 2;
 
@@ -96,6 +114,7 @@ volatile uint8_t bemf_polarity_invert = 0;
 uint8_t getCompOutputLevel(void)
 {
     int16_t d = adc_bemf_get_delta();
+    uint8_t prev_level = bemf_state;
 
     if (d > (int16_t)bemf_hyst) {
         bemf_state = 1;
@@ -104,8 +123,38 @@ uint8_t getCompOutputLevel(void)
         bemf_state = 0;
     }
 
-    /* 落在 ±hyst 之间 ⇒ 保持原状态（这就是滞回） */
+    /* 落在 ±hyst 之间 ⇒ 保持原状态（这就是滞回）。
+     * ★ 顺便记录边沿：状态真的翻了一次 ⇒ 置对应标志，供 ISR 判过零用。
+     *   注意比较的是"翻转前的电平"，与 bemf_polarity_invert 无关 —— 极性开关
+     *   只影响"对外报出的电平"，不影响"状态有没有翻"这件事。 */
+    if (bemf_state && !prev_level) {
+        bemf_edge_rise = 1;
+    } else if (!bemf_state && prev_level) {
+        bemf_edge_fall = 1;
+    }
+
     return bemf_polarity_invert ? (uint8_t)!bemf_state : bemf_state;
+}
+
+/* ★ 取出并清掉"自上次调用以来"的边沿标志（边沿检测的读出口）。
+ *   clear_rise / clear_fall 为 1 表示"一并清零该方向的标志"：
+ *   ISR 用「读到上升沿就清上升沿」的方式调用，于是同一个过零点只会被报一次，
+ *   等价于上游 EXTI 的"边沿锁存 + 清标志"。 */
+void adc_bemf_take_edges(uint8_t* out_rise, uint8_t* out_fall,
+                        uint8_t clear_rise, uint8_t clear_fall)
+{
+    if (out_rise) {
+        *out_rise = bemf_edge_rise;
+    }
+    if (out_fall) {
+        *out_fall = bemf_edge_fall;
+    }
+    if (clear_rise) {
+        bemf_edge_rise = 0;
+    }
+    if (clear_fall) {
+        bemf_edge_fall = 0;
+    }
 }
 
 /* ★★ AWD（模拟看门狗）：把阈值比较放进 ADC 硬件
