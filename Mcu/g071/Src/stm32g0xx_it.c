@@ -295,12 +295,23 @@ void DMA1_Channel2_3_IRQHandler(void)
              *   上一轮把它改成 >>2（理由是"它压在真过零上"）是误判：真过零在 ci 处，
              *   不在 ci/2 处 —— 那个判断是在 ci 已被假边沿拉小、waitTime 也缩到 ci/2
              *   附近时做的，属于"病了之后量出来的体温"。
-             *   上界保持 2 步（迟到太多的必是假的）。 */
+             * ★★ 上界【取消】（2026-10-09）★★
+             *   原来有 `CNT < average_interval << 1`，本意是"迟到太多的必是假的"。
+             *   但埋点实测证明它造成了【永久死锁】：一次 runaway 把 ci 拉到 300 之后，
+             *   真过零出现在 CNT≈42500（rejection 记录里一排 42503/42587/42684…，
+             *   比值 141），远超 2×300=600 ⇒ 全被拒 ⇒ 而 average_interval 只在
+             *   PeriodElapsedCallback 里更新、那个函数又【必须以认到过零为前提】
+             *   ⇒ 不认 ⇒ 窗口不更新 ⇒ 永远认不到，只能靠 22.5ms 兜底硬踹
+             *   （bemf_timeout_happened 以 ~26 次/秒 上涨 ⇒ 26 步/秒 ≈ 43 机械 RPM，
+             *    现场就是"慢且抖、没有梯形腰"）。
+             *   去掉上界后：丢锁时那个迟到的真过零照样被收下 ⇒
+             *   ci_new = (300 + (300+42500)/2)/2 ≈ 9000（本闸只限变小、不限变大）
+             *   ⇒ 闭环自己重新锁到一个低转速、再随占空比爬升 ⇒ 能自恢复。
+             *   真正要防的假过零是【太早】那种（换相振铃），那个由下界管。 */
             else if (bemf_irq_armed && (edge_rise || edge_fall)) {
                 uint32_t zc_cnt = INTERVAL_TIMER->CNT;
                 if ((average_interval < 50)
-                    || ((zc_cnt > ((uint32_t)average_interval >> 1))
-                        && (zc_cnt < ((uint32_t)average_interval << 1)))) {
+                    || (zc_cnt > ((uint32_t)average_interval >> 1))) {
                 /* 消费掉本次边沿：两个方向都清（换相后重新开始记） */
                 adc_bemf_take_edges(0, 0, 1, 1);
                 bemf_irq_armed = 0;

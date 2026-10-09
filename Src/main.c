@@ -1217,7 +1217,17 @@ void PeriodElapsedCallback()
      *   （正常跟踪时每步的变化只有千分之几，这个闸完全不影响正常调速。） */
     {
         uint32_t ci_new   = ((commutation_interval) + ((lastzctime + thiszctime) >> 1)) >> 1;
-        uint32_t ci_floor = commutation_interval - (commutation_interval >> 3);
+        /* ★★ 2026-10-09：闸门从 1/8 收紧到 1/32 ★★
+         *   实测（埋点）：32 次过零里 CNT/CI 一直在 0.6 附近、始终不收敛到 1.0，
+         *   于是 ci 每步 ×0.8；1/8 的闸只是把它压到 ×0.875 —— 32 步就把 ci 从
+         *   1500 缩到 300，然后真过零落到窗口外、永久丢锁（见下面的窗口改动）。
+         *   1/8 太松：那等于允许"一步之内提速 14%"。转子一步（60° 电角度）之内
+         *   不可能提速 3% 以上 ⇒ 用 1/32。这样 ci 会平滑收敛到转子的真实步长
+         *   并停住（滤波式 ci_new = 0.75·ci + 0.25·S 本身是稳定的，问题只在于
+         *   "S 也在被假过零带着变小"；收紧闸门就把它钉住了）。
+         *   注意：本闸只限制【变小】，不限制变大 —— 丢锁后 ci 必须能自己跳大回来
+         *   （见 ADC 中断里去掉上界的原因），否则就永久卡在低 ci 上。 */
+        uint32_t ci_floor = commutation_interval - (commutation_interval >> 5);
         commutation_interval = (ci_new < ci_floor) ? ci_floor : ci_new;
     }
   	if (!eepromBuffer.auto_advance) {
