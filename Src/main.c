@@ -527,9 +527,15 @@ volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑�
  *   才把这条钉死。用它做 thiszctime，CNT/CI 才能收敛到 1.0。 */
 volatile uint16_t bemf_zc_time = 0;
 
+/* ★ 2026-10-09：本步内"|悬空相 − V0|"的最大值（每帧更新、每次过零清零）。
+ *   用途：一眼看出反电势真实幅值 ⇒ 直接决定施密特滞回 BEMF_HYST_LSB 该取多少。
+ *   实测它和"接受时 delta 只有 ±5~±11"配合，才能判定"信号在阈值上蹭"这件事。 */
+volatile int16_t  bemf_dmax = 0;
+
 #define OL_TRACE_LEN 32
 volatile uint16_t OL_TRACE_CNT[OL_TRACE_LEN];  /* 认到过零时"距上次过零"的拍数（TIM2, 0.5µs） */
 volatile int16_t  OL_TRACE_D[OL_TRACE_LEN];    /* 当时的"悬空相 − V0"（ADC 码） */
+volatile int16_t  OL_TRACE_DMAX[OL_TRACE_LEN]; /* 本步内 |delta| 的最大值（= 反电势幅值）*/
 volatile uint16_t OL_TRACE_CI[OL_TRACE_LEN];   /* 当时认为的一步有多长 */
 volatile uint8_t  OL_TRACE_ST[OL_TRACE_LEN];   /* 当时的 step */
 volatile uint8_t  ol_trace_idx = 0;
@@ -1308,6 +1314,8 @@ void interruptRoutine()
     OL_TRACE_D[ol_trace_idx]   = adc_bemf_get_delta();             /* 当时的"悬空相 − V0" */
     OL_TRACE_CI[ol_trace_idx]  = (uint16_t)commutation_interval;   /* 当时认为的一步有多长 */
     OL_TRACE_ST[ol_trace_idx]  = (uint8_t)(step);                  /* 当时在第几拍换相 */
+    OL_TRACE_DMAX[ol_trace_idx] = bemf_dmax;                       /* 本步 |delta| 峰值 */
+    bemf_dmax = 0;                                                 /* 重新计本步 */
     ol_trace_idx = (uint8_t)((ol_trace_idx + 1) & (OL_TRACE_LEN - 1));
     if (ol_trace_n < 60000) {
         ol_trace_n++;

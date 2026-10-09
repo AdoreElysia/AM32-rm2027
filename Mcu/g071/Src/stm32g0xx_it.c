@@ -286,6 +286,22 @@ void DMA1_Channel2_3_IRQHandler(void)
             adc_bemf_take_edges(0, 0, 1, 1);      /* 清掉上一帧的残留 */
             (void)getCompOutputLevel();           /* 用本帧新采样更新滞回状态 */
             adc_bemf_take_edges(&edge_rise, &edge_fall, 1, 1);  /* 读本帧翻转并清掉 */
+
+            /* ★ 2026-10-09 观测：记住本步内 |delta| 的峰值（= 反电势幅值）。
+             *   它和"接受时 delta 只有 ±5~±11"一起，才能证明信号是不是在阈值上蹭
+             *   —— 直接决定施密特滞回 BEMF_HYST_LSB 该取多大。每次过零清零。
+             * ★ 注意位置：必须放在下面 `if (blanked) ... else if (...)` 之前，
+             *   不能夹在两者之间 —— 否则会把 if/else 链断开（编译报
+             *   "'else' without a previous 'if'"）。 */
+            {
+                extern volatile int16_t bemf_dmax;
+                int16_t dd = adc_bemf_get_delta();
+                int16_t ad = (dd < 0) ? (int16_t)(-dd) : dd;
+                if (ad > bemf_dmax) {
+                    bemf_dmax = ad;
+                }
+            }
+
             if (blanked) {
                 edge_rise = edge_fall = 0;
             }
