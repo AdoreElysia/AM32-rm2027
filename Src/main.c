@@ -1243,19 +1243,31 @@ void PeriodElapsedCallback()
      *   ——"输出成了恒定高的 PWM、电机不转"。
      *   （正常跟踪时每步的变化只有千分之几，这个闸完全不影响正常调速。） */
     {
-        uint32_t ci_new   = ((commutation_interval) + ((lastzctime + thiszctime) >> 1)) >> 1;
-        /* ★★ 2026-10-09：闸门从 1/8 收紧到 1/32 ★★
-         *   实测（埋点）：32 次过零里 CNT/CI 一直在 0.6 附近、始终不收敛到 1.0，
-         *   于是 ci 每步 ×0.8；1/8 的闸只是把它压到 ×0.875 —— 32 步就把 ci 从
-         *   1500 缩到 300，然后真过零落到窗口外、永久丢锁（见下面的窗口改动）。
-         *   1/8 太松：那等于允许"一步之内提速 14%"。转子一步（60° 电角度）之内
-         *   不可能提速 3% 以上 ⇒ 用 1/32。这样 ci 会平滑收敛到转子的真实步长
-         *   并停住（滤波式 ci_new = 0.75·ci + 0.25·S 本身是稳定的，问题只在于
-         *   "S 也在被假过零带着变小"；收紧闸门就把它钉住了）。
-         *   注意：本闸只限制【变小】，不限制变大 —— 丢锁后 ci 必须能自己跳大回来
-         *   （见 ADC 中断里去掉上界的原因），否则就永久卡在低 ci 上。 */
-        uint32_t ci_floor = commutation_interval - (commutation_interval >> 5);
-        commutation_interval = (ci_new < ci_floor) ? ci_floor : ci_new;
+        uint32_t ci_new = ((commutation_interval) + ((lastzctime + thiszctime) >> 1)) >> 1;
+        /* ★★★ 2026-10-09 关键修复⑦：闸门改成【双向】，不许换相频率"一步投降" ★★★
+         *   台架实测（duty 351、电流 0.46~0.55A 已与开环同量级、提前量已为 0）：
+         *     交棒后【一步】ci 就从 1500 跳到 ~7000（≈475RPM）。
+         *   原因：交棒后的头 11.7ms 没认到过零，第一次测到的间隔就巨大，
+         *   而滤波 ci=(ci+间隔)/2 一次就被拉大 4.7 倍 ⇒ 换相频率直接塌到 1/4.7
+         *   ⇒ 转子被拖到低频 ⇒ 再也起不来。现场就是"占空比加大了但依旧跟不上步频"。
+         *   而上一版的闸【只限制变小、不限制变大】（当时是为了"丢锁能自恢复"），
+         *   恰恰挡不住这一下。
+         *   ⇒ 改成双向，一步最多变 1/16（6.25%）。这样：
+         *     · 单次坏测量最多让频率偏 6%，不会一步投降；
+         *     · 频率会【咬住交棒转速】把转子往上拖，给电机时间跟上来
+         *       （正是"先让转速上来且跟上换向，再交给闭环调"这条思路）；
+         *     · 真要适应（转子确实只能跑更慢/更快）时，每步 6.25% 在 2222 步/秒下
+         *       约 139 倍/秒的调节速度，几十毫秒内到位，不影响正常调速；
+         *     · 丢锁后也能自己往上爬回来（放大方向不再被禁）。 */
+        uint32_t ci_lo = commutation_interval - (commutation_interval >> 4);
+        uint32_t ci_hi = commutation_interval + (commutation_interval >> 4);
+        if (ci_new < ci_lo) {
+            ci_new = ci_lo;
+        }
+        if (ci_new > ci_hi) {
+            ci_new = ci_hi;
+        }
+        commutation_interval = ci_new;
     }
   	if (!eepromBuffer.auto_advance) {
 	  advance = (commutation_interval * temp_advance) >> 6; // 60 divde 64 0.9375 degree increments
