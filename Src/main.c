@@ -2586,6 +2586,19 @@ int main(void)
      *   （main.c:1890）把它清 0。这里两个都显式钉死，免得以后保存设置后关系被破坏。 */
     eepromBuffer.comp_pwm = 0;
     temp_comp_pwm = 0;
+    /* ★★ 2026-10-09：把换相提前量钉成 0 ★★
+     *   来源：擦除态 EEPROM 的 advance_level = 0xFF = 255 落在 loadEEpromSettings() 的
+     *   `advance_level > 42` 那一支，被钉成 temp_advance = 16 ⇒
+     *        advance = ci×16/64 = ci/4  ⇒  waitTime = ci/2 − ci/4 = ci/4
+     *   即换相发生在【过零后 15°】，而教科书位置是 30°（waitTime = ci/2）。
+     *   把换相点整整挪掉半个理想角，在低转速（实测只有 ~390RPM、反电势才 ~70 码）
+     *   下换相缺口里会出现反转矩 ⇒ 转矩变差 ⇒ 转子带不住 ⇒ 转速从 2222 塌到 390。
+     *   实测波形侧证：悬空相反电势幅值只有 ~70 码（390RPM 该有的大小），
+     *   而 2222RPM 时是 ~400 码 —— 是"转速塌了"，不是"没信号"。
+     *   advance_level = 10 ⇒ temp_advance = 0（见 loadEEpromSettings 的换算），
+     *   这里直接写 temp_advance 更直白，不受 EEPROM 分支影响。 */
+    temp_advance = 0;
+    eepromBuffer.advance_level = 10;
     minimum_duty_cycle = 0;                  /* 清掉 eeprom / dead_time_override 留下的占空比地板 */
     min_startup_duty = 0;                    /* ★ 2026-10-07 撤回 350：用户实测"插着 ST-Link
                                               * 母线被拉塌、拔掉正常"，而开环版（已知良性）里
