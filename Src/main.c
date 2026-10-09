@@ -534,7 +534,25 @@ uint16_t ol_step_div_start = 5000; /* 斜坡起始步长：5000 拍 = 250ms/步�
 /* 线性斜坡每换相缩掉的拍数。总时长 ≈ N×(start+end)/2×50µs，N=(start-end)/decrement。
  * decrement=156 ⇒ (5000-9)/156 ≈ 32 步 ⇒ 约 4.0 秒。
  * ★ 改这个值就能直接调斜坡时长（值与时长成反比）。 */
-uint16_t ol_ramp_decrement = 156;
+/* ★★ 2026-10-09 【线性升频】的三个量 ★★
+ *   用户指出（并且是对的）：最后那一下"突进加速"转子跟不上。
+ *   根因：原来线性的是【步长时间 div】，而换相频率 = 20000/div 是双曲线
+ *   ⇒ 末端最陡（实测最后一步 14Hz → 2222Hz，加速度需求约 254,000 Hz/s）。
+ *   业界（Microchip AN857 / AVR928）说的是 "ramp start speed / end speed / slope"
+ *   ⇒ 线性的是【频率(转速)】。改成频率线性后，末端每步只 +1.6Hz
+ *   ⇒ 加速度需求约 3,500 Hz/s ⇒ 小 72 倍。
+ *   实现在 olStepTick 的 case 2：用频率累加器 ol_freq_q（单位 1/256 步/秒），
+ *   每换相加 ol_freq_inc_q，再由 div = 20000x256/ol_freq_q 反算步长。
+ *   ol_freq_inc_q = 400 ⇒ 1.5625 Hz/步 ⇒ 从 4Hz 到 2222Hz 约 4.0 秒。 */
+uint32_t ol_freq_q     = 0;      /* 当前换相频率 x 256（步/秒）*/
+uint16_t ol_freq_slope = 554;    /* ★ 斜坡斜率：换相频率每秒上升多少 Hz（恒定 df/dt）
+                                  *   物理上要恒定的是【加速度】⇒ df/dt 必须恒定 ⇒
+                                  *   频率随【时间】线性上升。554 Hz/s ⇒ 4→2222Hz 约 4.0 秒。
+                                  *   为什么末端最关键：力矩需求 ∝ dω/dt，而反电势也随转速升高
+                                  *   ⇒ 转速越高力矩余量越小。指数斜坡 df/dt ∝ f² 在末端爆炸，
+                                  *   这正是用户说的"最后一下突进跟不上"。 */
+uint32_t ol_freq_tgt_q = 0;      /* 斜坡终点的频率（x 256）*/
+uint16_t ol_ramp_decrement = 156;   /* 已不再使用（保留以免别处引用报错）*/
 uint8_t  ol_ramp_shift = 4;   /* 已不再使用（保留以免别处引用报错）*/        /* 每换相一次把步长缩短 1/2^shift（4 ⇒ 6.25%/步）
                                     * ★ 2026-10-09 由 4 改到 5：斜坡总时长 3.2s → ~6.4s。
                                     *   依据就在下面那段注释所记的机理：这颗电机 9槽12极，
@@ -1547,6 +1565,9 @@ static void olStepTick(void)
             ol_ticks = 0;
             ol_input_cur = ol_start_input;
             ol_step_div_cur = (ol_step_div_start > ol_step_div) ? ol_step_div_start : ol_step_div;
+            /* ★ 线性升频初始化：起点频率、终点频率 */
+            ol_freq_q     = (20000UL * 256UL) / (uint32_t)ol_step_div_cur;
+            ol_freq_tgt_q = (20000UL * 256UL) / (uint32_t)ol_step_div;
             if (ol_align_ticks > 0) {
                 ol_state = 1;
             } else if (ol_step_div_cur > ol_step_div) {
@@ -1591,12 +1612,25 @@ static void olStepTick(void)
                 if (dec == 0) {
                     dec = 1;
                 }
-                if ((uint32_t)ol_step_div_cur > (uint32_t)ol_step_div + dec) {
-                    ol_step_div_cur -= dec;
-                } else {
+                /* ★★ 线性升频：频率每次加固定量，再由频率反算步长 ★★
+                 *   div = 20000x256 / ol_freq_q ⇒ 频率线性上升时 div 自动按双曲线下降。 */
+                /* 恒定斜率：df = slope x dt = slope / f
+                 *   定点：f_q = f x 256 ⇒ df_q = slope x 65536 / f_q */
+                ol_freq_q += ((uint32_t)ol_freq_slope * 65536UL) / ol_freq_q;
+                if (ol_freq_q >= ol_freq_tgt_q) {
+                    ol_freq_q = ol_freq_tgt_q;
                     ol_step_div_cur = ol_step_div;
                     ol_input_cur = ol_input; /* 斜坡结束 ⇒ 回到运行油门 */
                     ol_state = 3;
+                } else {
+                    uint32_t d = (20000UL * 256UL) / ol_freq_q;
+                    if (d > 0xFFFFu) {
+                        d = 0xFFFFu;
+                    }
+                    if (d < (uint32_t)ol_step_div) {
+                        d = (uint32_t)ol_step_div;
+                    }
+                    ol_step_div_cur = (uint16_t)d;
                 }
             }
             break;
