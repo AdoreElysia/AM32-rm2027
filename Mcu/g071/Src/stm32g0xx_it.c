@@ -334,8 +334,22 @@ void DMA1_Channel2_3_IRQHandler(void)
              *   真正要防的假过零是【太早】那种（换相振铃），那个由下界管。 */
             else if (bemf_irq_armed && (edge_rise || edge_fall)) {
                 uint32_t zc_cnt = INTERVAL_TIMER->CNT;
-                if ((average_interval < 50)
-                    || (zc_cnt > ((uint32_t)average_interval >> 1))) {
+                /* ★★★ 2026-10-09 关键修复④：下界改成"换相点之后" ★★★
+                 *   原来用 average_interval>>1（6 步滑动平均的一半），两个毛病：
+                 *     ① average_interval 滞后、且与当前这一步的 waitTime 无关；
+                 *     ② 它算出来的门槛可能落在换相点【之前】，于是换相瞬间的电平突跳
+                 *        被收下（埋点铁证：某次接受记录 过零时delta = -595，
+                 *        —— 滞回 16 码不可能在 |d|=595 时翻转，那只能是突跳），
+                 *        该条位置 CNT/CI = 0.22 也正贴着换相点。
+                 *   物理事实：真过零必然发生在【换相之后】—— 换相点在
+                 *   waitTime = ci/2 − advance，真过零在它之后约半步处。
+                 *   ⇒ 下界直接取 waitTime + 1/16 步余量（≈2 个采样周期，盖住振铃尾巴），
+                 *     把换相点及其突跳整体排除。这样收到的每一条都必然是"换相后
+                 *     真的穿过了零点"。 */
+                extern volatile uint16_t waitTime;             /* 定义在 Src/main.c */
+                extern volatile uint32_t commutation_interval; /* 定义在 Src/main.c */
+                uint32_t zc_lo = (uint32_t)waitTime + ((uint32_t)commutation_interval >> 4);
+                if ((average_interval < 50) || (zc_cnt > zc_lo)) {
                 /* 边沿已经在"读的时候"清掉了（见上），这里只把过零【发生】的时刻
                  * 交给 interruptRoutine()：它必须用 bemf_zc_time，不能用
                  * INTERVAL_TIMER_COUNT —— 后者是"此刻"，而此刻就是过零时刻
