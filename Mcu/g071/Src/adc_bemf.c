@@ -127,9 +127,40 @@ volatile uint8_t bemf_polarity_invert = 0;
 /* ★ 施密特滞回比较器（取代 active_COMP->CSR >> 30 & 1）
  * 注意极性：Src/main.c 里用的是 `!getCompOutputLevel()`，此处沿用 comparator.c 的约定。
  */
+/* ★★ 2026-10-09 【软件滑动平均】—— 提信噪比，治"闭环丢步" ★★
+ *   背景（闭环第一次真正交棒成功后实测）：
+ *     · bemf_dmax = 22 码 —— 悬空相 |delta| 峰值只有 22 码（占 ADC 满量程 0.5%）
+ *     · 项目笔记实测噪声底 ±5 码 ⇒ 信噪比只有 4~6 倍
+ *     · 后果：接受的过零 delta 全是 ±9~13（刚好越过阈值）、拒收是接受的 4.4 倍、
+ *       而且认到的时刻 CNT/CI 在 0.6~36 之间乱跳
+ *     ⇒ 换相时刻忽早忽晚 ⇒ 磁场时而超前时而滞后 ⇒ 转子被拽一下松一下
+ *     ⇒【丢步】（用户判断："我感觉闭环也是丢步" —— 是对的）
+ *   为什么不用 ADC 硬件过采样：G0 的过采样作用在整条扫描序列上，4× 就要把
+ *     7 通道扫描从 ~2.5µs 拉到 10µs，而 17.6% 占空比下导通期只有 7.3µs ⇒ 装不下。
+ *   ⇒ 改在软件层做：对 delta 取 4 点滑动平均，噪声按 √4 = 2 倍下降，
+ *     代价是 ~83µs 相位滞后（1818 步/秒 下约占一步的 15% = 9° 电角度，可接受）。
+ *   为什么是 4 点而不是更多：8 点能把噪声降到 1.8 码，但滞后 167µs（约 18° 电角度），
+ *     会把过零判据的时间窗挤掉 —— 先用 4 点，实测不够再调 OL_BEMF_AVG_N。 */
+#ifndef OL_BEMF_AVG_N
+#define OL_BEMF_AVG_N 4
+#endif
+static int16_t  bemf_avg_buf[OL_BEMF_AVG_N];
+static uint8_t  bemf_avg_idx = 0;
+static uint8_t  bemf_avg_filled = 0;
+static int32_t  bemf_avg_sum = 0;
+
 uint8_t getCompOutputLevel(void)
 {
-    int16_t d = adc_bemf_get_delta();
+    int16_t d_raw = adc_bemf_get_delta();
+    /* ---- 4 点滑动平均（环缓冲；未填满前用已有样本的平均，避免开机假值） ---- */
+    bemf_avg_sum -= bemf_avg_buf[bemf_avg_idx];
+    bemf_avg_buf[bemf_avg_idx] = d_raw;
+    bemf_avg_sum += d_raw;
+    bemf_avg_idx = (uint8_t)((bemf_avg_idx + 1) % OL_BEMF_AVG_N);
+    if (!bemf_avg_filled && bemf_avg_idx == 0) {
+        bemf_avg_filled = 1;
+    }
+    int16_t d = (int16_t)(bemf_avg_sum / OL_BEMF_AVG_N);
     uint8_t prev_level = bemf_state;
 
     if (d > (int16_t)bemf_hyst) {
