@@ -2599,6 +2599,14 @@ int main(void)
      *   这里直接写 temp_advance 更直白，不受 EEPROM 分支影响。 */
     temp_advance = 0;
     eepromBuffer.advance_level = 10;
+    /* ★ 还有一处旁路必须一起关掉：换成 auto_advance 后 advance 用的是
+     *   auto_advance_level，而它是 main 循环里按【占空比】算的
+     *       auto_advance_level = map(duty_cycle, 100, 2000, 13, 23)
+     *   ⇒ duty=251 时得 13，于是 advance = ci×13/64 ≈ 0.20ci —— 与实测
+     *   advance/ci = 0.203 完全对上（这就是上一版 temp_advance=0 没生效的原因）。
+     *   擦除态 EEPROM 的 auto_advance = 0xFF ≠ 0 ⇒ 默认就走这条路。钉成 0，
+     *   让换相点真正回到 waitTime = ci/2 的教科书位置。 */
+    eepromBuffer.auto_advance = 0;
     minimum_duty_cycle = 0;                  /* 清掉 eeprom / dead_time_override 留下的占空比地板 */
     min_startup_duty = 0;                    /* ★ 2026-10-07 撤回 350：用户实测"插着 ST-Link
                                               * 母线被拉塌、拔掉正常"，而开环版（已知良性）里
