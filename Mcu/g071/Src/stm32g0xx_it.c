@@ -263,16 +263,16 @@ void DMA1_Channel2_3_IRQHandler(void)
                 adc_bemf_take_edges(0, 0, 1, 1);
                 bemf_irq_armed = 0;
 #ifdef USE_ADC_BEMF
-                /* ★★ 闭环的"开环起步"期间（ol_startup_arm=1）：只【数】过零，
-                 *   不驱动换相 —— 换相由 olStartupTick() 的固定时基独占，
+                /* ★★ 闭环的"开环起步"期间（ol_startup_arm=1）：这里【什么都不做】，
+                 *   只把武装标志放回去 —— 换相由 olStartupTick() 的固定时基独占，
                  *   两套时基同时动手会把换相节奏打乱。
-                 *   等斜坡跑到底且累计认到 OL_STARTUP_ZC_NEED 次，由 olStartupTick()
-                 *   交棒（old_routine=0），从这里开始才由 interruptRoutine() 驱动换相。 */
+                 *   ★ 2026-10-09：原来这里还在调 ol_startup_zc_inc() 数过零，
+                 *     而 olStartupTick() 里【也在数】⇒ 同一个过零被记两次 ⇒
+                 *     计数翻倍、交棒时机不可控。计数现在只在 olStartupTick() 一处做
+                 *     （那里还能顺便用"跨越必须落在本步中间段"的时间窗滤掉振铃，
+                 *     比这里靠 average_interval 的门槛更可靠）。 */
                 extern volatile uint8_t ol_startup_arm;
-                extern uint8_t ol_startup_zc_inc(void);
                 if (ol_startup_arm) {
-                    ol_startup_zc_inc();
-                    /* 重新武装，好让斜坡期间能连续数（每步只认一次 ⇒ 由换相清零） */
                     bemf_irq_armed = 1;
                 } else {
                     interruptRoutine();

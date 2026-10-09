@@ -220,6 +220,9 @@ an settings option)
 #include "IO.h"
 #include "common.h"
 #include "comparator.h"
+#ifdef USE_ADC_BEMF
+#include "adc_bemf.h"   /* 软件过零：起步链在主循环里直接读 adc_bemf_get_delta() */
+#endif
 #include "dshot.h"
 #include "eeprom.h"
 #include "functions.h"
@@ -253,6 +256,10 @@ an settings option)
 void zcfoundroutine(void);
 void commutate(void);
 extern volatile uint16_t duty_cycle;
+/* 闭环换相的时间量（定义在后面，这里前置声明：olStartupTick 交棒时要用） */
+extern volatile uint16_t lastzctime;
+extern volatile uint16_t thiszctime;
+extern volatile uint16_t waitTime;
 
 /* RM2027 开环调试开关：未定义时按 0 处理，这样既能用 #ifdef，也能直接写进 if 条件里 */
 #ifndef RM2027_OL_ARM_ONLY
@@ -523,12 +530,31 @@ volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑�
  * 判据稳定可认。 */
 #define OL_STARTUP_ALIGN   0   /* 阶段码：先对齐 */
 #define OL_STARTUP_RAMP    1   /* 阶段码：开环斜坡 */
-#define OL_STARTUP_ZC_NEED 3   /* 认到几次过零才交棒（防误交） */
+#define OL_STARTUP_ZC_NEED 3    /* 认到 3 次过零就交棒给闭环 */
+/* ★ 起步期间判过零用的"最小 |delta|"（ADC 码）。
+ *   为什么不靠"抬阈值抗噪"：本板反电势本来就小 —— targets.h 记的实测是
+ *   "3700RPM 时悬空相 delta ≈ ±32 码"，线性折算到新的交棒转速（2222RPM）只有约 ±19 码。
+ *   把阈值抬到 20 就等于【交棒转速及以下永远认不到过零】⇒ 永远不交棒。
+ *   所以阈值只取 8（高于噪声底 ±5，低于交棒转速的 ±19，留 2 倍余量）；
+ *   抗噪改由两条【物理上更可靠】的判据承担（它们与幅度无关）：
+ *     ① 换相后重新取样（ol_zc_reseed）—— 挡掉换相瞬间的振铃；
+ *     ② 只认"落在本步中间段"的跨越 —— 真过零物理上就发生在换相后约半个步长处，
+ *        而振铃/串扰紧跟在换相之后 ⇒ 用时间窗把两者分开。 */
+#ifndef OL_ZC_MIN_DELTA
+#define OL_ZC_MIN_DELTA 8
+#endif
 
 static uint8_t   ol_startup_stage = OL_STARTUP_ALIGN;
-static uint8_t   ol_startup_zc = 0;    /* 本起步过程累计认到的过零数 */
 static uint32_t  ol_startup_ticks = 0; /* 本起步过程已跑的拍数（安全上限用） */
 static uint16_t  ol_startup_trip = 0;  /* 过流连续超限计数 */
+volatile uint8_t  ol_startup_zc = 0;   /* 本起步过程累计认到的过零数（观测+交棒判据）*/
+static uint8_t    ol_zc_prev = 0;      /* 上一次采到的电平（判"跨越"用）*/
+volatile int16_t  ol_zc_delta = 0;     /* 观测：起步期间最近一次"悬空相 − V0" */
+volatile uint8_t  ol_zc_level = 0;     /* 观测：上式的符号（1=正 0=负） */
+volatile uint8_t  ol_zc_inwin = 0;     /* 观测：本拍的跨越是否落在"本步中间段"时间窗内 */
+volatile uint8_t  ol_stage_show = 0;   /* 观测：起步阶段 0=对齐 1=斜坡 */
+static uint8_t    ol_zc_reseed = 0;    /* 换相后重新取样标志（见下面判过零处） */
+volatile uint16_t ol_steps_show = 0;   /* 观测：一个采样窗内的换相步数（估速率用） */
 
 /* 起步期间：允许过零中断"认边沿"，但不许它直接驱动换相（换相由本链独占），
  * 也不许主循环那条 22.5ms 超时兜底插手（否则会和本链的时基打架）。 */
@@ -545,7 +571,15 @@ void ol_startup_zc_inc(void)
 /* 由主循环每轮调用（与 olStepTick 同层）。返回时若已交棒，ol_startup_arm 已清 0。 */
 static void olStartupTick(void)
 {
-    if (!OL_STARTUP_ACTIVE() || !running || input < 47) {
+    if (!OL_STARTUP_ACTIVE() || !running) {
+        return;
+    }
+    /* ★ 收油门即停（2026-10-08 补）：原来用被覆盖过的 input 判断 ⇒ 起步期间
+     *   油门回 0 也停不下来、一路跑到超时。改用原始油门 newinput。 */
+    if (newinput < 48) {
+        allOff();
+        running = 0;
+        ol_startup_arm = 0;
         return;
     }
 
@@ -564,8 +598,12 @@ static void olStartupTick(void)
     }
 #endif
 
-    /* ---- 安全②：总时长上限（斜坡跑完仍没交棒 ⇒ 放弃起步、停机，绝不无限硬踹） ---- */
-    if (++ol_startup_ticks > 4000000UL) {
+    /* ---- 安全②：总时长上限（斜坡跑完仍没交棒 ⇒ 放弃起步、停机，绝不无限硬踹） ----
+     * 8.0 秒 = 160000 拍：对齐 0.2s + 斜坡 3.2s ⇒ 还剩 4.6 秒在交棒转速上等过零，
+     * 而 2222RPM 下一步 750µs、认 3 次过零只要 2.3ms ⇒ 余量绰绰有余。
+     * （原来写 200 秒是为了配合"斜坡要 13 秒"的；现在斜坡 3.2 秒就完，
+     *   再留 200 秒只会把"起步失败"变成"电机一直硬踹不停"。） */
+    if (++ol_startup_ticks > 160000UL) {
         allOff();
         running = 0;
         ol_startup_arm = 0;
@@ -590,6 +628,7 @@ static void olStartupTick(void)
         if (INTERVAL_TIMER_COUNT >= commutation_interval) {
             SET_INTERVAL_TIMER_COUNT(0);
             commutate();
+            ol_zc_reseed = 1;   /* ★ 换相后"重新取样"：避免切换悬空相造成的假跳变被当成过零 */
             ol_steps++;
             if (ol_step_div_cur > OL_STEP_DIV) {
                 uint16_t dec = (uint16_t)(ol_step_div_cur >> OL_RAMP_SHIFT);
@@ -605,10 +644,84 @@ static void olStartupTick(void)
         }
     }
 
-    /* ---- 交棒判据：斜坡跑到底 + 已认到足够多次过零 ---- */
+    /* ---- ★ 直接判过零（本函数跑在 20kHz 中断里，每个周期读一次）----
+     * 为什么不用 ADC-DMA 中断那条路：它依赖 bemf_irq_armed / average_interval
+     *   等一堆运行时门槛，起步期间这些量还没建立 ⇒ ol_startup_zc 恒 0 ⇒ 永远不交棒。
+     * 这里直接读"悬空相 − V0"（adc_bemf_get_delta()），判它是否跨过阈值。
+     * ★ 2026-10-09：ADC 中断里那份【重复计数】已删除 —— 原来两边都在数，
+     *   同一个过零被记两次 ⇒ 计数翻倍 ⇒ 交棒时机不可控。现在只有这里一份。
+     * ★ 2026-10-09：判据改成【极性无关】—— 只认"跨过阈值"这个事件本身，不判方向。
+     *   物理上每一步有且只有一个过零；判方向的收益是零，风险却很大：
+     *   rising 与实际边沿方向的对应关系一旦反了，就【一个都数不到】⇒ 永远不交棒，
+     *   表现出来就只是"电机在慢慢爬坡"（正是用户说的"缓慢抖动"）。 */
+    {
+        if (ol_step_div_cur <= OL_STEP_DIV) {
+            /* 只有斜坡已经跑到终点（= 交棒转速 2222RPM）之后才开始数：
+             * 之前的转速低、反电势小，数出来的都不是可靠的过零。 */
+            int16_t d = adc_bemf_get_delta();
+            ol_zc_delta = d;
+            uint8_t lvl = (d > OL_ZC_MIN_DELTA) ? 1u
+                        : ((d < -(int16_t)OL_ZC_MIN_DELTA) ? 0u : ol_zc_level);
+            ol_zc_level = lvl;
+            /* 只认"落在本步中间段"的跨越：真过零在换相后约半个步长处，
+             * 振铃紧跟在换相之后 ⇒ 用时间窗把两者分开（与幅度无关，最可靠）。 */
+            uint32_t cnt = INTERVAL_TIMER_COUNT;
+            uint8_t inwin = (cnt > (commutation_interval >> 2))
+                         && (cnt < (commutation_interval - (commutation_interval >> 2)));
+            ol_zc_inwin = inwin;
+            if (ol_zc_reseed) {
+                /* 刚换相：悬空相变了，delta 会跳变 ⇒ 只把基准电平对齐到新值，不计数 */
+                ol_zc_reseed = 0;
+                ol_zc_prev = lvl;
+            } else if (inwin && lvl != ol_zc_prev) {
+                if (ol_startup_zc < 250) {
+                    ol_startup_zc++;
+                }
+                ol_zc_prev = lvl;
+            }
+        } else {
+            /* 还没到交棒转速：清掉早期可能攒下的噪声计数，并丢弃换相残留 */
+            ol_zc_reseed = 0;
+            ol_startup_zc = 0;
+            ol_zc_inwin = 0;
+        }
+    }
+
+    ol_stage_show = ol_startup_stage;
+    ol_steps_show = ol_steps;
+
+    /* ---- 交棒 ----
+     * 条件：斜坡已跑到底（ol_step_div_cur <= OL_STEP_DIV ⇒ 转速就是交棒转速）
+     *       且认到 OL_STARTUP_ZC_NEED 次过零（说明反电势确实出来了、转子在跟着转）。
+     * 为什么必须"斜坡跑到底"：只认过零不看斜坡 ⇒ 起步早期（div 还很大、转子几乎没转）
+     *   会被噪声骗去交棒，实测只走 3 步就交棒、之后闭环不换相、steps 冻住。 */
     if (ol_step_div_cur <= OL_STEP_DIV && ol_startup_zc >= OL_STARTUP_ZC_NEED) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         old_routine = 0;
+        /* ★★ 交棒时必须把闭环的时间基准初始化正确 ★★
+         *   闭环的 waitTime 只在 PeriodElapsedCallback() 里算，而开环斜坡期间它
+         *   根本没跑过 ⇒ 交棒瞬间 waitTime / lastzctime / thiszctime 全是陈旧值
+         *   （waitTime 甚至是 0）⇒ 第一次过零立刻换相（步长≈0）⇒ commutation_interval
+         *   被污染 ⇒ 之后换相时刻一直错（波形退化成"类似正弦、没有梯形斜线"）。
+         *   ★ 口径提醒：thiszctime 是【两次过零之间的时间】= 一个完整换相步，
+         *     不是半个 —— interruptRoutine() 每次过零都把 INTERVAL_TIMER 清零，
+         *     所以下次读到的 CNT 就是整个步长；PeriodElapsedCallback() 里
+         *     commutation_interval = (ci + (lastzctime+thiszctime)/2)/2 也是在
+         *     朝"整步"收敛。原先这里写成 commutation_interval >> 1 是错的：
+         *     它会让 ci 一次性被砍掉 25%，等于凭空命令电机加速 1/3 ⇒ 起步就丢步。 */
+        commutation_interval = (uint32_t)ol_step_div_cur * 100;
+        thiszctime = (uint16_t)commutation_interval;
+        lastzctime = thiszctime;
+        if (!eepromBuffer.auto_advance) {
+            advance = (uint16_t)((commutation_interval * temp_advance) >> 6);
+        } else {
+            advance = (uint16_t)((commutation_interval * auto_advance_level) >> 6);
+        }
+        waitTime = (uint16_t)((commutation_interval >> 1) - advance);
+        /* ★ 定时器不要清零：交棒点落在一个步长的【中途】，清 0 会让第一次过零
+         *   只量到"半个步长"、同样污染 commutation_interval。摆到半步处，
+         *   使得到第一次过零时量到的正好是整步。 */
+        SET_INTERVAL_TIMER_COUNT(commutation_interval >> 1);
         enableCompInterrupts();
     }
 }
@@ -2334,6 +2447,17 @@ int main(void)
      *     开环（OL）与"闭环"切换时，这段钉死参数必须【一直保留】——
      *     RM2027_OL_ARM_ONLY 一旦关掉（转闭环），若这段也跟着消失，
      *     motor_poles/limits 就变成擦除态的垃圾值，转速/限流全乱。 */
+    eepromBuffer.input_type = DSHOT_IN;      /* ★★ 2026-10-08 补上（原来漏钉！）：不钉的话
+                                              *   擦除态 0xFF 会走"else ⇒ dshot=0"分支，
+                                              *   于是油门值永远进不了 newinput ⇒ input 恒 0
+                                              *   ⇒ 起步链门槛(input>=47)过不去 ⇒ 电机不转。
+                                              *   ★ 注意：loadEEpromSettings() 在本段【之前】就按
+                                              *     擦除态算过 dshot/EDT_ARMED 了 ⇒ 只改 input_type
+                                              *     没用，必须把 dshot / servoPwm / EDT_ARMED
+                                              *     也一并钉死（与 DSHOT_IN 分支的赋值一致）。 */
+    dshot = 1;
+    servoPwm = 0;
+    EDT_ARMED = 1;
     eepromBuffer.bi_direction = 0;           /* 输入映射走最朴素的那一条 */
     eepromBuffer.use_sine_start = 0;         /* 正弦启动会跟六步抢时序 */
     eepromBuffer.stall_protection = 0;       /* 失速 PID 会按 commutation_interval 猛加占空比 */
