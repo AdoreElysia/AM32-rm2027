@@ -509,6 +509,9 @@ volatile uint8_t ol_led_on_req = 0;         /* 请求切"运行绿"：每次起�
 volatile uint8_t ol_stop_reason = 0;        /* 0 无 / 1 到时间上限 / 2 过流跳闸 */
 uint32_t ol_cool_ticks = 0;                 /* 冷却已过的拍数 */
 volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑（ISR 也要读，故无条件定义）*/
+/* ★ 台架过流切断用的计数（见 tenKhzRoutine 里的说明与 targets.h 的 RM2027_BENCH_OC_*） */
+uint16_t ol_bench_oc_count = 0;
+uint32_t ol_bench_oc_trips = 0;
 /* ↑ 这一组是"开环版 / 闭环开环起步链"共用的运行时状态。闭环也要用（起步链复用它们），
  *   所以下面的起步链代码【不能】再包在 #if RM2027_OL_ARM_ONLY 里。 */
 
@@ -1988,6 +1991,29 @@ void tenKhzRoutine()
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
+
+#if RM2027_BENCH_OC_LIMIT > 0
+    /* ★★ 2026-10-09 台架过流切断（护电机）★★
+     *   背景：闭环换相相位不对时会把电全灌进错误角度 —— 实测 12V 下电流冲到
+     *   1.x A（= 18W 灌在一个 1404 上），几秒就把电机烤热，用户只能手动断电护电机。
+     *   而现有的过流跳闸阈值是 OL_TRIP_CURRENT = 800（厘安 = 8.0A），那是给飞行用的，
+     *   台架电源只有 1.5A，根本来不及；而且它只在【起步链】里生效，闭环里没有。
+     *   ⇒ 这里加一条【闭环也生效】的通用切断：actual_current（厘安）超过阈值
+     *     持续 RM2027_BENCH_OC_TICKS 拍（20kHz，50ms = 1000 拍）就 allOff 停机。
+     *   正常工作时开环实测 0.57~0.60A、切断阈值 1.0A ⇒ 不会误切，
+     *   只在"相位不对、电流异常"时保护电机。 */
+    if (running && actual_current > RM2027_BENCH_OC_LIMIT) {
+        if (++ol_bench_oc_count > RM2027_BENCH_OC_TICKS) {
+            allOff();
+            running = 0;
+            ol_startup_arm = 0;
+            ol_bench_oc_count = 0;
+            ol_bench_oc_trips++;
+        }
+    } else {
+        ol_bench_oc_count = 0;
+    }
+#endif
     if (!armed) {
         if (cell_count == 0) {
             if (inputSet) {
