@@ -549,6 +549,16 @@ volatile uint16_t ol_trace_rej = 0;            /* 累计"有边沿但被时间�
  *     ② 悬空相确实悬空、但反电势太小被噪声/振铃盖住 ⇒ delta 只有几十码；
  *   —— 只能把"悬空相 − V0"按时间还原成波形来看。这比再猜判据可靠。
  *   T 记的是记录时刻的 INTERVAL_TIMER 低 16 位，用它可以对上"换相点在哪"。 */
+/* ★ 2026-10-09 换相时刻埋点（见 commutate()）：记录每次换相时的 delta/CNT/step/waitTime。
+ *   用途：判断"换相落在反电势周期的哪个位置" —— 相位对错只能靠这条直接证据。 */
+#define OL_CM_LEN 32
+volatile int16_t  OL_CM_D[OL_CM_LEN];   /* 换相时刻的 "悬空相 − V0" */
+volatile uint16_t OL_CM_T[OL_CM_LEN];   /* 换相时刻的 INTERVAL_TIMER 低16位 */
+volatile uint8_t  OL_CM_S[OL_CM_LEN];   /* 换相后的 step */
+volatile uint16_t OL_CM_W[OL_CM_LEN];   /* 当时的 waitTime */
+volatile uint8_t  ol_cm_idx = 0;
+volatile uint16_t ol_cm_n = 0;
+
 #define OL_WF_LEN 64
 volatile int16_t  OL_WF_D[OL_WF_LEN];   /* 悬空相 − V0（ADC 码） */
 volatile uint16_t OL_WF_T[OL_WF_LEN];   /* 记录时刻（TIM2 低16位，0.5µs/拍） */
@@ -1215,6 +1225,23 @@ void commutate()
     bemfcounter = 0;
     zcfound = 0;
     commutation_intervals[step - 1] = commutation_interval; // just used to calulate average
+
+    /* ★★★ 2026-10-09 决定性埋点：记录【换相那一刻】的 "悬空相 − V0" ★★★
+     *   它直接回答"换相落在反电势周期的哪个位置" —— 这是判断闭环相位对不对的
+     *   唯一直接证据（之前所有间接指标都被证明可以自洽、说明不了问题）：
+     *     · 相位对：换相应落在 BEMF 平台的起点（过零后 30°）⇒ 此刻 delta 已在
+     *       "刚刚离开零点、朝平台方向走"的位置（约满幅值的 1/2~1 之间）；
+     *     · 相位错（如认在过零点上就换相）：此刻 delta ≈ 0 ⇒ 换相整整早了 30°电角度
+     *       ⇒ 转矩不对、电流灌进错误角度 ⇒ 抖 + 电流大 + 转速上不去（实测 1.x A）。
+     *   同时记下 CNT，用来和过零时刻对照（换相应在 waitTime 处）。 */
+    OL_CM_D[ol_cm_idx] = adc_bemf_get_delta();
+    OL_CM_T[ol_cm_idx] = (uint16_t)INTERVAL_TIMER_COUNT;
+    OL_CM_S[ol_cm_idx] = (uint8_t)step;
+    OL_CM_W[ol_cm_idx] = waitTime;
+    ol_cm_idx = (uint8_t)((ol_cm_idx + 1) & (OL_CM_LEN - 1));
+    if (ol_cm_n < 60000) {
+        ol_cm_n++;
+    }
     
 #ifdef USE_PULSE_OUT
 	if(step == 1 || step == 4  ){
@@ -1259,8 +1286,15 @@ void PeriodElapsedCallback()
          *     · 真要适应（转子确实只能跑更慢/更快）时，每步 6.25% 在 2222 步/秒下
          *       约 139 倍/秒的调节速度，几十毫秒内到位，不影响正常调速；
          *     · 丢锁后也能自己往上爬回来（放大方向不再被禁）。 */
-        uint32_t ci_lo = commutation_interval - (commutation_interval >> 4);
-        uint32_t ci_hi = commutation_interval + (commutation_interval >> 4);
+        /* ★★ 2026-10-09：档位从 1/16 再放缓到 1/64（1.5%/步）★★
+         *   1/16 实测（duty 351）不行：频率被硬摁在 2222RPM 而转子跟不上
+         *   ⇒ 电流冲到 1.x A、剧烈抖动 ⇒ 电全灌进错误的角度变成热和抖。
+         *   改成 1/64 后，闭环的【驱动形态】就接近已验证可用的开环
+         *   （固定时基、六步规整），只是频率能以约 33 倍/秒 的速度慢慢跟着转子走 ——
+         *   既不一步投降，也不硬摁着转子灌电流。这正是"跟不上就慢慢降、跟得上就慢慢增"
+         *   那条思路的最小实现。 */
+        uint32_t ci_lo = commutation_interval - (commutation_interval >> 6);
+        uint32_t ci_hi = commutation_interval + (commutation_interval >> 6);
         if (ci_new < ci_lo) {
             ci_new = ci_lo;
         }
