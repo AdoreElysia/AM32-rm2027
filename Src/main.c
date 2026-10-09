@@ -618,7 +618,21 @@ volatile uint8_t  ol_rej_idx = 0;
  * 判据稳定可认。 */
 #define OL_STARTUP_ALIGN   0   /* 阶段码：先对齐 */
 #define OL_STARTUP_RAMP    1   /* 阶段码：开环斜坡 */
-#define OL_STARTUP_ZC_NEED 3    /* 认到 3 次过零就交棒给闭环 */
+/* ★★★ 2026-10-09 "验证过再交棒"的参数 ★★★
+ *   实测依据（三步定位计数器）：交棒【前】悬空相状态翻转正常（边沿 29→1714），
+ *   交棒【瞬间】几乎停止（5 秒只涨 74 个）⇒ 反电势在交棒那一刻就塌了
+ *   ⇒ 转子在交棒瞬间被打断节奏（用户观察："一交到闭环就剧烈抖、转速变慢"）。
+ *   改法：斜坡到目标速度后【先不交】，进"验证段"——
+ *     开环继续按目标节奏换相（节奏不断、反电势一直在），同时只"听"闭环报过零；
+ *     每 OL_VERIFY_WIN 拍结算一次，数窗口内认到的过零数并与"应有的数"比；
+ *     连续 OL_VERIFY_OK_NEED 个窗口合格 ⇒ 才真正把驱动交给闭环。 */
+#ifndef OL_VERIFY_WIN
+#define OL_VERIFY_WIN       2000   /* 校验窗口：20kHz 拍 ⇒ 2000 = 100ms */
+#endif
+#ifndef OL_VERIFY_OK_NEED
+#define OL_VERIFY_OK_NEED   3      /* 连续多少个合格窗口才交棒 ⇒ 3 = 300ms */
+#endif
+#define OL_STARTUP_ZC_NEED 3    /* 旧判据（已被窗口校验取代，保留以防别处引用）*/
 /* ★ 起步期间判过零用的"最小 |delta|"（ADC 码）。
  *   为什么不靠"抬阈值抗噪"：本板反电势本来就小 —— targets.h 记的实测是
  *   "3700RPM 时悬空相 delta ≈ ±32 码"，线性折算到新的交棒转速（2222RPM）只有约 ±19 码。
@@ -642,6 +656,10 @@ volatile uint8_t  ol_zc_level = 0;     /* 观测：上式的符号（1=正 0=负
 volatile uint8_t  ol_zc_inwin = 0;     /* 观测：本拍的跨越是否落在"本步中间段"时间窗内 */
 volatile uint8_t  ol_stage_show = 0;   /* 观测：起步阶段 0=对齐 1=斜坡 */
 static uint8_t    ol_zc_reseed = 0;    /* 换相后重新取样标志（见下面判过零处） */
+static uint16_t   ol_verify_ticks = 0; /* 验证段：本窗口已过拍数 */
+static uint16_t   ol_verify_ok    = 0; /* 验证段：连续合格窗口数 */
+volatile uint16_t ol_verify_last = 0;  /* 观测：上一窗口认到的过零数 */
+volatile uint16_t ol_verify_ok_show = 0;/* 观测：当前连续合格窗口数 */
 volatile uint16_t ol_steps_show = 0;   /* 观测：一个采样窗内的换相步数（估速率用） */
 
 /* 起步期间：允许过零中断"认边沿"，但不许它直接驱动换相（换相由本链独占），
@@ -792,7 +810,23 @@ static void olStartupTick(void)
      *       且认到 OL_STARTUP_ZC_NEED 次过零（说明反电势确实出来了、转子在跟着转）。
      * 为什么必须"斜坡跑到底"：只认过零不看斜坡 ⇒ 起步早期（div 还很大、转子几乎没转）
      *   会被噪声骗去交棒，实测只走 3 步就交棒、之后闭环不换相、steps 冻住。 */
-    if (ol_step_div_cur <= OL_STEP_DIV && ol_startup_zc >= OL_STARTUP_ZC_NEED) {
+    /* ---- 交棒前先"验证"：开环继续驱动，只在旁边核对闭环认到的过零速率 ---- */
+    ol_verify_ok_show = ol_verify_ok;
+    if (ol_step_div_cur <= OL_STEP_DIV) {
+        if (++ol_verify_ticks >= OL_VERIFY_WIN) {
+            uint16_t expect = (uint16_t)(OL_VERIFY_WIN / OL_STEP_DIV);
+            ol_verify_ticks = 0;
+            if (ol_startup_zc >= (uint16_t)(expect - (expect / 3))) {
+                if (ol_verify_ok < 250) { ol_verify_ok++; }
+            } else {
+                ol_verify_ok = 0;      /* 本窗口不合格 ⇒ 连续计数清零重来 */
+            }
+            ol_verify_last = ol_startup_zc;   /* 观测 */
+            ol_startup_zc = 0;         /* 每窗口重新数 */
+        }
+    }
+
+    if (ol_step_div_cur <= OL_STEP_DIV && ol_verify_ok >= OL_VERIFY_OK_NEED) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         old_routine = 0;
         /* ★★ 交棒时必须把闭环的时间基准初始化正确 ★★
