@@ -52,6 +52,12 @@ static uint8_t  active_phase = 0;    /* 0=A(PA5)  1=B(PA4)  2=C(PA2) */
 static uint8_t  bemf_edge_rise = 0;
 static uint8_t  bemf_edge_fall = 0;
 
+/* ★★ 2026-10-09："换相后第一帧采样"的屏蔽标志。
+ *   换相会把悬空相换掉 ⇒ 下一帧采样的 delta 必然跳变 ⇒ 必然置出一个假边沿。
+ *   置 1 表示"下一帧的边沿整个丢弃，只用来重新落定滞回状态"。
+ *   由 changeCompInput()（每次换相）与交棒处设置；ADC-DMA 中断里消费并清 0。 */
+volatile uint8_t bemf_blank = 0;
+
 /* ★ 过零检测的"武装"标志（取代比较器的 EXTI 使能/屏蔽）
  *   comparator.c 是用 EXTI 中断来报"悬空相过零"的；本板没有比较器通路，
  *   改成在【ADC-DMA 完成中断】里判（见 Mcu/g071/Src/stm32g0xx_it.c）。
@@ -74,6 +80,16 @@ void changeCompInput(void)
      *   这一步等价于上游比较器切输入时重新 arm EXTI。 */
     bemf_edge_rise = 0;
     bemf_edge_fall = 0;
+    /* ★★ 2026-10-09：再"屏蔽"掉紧随换相之后的那一帧采样。
+     *   为什么只清边沿标志不够：清标志发生在换相那一刻，而"悬空相被换掉"
+     *   引起的电平突变要到【下一帧 ADC 采样】才会被 getCompOutputLevel() 看到
+     *   —— 于是那一帧又置出一个新边沿，被当成过零收下。
+     *   实测后果（12V 台架，非侵入式读 RAM）：交棒瞬间 ci=1500 一切正常，
+     *   紧接着 commutation_intervals 变成 [70,62,62,66,77,77]、ci 一路
+     *   0.75× 衰减到 62（≈31µs，比 PWM 周期 41.6µs 还短）⇒ 换相比 PWM 还快
+     *   ⇒ 六步波形被搅烂，现场表现就是"输出成了恒定高的 PWM、电机不转"。
+     *   把这一帧的边沿整个丢弃，就等于把"换相振铃"从过零判据里摘出去。 */
+    bemf_blank = 1;
 
     if (step == 1 || step == 4) {
         active_phase = 2;
@@ -201,5 +217,13 @@ void adc_bemf_watchdog_for_phase(void)
  *    若上机出现"换相方向反/不转"，第一个要试的就是把这个 `!rising` 反过来。） */
 void enableCompInterrupts(void) { bemf_irq_armed = 1; }
 void maskPhaseInterrupts(void) { bemf_irq_armed = 0; }
+
+/* 取走并清掉"屏蔽下一帧"标志（ADC-DMA 中断里用） */
+uint8_t adc_bemf_blank_take(void)
+{
+    uint8_t b = bemf_blank;
+    bemf_blank = 0;
+    return b;
+}
 
 #endif /* USE_ADC_BEMF */

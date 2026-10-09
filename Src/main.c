@@ -722,6 +722,10 @@ static void olStartupTick(void)
          *   只量到"半个步长"、同样污染 commutation_interval。摆到半步处，
          *   使得到第一次过零时量到的正好是整步。 */
         SET_INTERVAL_TIMER_COUNT(commutation_interval >> 1);
+        /* ★ 交棒后第一帧也屏蔽掉：交棒点落在一个步长的中途，这一帧的 delta 同样
+         *   不能代表"新的悬空相"（悬空相还没换，但定时基准刚被重置），
+         *   顺手丢弃它的边沿，避免又给正反馈送第一脚。 */
+        bemf_blank = 1;
         enableCompInterrupts();
     }
 }
@@ -1181,7 +1185,20 @@ void PeriodElapsedCallback()
 {
     DISABLE_COM_TIMER_INT(); // disable interrupt
     commutate();
-    commutation_interval = ((commutation_interval)+((lastzctime + thiszctime) >> 1))>>1;
+    /* ★★ 2026-10-09 抗"正反馈塌陷"的最后一道闸 ★★
+     *   转子物理上不可能在一步（60°电角度）之内把转速提高 12% 以上 ⇒ 若滤波结果
+     *   比这一步骤降超过 1/8，说明本步的 thiszctime 被假边沿带偏了，只允许按 1/8 下降。
+     *   为什么必须有：一旦进入"假过零 → ci 变小 → waitTime 变小 → 假边沿来得更早"
+     *   这条正反馈，闭环会把 ci 从 1500 一路拉到 62（实测 commutation_intervals =
+     *   [70,62,62,66,77,77]，每步 0.75×），换相比 PWM 周期还快、六步波形全烂，
+     *   而且它【不会】自恢复（实测一直持续到断电）。这是台架实测的现场表现
+     *   ——"输出成了恒定高的 PWM、电机不转"。
+     *   （正常跟踪时每步的变化只有千分之几，这个闸完全不影响正常调速。） */
+    {
+        uint32_t ci_new   = ((commutation_interval) + ((lastzctime + thiszctime) >> 1)) >> 1;
+        uint32_t ci_floor = commutation_interval - (commutation_interval >> 3);
+        commutation_interval = (ci_new < ci_floor) ? ci_floor : ci_new;
+    }
   	if (!eepromBuffer.auto_advance) {
 	  advance = (commutation_interval * temp_advance) >> 6; // 60 divde 64 0.9375 degree increments
 	} else {

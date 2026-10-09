@@ -28,6 +28,13 @@ extern volatile uint8_t bemf_polarity_invert;
 void adc_bemf_take_edges(uint8_t* out_rise, uint8_t* out_fall,
                         uint8_t clear_rise, uint8_t clear_fall);
 
+/* ★★ 2026-10-09："换相后第一帧采样"的屏蔽标志。
+ *   换相换了悬空相 ⇒ 下一帧 delta 必跳变 ⇒ 必置出一个假边沿。置 1 表示
+ *   "下一帧的边沿整个丢弃、只用来重新落定滞回状态"。由 changeCompInput()
+ *   与交棒处设置，ADC-DMA 中断里 adc_bemf_blank_take() 消费并清 0。 */
+extern volatile uint8_t bemf_blank;
+uint8_t adc_bemf_blank_take(void);
+
 void     adc_bemf_set_hysteresis(uint16_t hyst_lsb);
 uint16_t adc_bemf_get_hysteresis(void);
 int16_t  adc_bemf_get_delta(void);      /* 当前悬空相 − V0（有符号） */
