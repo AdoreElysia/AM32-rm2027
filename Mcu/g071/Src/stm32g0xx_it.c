@@ -252,14 +252,35 @@ void DMA1_Channel2_3_IRQHandler(void)
         {
             uint8_t edge_rise = 0, edge_fall = 0;
 
+            /* ★★★ 2026-10-09 关键修复：每帧采样后必须主动调一次 getCompOutputLevel() ★★★
+             *   它是【唯一】会更新施密特状态(bemf_state)、并置边沿标志的地方。
+             *   原来闭环里根本没人调它 ⇒ 边沿恒为 0 ⇒ 下面 take_edges() 永远读到 0
+             *   ⇒ 认不到过零 ⇒ interruptRoutine() 永不执行；而 interruptRoutine()
+             *   恰恰是闭环里唯一会调 getCompOutputLevel() 的路径 ⇒【互为前提、死锁】。
+             *   实测证据（非侵入式读 RAM）：交棒成功后 old_routine=0、ci=1500、zc=3，
+             *   但 steps 冻在 100、zero_crosses=0、bemf_irq_armed=1 一直在空等、
+             *   edge_rise=edge_fall=0 —— 而 zcdelta 高达 427 码（信号很强，
+             *   是被判据卡住，不是没信号）。
+             *   喂数据的位置就在这里：上一行 ADC_DMA_Callback() 刚把 7 个通道搬进 RAM。 */
+            (void)getCompOutputLevel();
+
             /* 读边沿 + 就地清掉同向标志（同一个过零点只报一次） */
             adc_bemf_take_edges(&edge_rise, &edge_fall, 0, 0);
 
+            /* ★ 判据一：极性无关 —— 只问"这一步里状态翻转过没有"。
+             *   物理上六步换相每一步的悬空相恰好过一次零 ⇒ 恰好一个边沿，
+             *   所以"哪个方向"不携带任何信息，只带来"约定一旦反了就一个都认不到"的风险
+             *   （本板 A/B 相没有比较器可与上游约定对照，这个风险是实打实的）。
+             * ★ 判据二：时间窗 [1/4 步, 2 步]。
+             *   真过零在换相后约半个步长处；而换相瞬间的振铃紧跟换相，
+             *   若不留【下界】，换相后第一帧采样就可能被当成过零 ⇒ 提前换相。
+             *   下界取 1/4 步（远离振铃、又远早于真过零），上界保持 2 步（迟到太多的必是假的）。 */
             if (bemf_irq_armed
-                && ((rising && edge_rise) || (!rising && edge_fall))
+                && (edge_rise || edge_fall)
                 && ((average_interval < 50)
-                    || (INTERVAL_TIMER->CNT < ((uint32_t)average_interval << 1)))) {
-                /* 消费掉本次边沿：同向清掉、反向也清（换相后重新开始记） */
+                    || ((INTERVAL_TIMER->CNT > ((uint32_t)average_interval >> 2))
+                        && (INTERVAL_TIMER->CNT < ((uint32_t)average_interval << 1))))) {
+                /* 消费掉本次边沿：两个方向都清（换相后重新开始记） */
                 adc_bemf_take_edges(0, 0, 1, 1);
                 bemf_irq_armed = 0;
 #ifdef USE_ADC_BEMF

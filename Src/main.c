@@ -1225,7 +1225,14 @@ void interruptRoutine()
          *   ② 调用点的门槛"距上次换相已过半个周期"（见 stm32g0xx_it.c 的 DMA 中断）
          *   ③ "每步只认一次"的武装标志（bemf_irq_armed）
          * （filter_level 这个变量在【轮询模式/起步】那条路径里仍在用，别删。）*/
-#if defined(MCU_F031) || defined(MCU_G031)
+#if defined(USE_ADC_BEMF)
+        /* ★ 2026-10-09：这道"按 rising 判电平"的门对 ADC 版过零也去掉了。
+         *   理由与 ADC 中断里改成极性无关是同一个：边沿检测已经保证"这一步确实
+         *   发生过一次跨越"，再按同一个 rising 约定判一次电平只会引入【第二处
+         *   极性耦合】—— 极性一错，前面认对了、这里又被挡回去 ⇒ 依然不换相。
+         *   本板 A/B 相没有比较器通路可与上游约定对照（这正是当初要写 adc_bemf.c
+         *   的原因），所以只保留"边沿 + 每步只认一次 + 时间窗"这三条与极性无关的判据。 */
+#elif defined(MCU_F031) || defined(MCU_G031)
         if ((current_GPIO_PORT->IDR & current_GPIO_PIN) == !(rising)) {
             return;
         }
