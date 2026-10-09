@@ -508,6 +508,20 @@ volatile uint8_t ol_led_on_req = 0;         /* 请求切"运行绿"：每次起�
                                              * 否则第一轮跑完变红后，之后每轮都会一直亮红灯 */
 volatile uint8_t ol_stop_reason = 0;        /* 0 无 / 1 到时间上限 / 2 过流跳闸 */
 uint32_t ol_cool_ticks = 0;                 /* 冷却已过的拍数 */
+/* ★★ 2026-10-09 【恒定斜率升频】的三个量（与开环分支 olStepTick 同一套做法）★★
+ *   开环台架实测已证明：斜坡的【形状】必须是"频率随时间线性"，即 df/dt = 常数。
+ *   原来的"每换相把步长按比例缩 1/2^shift"看起来合理，但它让换相频率【指数】上升
+ *   ⇒ df/dt ∝ f² ⇒ 2222Hz 处的加速度需求约 254,000 Hz/s，
+ *   而反电势随转速升高、力矩余量反而变小 ⇒ 末端必然丢步
+ *   （现场表现：最后一段 14Hz → 81Hz → 2222Hz，用户说"最后一下突进跟不上"）。
+ *   改成恒定斜率后末端需求降到约 3,500 Hz/s（小 72 倍），用户实测"好多了"。
+ *   业界（Microchip AN857 / AVR928）说的就是 ramp start speed / end speed / slope。
+ *   实现：olo_freq_q = 换相频率 × 256（步/秒）；每换相加 slope×65536/f_q
+ *   （因为 df = slope × dt = slope / f），再由 div = 20000×256/f_q 反算步长。 */
+uint32_t ol_freq_q     = 0;      /* 当前换相频率 x 256（步/秒）*/
+uint32_t ol_freq_tgt_q = 0;      /* 斜坡终点频率 x 256 */
+uint16_t ol_freq_slope = 554;    /* 斜坡斜率 Hz/s（时长与它成反比）*/
+
 volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑（ISR 也要读，故无条件定义）*/
 /* ★ 台架过流切断用的计数（见 tenKhzRoutine 里的说明与 targets.h 的 RM2027_BENCH_OC_*） */
 uint16_t ol_bench_oc_count = 0;
@@ -691,15 +705,24 @@ static void olStartupTick(void)
             commutate();
             ol_zc_reseed = 1;   /* ★ 换相后"重新取样"：避免切换悬空相造成的假跳变被当成过零 */
             ol_steps++;
-            if (ol_step_div_cur > OL_STEP_DIV) {
-                uint16_t dec = (uint16_t)(ol_step_div_cur >> OL_RAMP_SHIFT);
-                if (dec == 0) {
-                    dec = 1;
-                }
-                if ((uint32_t)ol_step_div_cur > (uint32_t)OL_STEP_DIV + dec) {
-                    ol_step_div_cur -= dec;
-                } else {
+            /* ★★ 恒定斜率升频（不再按比例缩）★
+             *   df = slope x dt = slope / f，定点（f_q = f x 256）：
+             *       ol_freq_q += (ol_freq_slope x 65536) / ol_freq_q;
+             *   再由 div = 20000x256 / f_q 反算步长 ⇒ 频率线性上升时 div 自动双曲线下降。 */
+            if (ol_freq_q < ol_freq_tgt_q) {
+                ol_freq_q += ((uint32_t)ol_freq_slope * 65536UL) / ol_freq_q;
+                if (ol_freq_q >= ol_freq_tgt_q) {
+                    ol_freq_q = ol_freq_tgt_q;
                     ol_step_div_cur = OL_STEP_DIV;
+                } else {
+                    uint32_t d = (20000UL * 256UL) / ol_freq_q;
+                    if (d > 0xFFFFu) {
+                        d = 0xFFFFu;
+                    }
+                    if (d < (uint32_t)OL_STEP_DIV) {
+                        d = (uint32_t)OL_STEP_DIV;
+                    }
+                    ol_step_div_cur = (uint16_t)d;
                 }
             }
         }
@@ -1442,6 +1465,9 @@ void startMotor()
         ol_startup_ticks = 0;
         ol_startup_trip  = 0;
         ol_step_div_cur  = (OL_STEP_DIV_START > OL_STEP_DIV) ? OL_STEP_DIV_START : OL_STEP_DIV;
+        /* ★ 恒定斜率升频初始化：起点频率、终点频率（f = 20000/div 步/秒，×256 定点） */
+        ol_freq_q     = (20000UL * 256UL) / (uint32_t)ol_step_div_cur;
+        ol_freq_tgt_q = (20000UL * 256UL) / (uint32_t)OL_STEP_DIV;
         ol_input_cur     = OL_INPUT_START;
         commutation_interval = (uint32_t)OL_ALIGN_TICKS * 100;   /* 0.5µs 单位 ⇒ 对齐时长 */
         SET_INTERVAL_TIMER_COUNT(0);
