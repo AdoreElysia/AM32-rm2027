@@ -520,6 +520,13 @@ volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑�
  *   假过零：远小于 CI（认在换相点/振铃上）；认晚：远大于 CI。
  * 写入点见 interruptRoutine()（只记"被接受"的），拒收点见 ADC-DMA 中断。
  * 全部是环形缓冲，用 SWD 直接 dump 这几段 RAM，不改变任何行为。 */
+/* ★★ 2026-10-09：过零【发生】的时刻（由 ADC 中断写入，interruptRoutine 使用）。
+ *   为什么必须是它而不是 INTERVAL_TIMER_COUNT：边沿标志被窗口拒掉后会一直挂着，
+ *   等到某一帧窗口通过才被"收下"，那时的 CNT 是"收下时刻"、不是过零时刻。
+ *   实测（埋点）靠 delta 分出两类（±5~±39 是本帧翻转、±374~±409 是滞后几百帧）
+ *   才把这条钉死。用它做 thiszctime，CNT/CI 才能收敛到 1.0。 */
+volatile uint16_t bemf_zc_time = 0;
+
 #define OL_TRACE_LEN 32
 volatile uint16_t OL_TRACE_CNT[OL_TRACE_LEN];  /* 认到过零时"距上次过零"的拍数（TIM2, 0.5µs） */
 volatile int16_t  OL_TRACE_D[OL_TRACE_LEN];    /* 当时的"悬空相 − V0"（ADC 码） */
@@ -1297,7 +1304,7 @@ void interruptRoutine()
      *     若远小于它 ⇒ 认在了换相点上（假过零）；
      *     若远大于它 ⇒ 认晚了 / 中间丢了几步。
      *   环形缓冲 + 累计计数，用 SWD 直接把这几段 RAM 读出来即可，不改行为。 */
-    OL_TRACE_CNT[ol_trace_idx] = (uint16_t)INTERVAL_TIMER_COUNT;   /* 认到过零时距上次过零的拍数 */
+    OL_TRACE_CNT[ol_trace_idx] = bemf_zc_time;                     /* 过零【发生】时距上次过零的拍数 */
     OL_TRACE_D[ol_trace_idx]   = adc_bemf_get_delta();             /* 当时的"悬空相 − V0" */
     OL_TRACE_CI[ol_trace_idx]  = (uint16_t)commutation_interval;   /* 当时认为的一步有多长 */
     OL_TRACE_ST[ol_trace_idx]  = (uint8_t)(step);                  /* 当时在第几拍换相 */
@@ -1309,7 +1316,11 @@ void interruptRoutine()
     __disable_irq();
     maskPhaseInterrupts();
     lastzctime = thiszctime;
-    thiszctime = INTERVAL_TIMER_COUNT;  
+    /* ★★ 2026-10-09：用"过零【发生】的时刻"，不是"此刻"也不该用接受时刻 ★★
+     *   bemf_zc_time 由 ADC 中断在"本帧检测到翻转"时写入，见 stm32g0xx_it.c 的
+     *   "关键修复③"。用错它会系统地短量 thiszctime ⇒ CNT/CI 恒 0.6、ci 被带小
+     *   ⇒ runaway ⇒ 永久丢锁（22.5ms 兜底硬踹 ⇒ ~43 RPM 慢抖）。 */
+    thiszctime = bemf_zc_time;
     SET_INTERVAL_TIMER_COUNT(0);
     SET_AND_ENABLE_COM_INT(waitTime+1); // enable COM timer interrupt
     __enable_irq();

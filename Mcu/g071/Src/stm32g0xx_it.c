@@ -262,24 +262,32 @@ void DMA1_Channel2_3_IRQHandler(void)
              *   edge_rise=edge_fall=0 —— 而 zcdelta 高达 427 码（信号很强，
              *   是被判据卡住，不是没信号）。
              *   喂数据的位置就在这里：上一行 ADC_DMA_Callback() 刚把 7 个通道搬进 RAM。 */
-            (void)getCompOutputLevel();
-
-            /* 读边沿 + 就地清掉同向标志（同一个过零点只报一次） */
-            adc_bemf_take_edges(&edge_rise, &edge_fall, 0, 0);
-
-            /* ★★★ 2026-10-09 关键修复②：丢弃"换相后第一帧"的边沿 ★★★
-             *   换相把悬空相换掉 ⇒ 下一帧采样到的 delta 必然跳变 ⇒ 必然置出一个
-             *   假边沿。changeCompInput() 虽然清了边沿标志，但清的是【换相那一刻】，
-             *   而跳变要到【下一帧采样】才被 getCompOutputLevel() 看到 ⇒ 又冒一个新边沿。
-             *   实测后果（12V 台架）：交棒瞬间 ci=1500 一切正常，紧接着
-             *   commutation_intervals 变成 [70,62,62,66,77,77]，ci 按 0.75× 一路衰减到 62
-             *   （≈31µs，比 PWM 周期 41.6µs 还短）⇒ 换相比 PWM 还快 ⇒ 六步波形被搅烂，
-             *   现场表现就是用户看到的"输出成了恒定高的 PWM、电机不转"。
-             *   这一帧只用来"重新落定"滞回状态（上一行 getCompOutputLevel 已经做了），
-             *   边沿整个作废。
-             * ★ 注意这里不能用 return —— 本函数后面还有 TC3/USART 的处理。 */
-            if (adc_bemf_blank_take()) {
-                adc_bemf_take_edges(0, 0, 1, 1);
+            /* ★★★ 2026-10-09 关键修复③：必须在【本帧】判定"翻转是否发生在这一帧" ★★★
+             *   原来的次序是"读边沿（不清）→ 判时间窗" ⇒ 被窗口拒掉的边沿会【一直挂着】，
+             *   等到后面某一帧窗口通过才被收下 ⇒ interruptRoutine() 里
+             *   `thiszctime = INTERVAL_TIMER_COUNT` 量到的是【收下的时刻】，
+             *   比真过零晚了不知多久。
+             *   埋点铁证（12V 台架）：接受记录里的 delta 分成清清楚楚的两类 ——
+             *     小的 ±5~±39  （正好刚跨过阈值 ⇒ 翻转就发生在记录的那一帧）；
+             *     大的 ±374~±409（= 完整反电势幅值 ⇒ 翻转【早就】发生了，
+             *                     记下的是"被收下"的时刻，滞后了几百个采样）。
+             *   下游后果：CNT/CI 恒在 0.6 附近、永不收敛到 1.0 ⇒ ci 被滤波一路带小
+             *   （之前所有"runaway / 永久丢锁 / 43RPM 慢抖"都是这个测量错误的下游）。
+             *   修法：把次序倒过来 —— 先清旧标志 → 再用本帧新采样更新滞回状态 →
+             *   再读。这样"读到的边沿"必定属于本帧 ⇒ 此刻的 CNT 就是过零时刻
+             *   （误差 ≤ 1 个采样周期 41.6µs）。
+             *   被拒的边沿也一并清掉（丢掉）：真落在下界之前的多半是换相振铃；
+             *   万一是真过零被卡住，下一次过零 / 22.5ms 兜底会把它带回来（可自恢复）。
+             *
+             * ★ 2026-10-09 关键修复②（保留）：换相后第一帧的边沿作废。
+             *   换相换了悬空相 ⇒ 下一帧 delta 必跳变 ⇒ 必置出假边沿；
+             *   这一帧只用来"重新落定"滞回状态（getCompOutputLevel 已做）。 */
+            uint8_t blanked = adc_bemf_blank_take();
+            adc_bemf_take_edges(0, 0, 1, 1);      /* 清掉上一帧的残留 */
+            (void)getCompOutputLevel();           /* 用本帧新采样更新滞回状态 */
+            adc_bemf_take_edges(&edge_rise, &edge_fall, 1, 1);  /* 读本帧翻转并清掉 */
+            if (blanked) {
+                edge_rise = edge_fall = 0;
             }
             /* ★ 判据一：极性无关 —— 只问"这一步里状态翻转过没有"。
              *   物理上六步换相每一步的悬空相恰好过一次零 ⇒ 恰好一个边沿，
@@ -312,9 +320,13 @@ void DMA1_Channel2_3_IRQHandler(void)
                 uint32_t zc_cnt = INTERVAL_TIMER->CNT;
                 if ((average_interval < 50)
                     || (zc_cnt > ((uint32_t)average_interval >> 1))) {
-                /* 消费掉本次边沿：两个方向都清（换相后重新开始记） */
-                adc_bemf_take_edges(0, 0, 1, 1);
+                /* 边沿已经在"读的时候"清掉了（见上），这里只把过零【发生】的时刻
+                 * 交给 interruptRoutine()：它必须用 bemf_zc_time，不能用
+                 * INTERVAL_TIMER_COUNT —— 后者是"此刻"，而此刻就是过零时刻
+                 * （同一帧内），但那样写容易在后续改动里又被拉长成"接受时刻"。 */
+                extern volatile uint16_t bemf_zc_time;   /* 定义在 Src/main.c */
                 bemf_irq_armed = 0;
+                bemf_zc_time = (uint16_t)zc_cnt;
 #ifdef USE_ADC_BEMF
                 /* ★★ 闭环的"开环起步"期间（ol_startup_arm=1）：这里【什么都不做】，
                  *   只把武装标志放回去 —— 换相由 olStartupTick() 的固定时基独占，
