@@ -541,6 +541,20 @@ volatile uint8_t  OL_TRACE_ST[OL_TRACE_LEN];   /* 当时的 step */
 volatile uint8_t  ol_trace_idx = 0;
 volatile uint16_t ol_trace_n = 0;              /* 累计"接受"次数 */
 volatile uint16_t ol_trace_rej = 0;            /* 累计"有边沿但被时间窗拒掉"次数 */
+
+/* ★★ 2026-10-09 悬空相波形捕捉（每 8 个 ADC 帧记一次，环形 64 点）★★
+ *   为什么需要它：台架实测"闭环换相频率恒定、不跟转速变" ⇒ 说明闭环锁在了
+ *   自己的换相动作上，而不是转子的反电势。要一次性区分两种可能 ——
+ *     ① 硬件上悬空相根本没真悬空（相上仍是 PWM/被驱动）⇒ delta 是几百码的方波；
+ *     ② 悬空相确实悬空、但反电势太小被噪声/振铃盖住 ⇒ delta 只有几十码；
+ *   —— 只能把"悬空相 − V0"按时间还原成波形来看。这比再猜判据可靠。
+ *   T 记的是记录时刻的 INTERVAL_TIMER 低 16 位，用它可以对上"换相点在哪"。 */
+#define OL_WF_LEN 64
+volatile int16_t  OL_WF_D[OL_WF_LEN];   /* 悬空相 − V0（ADC 码） */
+volatile uint16_t OL_WF_T[OL_WF_LEN];   /* 记录时刻（TIM2 低16位，0.5µs/拍） */
+volatile uint8_t  OL_WF_S[OL_WF_LEN];   /* 当时的 step */
+volatile uint8_t  ol_wf_idx = 0;
+volatile uint8_t  ol_wf_div = 0;
 #define OL_REJ_LEN 32
 volatile uint16_t OL_REJ_CNT[OL_REJ_LEN];      /* 被拒时的位置（拍数） */
 volatile uint16_t OL_REJ_CI[OL_REJ_LEN];       /* 被拒时的 CI */

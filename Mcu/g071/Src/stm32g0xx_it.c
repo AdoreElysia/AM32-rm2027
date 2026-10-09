@@ -302,6 +302,24 @@ void DMA1_Channel2_3_IRQHandler(void)
                 }
             }
 
+            /* ★ 2026-10-09 悬空相波形捕捉：每 8 帧记一次（≈3kHz 采样，64 点 ≈21ms）。
+             *   用途见 Src/main.c 里 OL_WF_* 的说明 —— 把"悬空相 − V0"还原成波形，
+             *   一次性判定"硬件没真悬空"还是"反电势太小被盖住"。 */
+            {
+                extern int16_t  OL_WF_D[64];
+                extern uint16_t OL_WF_T[64];
+                extern uint8_t  OL_WF_S[64];
+                extern uint8_t  ol_wf_idx, ol_wf_div;
+                /* step 已在包含的头里声明（非 volatile），不要在这里重复限定符 */
+                if (++ol_wf_div >= 8) {
+                    ol_wf_div = 0;
+                    OL_WF_D[ol_wf_idx] = adc_bemf_get_delta();
+                    OL_WF_T[ol_wf_idx] = (uint16_t)INTERVAL_TIMER->CNT;
+                    OL_WF_S[ol_wf_idx] = (uint8_t)step;
+                    ol_wf_idx = (uint8_t)((ol_wf_idx + 1) & 63);
+                }
+            }
+
             if (blanked) {
                 edge_rise = edge_fall = 0;
             }
