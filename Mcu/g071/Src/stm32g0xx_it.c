@@ -356,7 +356,18 @@ void DMA1_Channel2_3_IRQHandler(void)
                  * （同一帧内），但那样写容易在后续改动里又被拉长成"接受时刻"。 */
                 extern volatile uint16_t bemf_zc_time;   /* 定义在 Src/main.c */
                 bemf_irq_armed = 0;
-                bemf_zc_time = (uint16_t)zc_cnt;
+                /* ★★ 2026-10-09 关键修复⑥：别让"丢锁很久"的间隔回绕成小数值 ★★
+                 *   INTERVAL_TIMER 是 2MHz 的 32 位计数器（可数 2147s），
+                 *   而 thiszctime / bemf_zc_time 都是 uint16 ⇒ 超过 65535 拍
+                 *   （32.7ms）就会回绕。丢锁时真实间隔是几百毫秒，回绕后变成一个
+                 *   【很小】的数 ⇒ PeriodElapsedCallback 的滤波
+                 *      ci = (ci + (last+this)/2)/2
+                 *   会把 ci 当成"转得飞快"往小里拉 ⇒ commutation_interval 越跑越偏
+                 *   ⇒ 永远回不到正轨（实测：接受记录里 CNT 恒在 2300~3100 这种
+                 *   小值，而实际接受速率只有 ~5 次/秒 —— 两者矛盾就是回绕的铁证）。
+                 *   钳到 0xFFFF：语义变成"间隔至少 32.7ms"，ci 会被拉大而不是拉小，
+                 *   闭环就能自己从丢锁里往回爬（变大方向不受速率闸限制）。 */
+                bemf_zc_time = (zc_cnt > 0xFFFFu) ? (uint16_t)0xFFFFu : (uint16_t)zc_cnt;
 #ifdef USE_ADC_BEMF
                 /* ★★ 闭环的"开环起步"期间（ol_startup_arm=1）：这里【什么都不做】，
                  *   只把武装标志放回去 —— 换相由 olStartupTick() 的固定时基独占，
