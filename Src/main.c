@@ -522,6 +522,19 @@ uint32_t ol_freq_q     = 0;      /* 当前换相频率 x 256（步/秒）*/
 uint32_t ol_freq_tgt_q = 0;      /* 斜坡终点频率 x 256 */
 uint16_t ol_freq_slope = 554;    /* 斜坡斜率 Hz/s（时长与它成反比）*/
 
+/* ★★★ 2026-10-09 三步定位计数器（回答"交棒后为什么认不到过零"）★★★
+ *   ① ol_adc_isr_n：ADC 完成中断进入次数 ⇒ 中断本身在不在跑
+ *   ② ol_edge_n   ：其中"确实产生了边沿"的帧数 ⇒ 状态有没有在翻转
+ *   ③ ol_noarm_n  ：有边沿、但 bemf_irq_armed=0 被【静默丢弃】的次数
+ *      —— 原来的判据链是 `if (blanked) {...} else if (armed && edge) {...}`，
+ *         【没有最后那个 else】⇒ "未武装"这种情况被无声丢掉、完全不可见。
+ *         这很可能就是实测"交棒后连拒收都停了"的原因。
+ *   配上已有的 ol_trace_n（接受）与 ol_trace_rej（窗外拒收），就能配平：
+ *      边沿 = 接受 + 窗外拒收 + 未武装丢弃 */
+volatile uint32_t ol_adc_isr_n = 0;
+volatile uint32_t ol_edge_n    = 0;
+volatile uint32_t ol_noarm_n   = 0;
+
 volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑（ISR 也要读，故无条件定义）*/
 /* ★ 台架过流切断用的计数（见 tenKhzRoutine 里的说明与 targets.h 的 RM2027_BENCH_OC_*） */
 uint16_t ol_bench_oc_count = 0;

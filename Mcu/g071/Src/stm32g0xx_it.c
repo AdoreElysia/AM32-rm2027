@@ -320,6 +320,19 @@ void DMA1_Channel2_3_IRQHandler(void)
                 }
             }
 
+            /* ★ 三步定位计数器（见 Src/main.c 里的说明）。放在 if(blanked) 之前，
+             *   是一个独立的花括号块 ⇒ 不会破坏下面的 if/else 判据链。 */
+            {
+                extern volatile uint32_t ol_adc_isr_n, ol_edge_n, ol_noarm_n;
+                ol_adc_isr_n++;
+                if (!blanked && (edge_rise || edge_fall)) {
+                    ol_edge_n++;
+                    if (!bemf_irq_armed) {
+                        ol_noarm_n++;
+                    }
+                }
+            }
+
             if (blanked) {
                 edge_rise = edge_fall = 0;
             }
