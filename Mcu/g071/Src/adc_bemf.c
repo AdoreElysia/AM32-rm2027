@@ -142,7 +142,7 @@ volatile uint8_t bemf_polarity_invert = 0;
  *   为什么是 4 点而不是更多：8 点能把噪声降到 1.8 码，但滞后 167µs（约 18° 电角度），
  *     会把过零判据的时间窗挤掉 —— 先用 4 点，实测不够再调 OL_BEMF_AVG_N。 */
 #ifndef OL_BEMF_AVG_N
-#define OL_BEMF_AVG_N 4
+#define OL_BEMF_AVG_N 1   /* 上轮加的滑均：信号有 1025 码，不需要降噪；留着反而白添 83µs 滞后 ⇒ 关掉 */
 #endif
 static int16_t  bemf_avg_buf[OL_BEMF_AVG_N];
 static uint8_t  bemf_avg_idx = 0;
