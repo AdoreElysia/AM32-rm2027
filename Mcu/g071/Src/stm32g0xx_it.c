@@ -296,11 +296,11 @@ void DMA1_Channel2_3_IRQHandler(void)
              *   不在 ci/2 处 —— 那个判断是在 ci 已被假边沿拉小、waitTime 也缩到 ci/2
              *   附近时做的，属于"病了之后量出来的体温"。
              *   上界保持 2 步（迟到太多的必是假的）。 */
-            else if (bemf_irq_armed
-                && (edge_rise || edge_fall)
-                && ((average_interval < 50)
-                    || ((INTERVAL_TIMER->CNT > ((uint32_t)average_interval >> 1))
-                        && (INTERVAL_TIMER->CNT < ((uint32_t)average_interval << 1))))) {
+            else if (bemf_irq_armed && (edge_rise || edge_fall)) {
+                uint32_t zc_cnt = INTERVAL_TIMER->CNT;
+                if ((average_interval < 50)
+                    || ((zc_cnt > ((uint32_t)average_interval >> 1))
+                        && (zc_cnt < ((uint32_t)average_interval << 1)))) {
                 /* 消费掉本次边沿：两个方向都清（换相后重新开始记） */
                 adc_bemf_take_edges(0, 0, 1, 1);
                 bemf_irq_armed = 0;
@@ -322,6 +322,20 @@ void DMA1_Channel2_3_IRQHandler(void)
 #else
                 interruptRoutine();
 #endif
+                } else {
+                    /* ★ 2026-10-09 埋点：有边沿、但被时间窗拒掉 —— 记下"当时在哪"，
+                     *   用来判断被拒的是"换相振铃"还是"真过零被窗口卡了"。
+                     *   配合 OL_TRACE_*（接受侧）一起 dump，就能把判据一次看清。 */
+                    extern volatile uint16_t OL_REJ_CNT[32], OL_REJ_CI[32];
+                    extern volatile uint8_t ol_rej_idx;
+                    extern volatile uint16_t ol_trace_rej;
+                    OL_REJ_CNT[ol_rej_idx] = (uint16_t)zc_cnt;
+                    OL_REJ_CI[ol_rej_idx]  = (uint16_t)average_interval;
+                    ol_rej_idx = (uint8_t)((ol_rej_idx + 1) & 31);
+                    if (ol_trace_rej < 60000) {
+                        ol_trace_rej++;
+                    }
+                }
             }
         }
 #endif

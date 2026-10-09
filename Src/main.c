@@ -512,6 +512,27 @@ volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑�
 /* ↑ 这一组是"开环版 / 闭环开环起步链"共用的运行时状态。闭环也要用（起步链复用它们），
  *   所以下面的起步链代码【不能】再包在 #if RM2027_OL_ARM_ONLY 里。 */
 
+/* ================== ★ 2026-10-09 过零埋点（无条件编译，ISR 要写） ==================
+ * 台架现象："电机转、但慢且抖、没有梯形腰"，而 bemf_timeout_happened 以 ~26 次/秒
+ * 上涨 ⇒ 换相主要靠 22.5ms 兜底硬踹 ⇒ 约 43 机械 RPM。
+ * 要害是判"过零到底被认在哪一步的哪个位置" —— 这只能实测，猜不出来：
+ *   正确：认到时距上次过零 ≈ 一个完整换相步（= 写入时的 CI）；
+ *   假过零：远小于 CI（认在换相点/振铃上）；认晚：远大于 CI。
+ * 写入点见 interruptRoutine()（只记"被接受"的），拒收点见 ADC-DMA 中断。
+ * 全部是环形缓冲，用 SWD 直接 dump 这几段 RAM，不改变任何行为。 */
+#define OL_TRACE_LEN 32
+volatile uint16_t OL_TRACE_CNT[OL_TRACE_LEN];  /* 认到过零时"距上次过零"的拍数（TIM2, 0.5µs） */
+volatile int16_t  OL_TRACE_D[OL_TRACE_LEN];    /* 当时的"悬空相 − V0"（ADC 码） */
+volatile uint16_t OL_TRACE_CI[OL_TRACE_LEN];   /* 当时认为的一步有多长 */
+volatile uint8_t  OL_TRACE_ST[OL_TRACE_LEN];   /* 当时的 step */
+volatile uint8_t  ol_trace_idx = 0;
+volatile uint16_t ol_trace_n = 0;              /* 累计"接受"次数 */
+volatile uint16_t ol_trace_rej = 0;            /* 累计"有边沿但被时间窗拒掉"次数 */
+#define OL_REJ_LEN 32
+volatile uint16_t OL_REJ_CNT[OL_REJ_LEN];      /* 被拒时的位置（拍数） */
+volatile uint16_t OL_REJ_CI[OL_REJ_LEN];       /* 被拒时的 CI */
+volatile uint8_t  ol_rej_idx = 0;
+
 #if !RM2027_OL_ARM_ONLY
 
 /* ================== 闭环的"开环起步"（正统三段式，2026-10-08 加） ==================
@@ -1258,12 +1279,29 @@ void interruptRoutine()
             return;
         }
 #endif
+    /* ★★★ 2026-10-09 埋点：记录"这一次过零被认在哪一步的哪个位置" ★★★
+     *   为什么需要它：台架表现是"电机转、但慢且抖、没有梯形腰"，而
+     *   bemf_timeout_happened 以 ~26 次/秒 上涨 ⇒ 换相主要靠 22.5ms 兜底硬踹
+     *   ⇒ 约 43 机械 RPM。要判"是不是过零认在了错的位置"，只能实测：
+     *     正确位置应 ≈ 一个完整换相步（= 此刻的 commutation_interval）；
+     *     若远小于它 ⇒ 认在了换相点上（假过零）；
+     *     若远大于它 ⇒ 认晚了 / 中间丢了几步。
+     *   环形缓冲 + 累计计数，用 SWD 直接把这几段 RAM 读出来即可，不改行为。 */
+    OL_TRACE_CNT[ol_trace_idx] = (uint16_t)INTERVAL_TIMER_COUNT;   /* 认到过零时距上次过零的拍数 */
+    OL_TRACE_D[ol_trace_idx]   = adc_bemf_get_delta();             /* 当时的"悬空相 − V0" */
+    OL_TRACE_CI[ol_trace_idx]  = (uint16_t)commutation_interval;   /* 当时认为的一步有多长 */
+    OL_TRACE_ST[ol_trace_idx]  = (uint8_t)(step);                  /* 当时在第几拍换相 */
+    ol_trace_idx = (uint8_t)((ol_trace_idx + 1) & (OL_TRACE_LEN - 1));
+    if (ol_trace_n < 60000) {
+        ol_trace_n++;
+    }
+
     __disable_irq();
     maskPhaseInterrupts();
     lastzctime = thiszctime;
     thiszctime = INTERVAL_TIMER_COUNT;  
     SET_INTERVAL_TIMER_COUNT(0);
-    SET_AND_ENABLE_COM_INT(waitTime+1); // enable COM_TIMER interrupt
+    SET_AND_ENABLE_COM_INT(waitTime+1); // enable COM timer interrupt
     __enable_irq();
 }
 
