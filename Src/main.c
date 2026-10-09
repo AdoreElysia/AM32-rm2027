@@ -2775,6 +2775,32 @@ if(zero_crosses < 5){
             if ((average_interval > last_average_interval) &&
                 (getAbsDif(last_average_interval, average_interval) > (average_interval >> 1)) &&
                 (average_interval < 2000)) { // throttle resitricted before zc 20.
+#if defined(USE_ADC_BEMF)
+                /* ★★★ 2026-10-09 关键修复⑤：本板绝不能在这条分支里退回轮询态 ★★★
+                 *   实测证据（12V 台架，停机瞬间读 RAM）：
+                 *     old_routine = 1、bemf_irq_armed = 0、bemf_to 以 ~25 次/秒 上涨
+                 *   机理：一旦 old_routine=1，PeriodElapsedCallback() 里那句
+                 *     `if (!old_routine) enableCompInterrupts();`
+                 *   就不再执行 ⇒ 过零判据【永远不再武装】⇒ 再也认不到过零
+                 *   ⇒ 只剩 22.5ms 兜底硬踹。现场表现是"闭环每约 11 步就断一次、
+                 *   大部分时间靠硬踹维持"⇒ 转得慢。
+                 *   为什么这条分支会【被频繁误触发】：判据是
+                 *     `average_interval 变大 且 |Δ|>50%`，
+                 *   而闭环从 ci=1500 收敛到真实步长（实测 ~2500 拍）的过程中
+                 *   average_interval 本来就会上下跳 ⇒ 每次跳都被判成"失步"。
+                 *   另外 `commutation_interval > 1000`（>500µs/步 = "慢"）在收敛期
+                 *   也天然成立 ⇒ 会把 running 清零、把电机停掉。
+                 *   上游这套语义是给"有比较器、能退回轮询起步"的板子用的；
+                 *   本板三相里只有 C 相能进比较器（见 Inc/targets.h 的 USE_ADC_BEMF
+                 *   注释），轮询起步不可靠 ⇒ 必须留在中断闭环。
+                 *   本板的真实故障保护仍在别处：起步链过流跳闸、bemf_timeout 兜底、
+                 *   stuck_rotor_protection、以及 F1 台架侧的限时运行。
+                 *   ⇒ 这里只记数、并把过零判据重新武装好，不改变运行状态。 */
+                zero_crosses = 0;
+                desync_happened++;
+                enableCompInterrupts();
+                last_duty_cycle = min_startup_duty / 2;
+#else
                 zero_crosses = 0;
                 desync_happened++;
                 if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
@@ -2785,6 +2811,7 @@ if(zero_crosses < 5){
                     average_interval = 5000;
                 }
                 last_duty_cycle = min_startup_duty / 2;
+#endif
             }
             desync_check = 0;
             //	}
