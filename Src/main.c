@@ -768,6 +768,8 @@ volatile uint16_t ol_meas_ci    = 0;    /* 实测转子周期（0.5µs 拍）；
 volatile uint16_t ol_meas_used  = 0;    /* 观测：本次交棒实际用了多少（0 = 退回命令值）*/
 static   uint32_t ol_meas_sum   = 0;
 static   uint16_t ol_meas_n     = 0;
+static   uint16_t ol_meas_prev  = 0;    /* 上一次的 8 样本平均（做一致性比较用）*/
+static   uint8_t  ol_meas_ok    = 0;    /* 连续一致的次数 */
 volatile uint16_t ol_cross_prev = 0;    /* 上一次过零落在当前步内的位置 */
 
 /* 由 ISR 在每个"被接受的过零"处调用（开环期间）。
@@ -789,9 +791,28 @@ void ol_meas_cross(uint16_t cnt)
     }
     ol_meas_sum += iv;
     if (++ol_meas_n >= 8u) {    /* 8 次平均，够稳又够快 */
-        ol_meas_ci = (uint16_t)(ol_meas_sum / (uint32_t)ol_meas_n);
+        uint16_t m = (uint16_t)(ol_meas_sum / (uint32_t)ol_meas_n);
         ol_meas_sum = 0;
         ol_meas_n   = 0;
+
+        /* ★★★ 2026-10-10 抗噪闸 ★★★
+         *   实测教训（本轮台架，母线 0V、转子根本没转）：噪声也能凑出 8 个"过零"、
+         *   报出一个 5754 的"实测周期" —— 而命令值恰好是 5500，落在交棒的
+         *   1/8~8 倍窗口里，任何幅度检查都防不住。若拿它当交棒初值就会把闭环带偏。
+         *   ⇒ 只认【连续 3 次平均互相一致（±20%）】的结果：噪声是随机的，很难连续三次
+         *     落在一起；而真在转时每 5.5ms 出一次平均（1.5 秒热身段有几十次），
+         *     连续 3 次一致是常态。 */
+        if (ol_meas_prev != 0
+            && m + (m >> 2) >= ol_meas_prev
+            && m - (m >> 2) <= ol_meas_prev) {
+            if (ol_meas_ok < 200u) { ol_meas_ok++; }
+        } else {
+            ol_meas_ok = 0;
+        }
+        ol_meas_prev = m;
+        if (ol_meas_ok >= 2u) {          /* 含本次共 3 次一致 ⇒ 才发布 */
+            ol_meas_ci = m;
+        }
     }
 }
 
