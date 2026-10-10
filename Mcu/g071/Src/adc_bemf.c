@@ -107,16 +107,27 @@ void changeCompInput(void)
      *   映射与 comStep 一致：step 1/4 → C 悬空，2/5 → A 悬空，3/6 → B 悬空。 */
     if (step == 1 || step == 4) {
         active_phase = 2;
+#if !ADC_CAPTURE_MODE
         adc_set_first_rank(BEMF_ADC_PHASE_C_CH);
-
+#endif
     } else if (step == 2 || step == 5) {
         active_phase = 0;
+#if !ADC_CAPTURE_MODE
         adc_set_first_rank(BEMF_ADC_PHASE_A_CH);
-
+#endif
     } else if (step == 3 || step == 6) {
         active_phase = 1;
+#if !ADC_CAPTURE_MODE
         adc_set_first_rank(BEMF_ADC_PHASE_B_CH);
+#endif
     }
+    /* ★★★ 2026-10-10 关键修复③ ★★★
+     *   捕获模式(ADC_CAPTURE_MODE=1)下必须【停掉上面这个动态改写】：
+     *   它每次换相都把 ADC 的 rank1 改成"当前悬空相"，于是
+     *     ① 我写的固定 rank1(=VA/CH5) 被覆盖掉；
+     *     ② 实测 CHSELR 变成 rank1=rank2=CH4(VB) —— 两个通道采同一个节点
+     *        ⇒ 抓出来的"VA"其实是 VB ⇒ 两条波形几乎重合、看着像"错位"。
+     *   （用户一眼看出"这不可能只是错位" —— 对，这个 bug 是他抓出来的。） */
 }
 
 int16_t adc_bemf_get_delta(void)
