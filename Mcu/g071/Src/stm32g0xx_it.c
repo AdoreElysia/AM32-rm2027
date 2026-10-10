@@ -33,6 +33,7 @@
 #include "common.h"
 #ifdef USE_ADC_BEMF
 #include "adc_bemf.h"   /* ★ 本板过零检测的武装标志 bemf_irq_armed（替代比较器 EXTI）*/
+#include "adc_zc.h"     /* ★ 环形缓冲版过零检测器（变号 + 回看单调）*/
 #endif
 
 /* USER CODE END Includes */
@@ -333,6 +334,17 @@ void DMA1_Channel2_3_IRQHandler(void)
                     bemf_dmax = ad;
                 }
             }
+
+            /* ★★★ 2026-10-10 新增：环形缓冲版过零检测器（用户指定的结构）★★★
+             *   结构：环形缓冲区存样本 → 检测到变号 → 回看前面 N 点是否严格单调。
+             *   与上面那套"滞回 + 时间门槛"完全无关 —— 它不靠时间门槛，只靠波形形状：
+             *     真过零是平缓斜坡（20~40 码/点）且连续多点同向；
+             *     换相跳变一步差 500~800 码，会把"连续 N 点单调"直接打断。
+             *   参数是实测定的（真实采样数据、23 真过零 / 46 次跳变）：MONO_N=4 时
+             *     22 判出 = 22 真过零、0 误报（详见 adc_zc.h 顶部那三张表）。
+             *   ★ 这一块【只喂数据 + 计数】，不碰下面的换相判据 ⇒ 电机行为完全不变。
+             *     要让它接管换相，把下面的边沿判据换成读 adc_zc_push() 的返回值即可。 */
+            (void)adc_zc_push(adc_bemf_get_delta(), (uint16_t)INTERVAL_TIMER->CNT);
 
             /* ★ 2026-10-09 悬空相波形捕捉：每 8 帧记一次（≈3kHz 采样，64 点 ≈21ms）。
              *   用途见 Src/main.c 里 OL_WF_* 的说明 —— 把"悬空相 − V0"还原成波形，
