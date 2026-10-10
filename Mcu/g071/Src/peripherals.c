@@ -743,7 +743,18 @@ void enableCorePeripherals()
 #endif
     LL_TIM_CC_EnableChannel(TIM1,
         LL_TIM_CHANNEL_CH4); // timer used for timing adc read
-    TIM1->CCR4 = 100; // set in 10khz loop to match pwm cycle timed to end of pwm on
+    /* ★★★ 2026-10-09 由 100 改到 4（用户实测：4 拍波形就稳定了）★★★
+     *   用户实测："200 拍等的时间太长，经过我实测基本上 4 拍波形就稳定了"
+     *   （本分支原来是硬编码 100 拍 ≈ 1.56µs）。
+     *   4 拍 x 15.625ns = 62.5ns ⇒ 采样点紧贴高边开通之后。
+     *   好处：
+     *     ① 整条扫描(约 160 拍)在 164 拍 ≈ 2.6µs 结束 ⇒ 对占空比的要求从
+     *        duty ≥ 约 13% 降到 duty ≥ 约 3%（笔记里那条"duty ≥ 9.8%"的硬约束大幅放松）；
+     *     ② 采样点更靠近"导通刚开始"的稳定段，避开后半段的扰动。
+     *   背景：ADC 由 TIM1_CH4(PWM2 模式)的上升沿触发，上升沿恰好落在 CNT==CCR4，
+     *   而 CNT=0 就是高边开通那一刻 ⇒ CCR4 的数值 = "开通后多久开始采样"。
+     *   （上游注释说这个值是在 10kHz 循环里动态跟踪 PWM 导通末端的；本分支是硬编码。） */
+    TIM1->CCR4 = 4;
 
     /* Enable counter */
     LL_TIM_EnableCounter(TIM1);
