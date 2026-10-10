@@ -341,9 +341,18 @@ void DMA1_Channel2_3_IRQHandler(void)
                  * ★ vph / v0 / step 分开记 —— 这样才分得清交棒时的偏置跳变
                  *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */
                 adc_zc_wave_push((int16_t)bemf_adc_vph, (int16_t)bemf_adc_v0,
-                                 (uint8_t)step, zc);
+                                 (uint16_t)TIM1->CCR1, (uint8_t)step, zc);
                 if (zc) {
                     edge_rise = 1;   /* 方向不参与判据（本板 rising 的极性约定无可靠对照）*/
+                }
+                /* ★ 闭环波形捕获的触发：ci 涨到交棒实测值的 2 倍 ⇒ 塌陷开始，冻结。
+                 *   只在"已武装且还没触发"时判一次；触发后 state 变 1/2 就不再进。 */
+                {
+                    extern volatile uint32_t commutation_interval;
+                    if (zcw_ci_trig != 0u && zcw_state == 0u &&
+                        commutation_interval > zcw_ci_trig) {
+                        adc_zc_wave_trigger();
+                    }
                 }
             }
 #else

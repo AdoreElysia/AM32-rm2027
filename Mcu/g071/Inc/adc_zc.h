@@ -85,10 +85,10 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt);
  *   （环形缓冲天然给出这个窗口；从 zcw_idx 处开始按环序读就是时间顺序）。
  */
 #ifndef ZCW_N
-#define ZCW_N    1024      /* 全速 24kHz ⇒ 1024 点 = 42.7ms */
+#define ZCW_N    512       /* 全速 24kHz ⇒ 512 点 = 21.3ms（塌陷在交棒后 1ms 内发生，够用）*/
 #endif
 #ifndef ZCW_POST
-#define ZCW_POST 768       /* 触发后保留多少点（触发前 256 点 ≈ 10.7ms）*/
+#define ZCW_POST 384       /* 触发后保留多少点（触发前 128 点 ≈ 5.3ms）*/
 #endif
 
 /* ★★ 2026-10-10 改版：分别记 vph / v0 / step，不再只记 delta ★★
@@ -103,12 +103,24 @@ extern volatile int16_t  zcw_vph[ZCW_N];  /* 该帧的悬空相码（rank1）*/
 extern volatile int16_t  zcw_v0[ZCW_N];   /* 该帧的 V0 码（rank2）*/
 extern volatile uint8_t  zcw_step[ZCW_N]; /* 该帧的 step（1..6）—— 用来核 rank1 对不对 */
 extern volatile uint8_t  zcw_zc[ZCW_N];   /* 该帧判据的结论：0=无 1=上升过零 2=下降过零 */
+/* ★ 2026-10-10 加：该帧的 TIM1->CCR1（= 实际高边导通拍数）。
+ *   为什么必须记它：实测交棒后 v0 从 572 塌到 129（= 采样点落进了关断期），
+ *   但"采样点相对 PWM 的相位变了"和"驱动实际变小了"这两种成因靠 vph/v0 分不开，
+ *   只有把占空比本身记下来才能分辨。ARR / CCR4 是常量，用 SWD 现读即可，不必捕获。 */
+extern volatile uint16_t zcw_duty[ZCW_N];
 extern volatile uint16_t zcw_idx;         /* 环形写指针；冻结后从这里按环序读=最旧 */
 extern volatile uint8_t  zcw_state;       /* 0=空转 1=已触发正在填 2=已冻结 */
 extern volatile uint16_t zcw_trig_idx;    /* 触发时刻的 idx */
 extern volatile uint32_t zcw_n_trig;      /* 触发过几次（多次起步时用来看最后一次）*/
 
-void adc_zc_wave_push(int16_t vph, int16_t v0, uint8_t step, uint8_t zc_kind);
+void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint8_t zc_kind);
+/* ★ 2026-10-10 触发方式改成"ci 外扩触发"：
+ *   实测交棒那一刻的 16ms 窗口里一切正常（v0 健康、回路 13~22 点/步的快节奏，
+ *   只有占空比在交棒后 4.5~6ms 从 462 线性降到 387）⇒ 真正的掉速在那之后，
+ *   交棒触发抓不到它。所以：交棒时只【记阈值 + 让缓冲空转】，等 ci 涨到阈值的
+ *   2 倍（= 塌陷开始）才冻结 ⇒ 窗口 = 塌陷前 128 点(5.3ms) + 后 384 点(16ms)。 */
+extern volatile uint32_t zcw_ci_trig;      /* 0 = 未武装 */
+void adc_zc_wave_arm(uint32_t ci_trig);
 void adc_zc_wave_trigger(void);                     /* 交棒时调 */
 
 /* 事件环长度（2 的幂，掩码寻址）。64 条过零 ≈ 35ms ≈ 10 个电周期 ——

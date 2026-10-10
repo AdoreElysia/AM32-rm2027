@@ -116,13 +116,15 @@ volatile int16_t  zcw_vph[ZCW_N] = { 0 };
 volatile int16_t  zcw_v0[ZCW_N]  = { 0 };
 volatile uint8_t  zcw_step[ZCW_N] = { 0 };
 volatile uint8_t  zcw_zc[ZCW_N]  = { 0 };
+volatile uint16_t zcw_duty[ZCW_N] = { 0 };
 volatile uint16_t zcw_idx      = 0;
 volatile uint8_t  zcw_state    = 0;   /* 0=空转 1=已触发 2=冻结 */
 volatile uint16_t zcw_trig_idx = 0;
 volatile uint32_t zcw_n_trig   = 0;
 static uint16_t   zcw_stop_at  = 0;
+volatile uint32_t zcw_ci_trig  = 0;   /* ci 超过它就触发冻结（0=未武装）*/
 
-void adc_zc_wave_push(int16_t vph, int16_t v0, uint8_t step, uint8_t zc_kind)
+void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint8_t zc_kind)
 {
     /* ★ 已冻结 ⇒ 立刻返回，绝不能再写 ★
      *   上一版漏了这一句：state 到 2 之后仍在写，缓冲被后续空转数据一路覆盖
@@ -136,6 +138,7 @@ void adc_zc_wave_push(int16_t vph, int16_t v0, uint8_t step, uint8_t zc_kind)
     zcw_v0[zcw_idx]   = v0;
     zcw_step[zcw_idx] = step;
     zcw_zc[zcw_idx]   = zc_kind;
+    zcw_duty[zcw_idx] = duty;
     zcw_idx = (uint16_t)((zcw_idx + 1u) % ZCW_N);
 
     if (zcw_state == 1u && zcw_idx == zcw_stop_at) {
@@ -143,7 +146,14 @@ void adc_zc_wave_push(int16_t vph, int16_t v0, uint8_t step, uint8_t zc_kind)
     }
 }
 
-/* 交棒那一刻调用：重新触发（多次起步时以最后一次为准） */
+/* 交棒那一刻调用：武装"ci 外扩触发"，并让缓冲从此刻起空转（state=0 仍会写） */
+void adc_zc_wave_arm(uint32_t ci_trig)
+{
+    zcw_ci_trig = ci_trig;
+    zcw_state   = 0u;      /* 空转：缓冲继续滚，等 ci 涨上去才冻结 */
+}
+
+/* 触发冻结（交棒处已不再直接调用；现在由 ISR 在 ci 超阈值时调） */
 void adc_zc_wave_trigger(void)
 {
     zcw_trig_idx = zcw_idx;

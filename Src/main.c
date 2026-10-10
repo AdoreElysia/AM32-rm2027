@@ -1105,8 +1105,10 @@ static void olStartupTick(void)
     if (!OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && ol_verify_ok >= OL_VERIFY_OK_NEED) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         old_routine = 0;
-        /* ★ 交棒这一刻触发"闭环波形捕获"冻结（用户要看刚切闭环那几个瞬间的过零）*/
-        adc_zc_wave_trigger();
+        /* ★ 交棒这一刻【武装】闭环波形捕获：阈值 = 交棒实测步长的 2 倍。
+         *   实测交棒的 16ms 窗口内一切正常 ⇒ 改由"ci 涨到 2 倍"来触发冻结，
+         *   窗口才罩得住塌陷本身（见 adc_zc.h 的说明）。 */
+        adc_zc_wave_arm(commutation_interval * 2u);
         /* ★★ 交棒时必须把闭环的时间基准初始化正确 ★★
          *   闭环的 waitTime 只在 PeriodElapsedCallback() 里算，而开环斜坡期间它
          *   根本没跑过 ⇒ 交棒瞬间 waitTime / lastzctime / thiszctime 全是陈旧值
