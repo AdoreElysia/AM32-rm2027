@@ -615,7 +615,24 @@ uint32_t ol_freq_tgt_q = 0;      /* 斜坡终点频率 x 256 */
  *   转子能否跟上，看恒速段的 ol_meas_ci 偏差即可（±1% = 跟得很好）。
  *   ⚠ 顶端转速仍保持 OL_STEP_DIV=11（3030RPM）不变 —— 实测恒速段的稳定性随转速升高而变好：
  *     3030RPM 偏差仅 ±1%，而 303RPM 那版是 ±5%（低速齿槽力矩占比大）。 */
-uint16_t ol_freq_slope = 1800;   /* 斜坡斜率 Hz/s（时长与它成反比）*/
+uint16_t ol_freq_slope = 1800;   /* 旧：恒定斜率升频的斜率 Hz/s —— 已不用（见 OL_RAMP_UP_Q）*/
+
+/* ★★★ 2026-10-11 斜坡形态改成【指数升频】= 前缓后陡 ★★★
+ *   用户要求："起步阶段改成曲线增速，前缓后陡，只是别太陡"。
+ *   原来的形态：ol_freq_q += K/ol_freq_q ⇒ 积分出 f ∝ √n ⇒【前陡后缓】——
+ *   起步瞬间频率涨得最快，而那时反电势≈0、力矩余量最小 ⇒ 转子跟不上就滑步
+ *   ⇒ 现场就是"有电流、电机不转"。形态正好是反的。
+ *   新形态：每次换相 f *= (1 + OL_RAMP_UP_Q/256) ⇒ f ∝ (1+r)ⁿ ⇒ 前缓后陡。
+ *     · r 由本宏定：+1/256 ≈ +0.39%。默认 13 ⇒ +5.1%/换相步。
+ *     · 全程步数 n = ln(f终/f始)/ln(1+r) = ln(1818/4)/ln(1.051) ≈ 123 步
+ *     · 全程时间 ≈ (1/f始)·(1+r)/r ≈ 0.25s × 20.7 ≈ 5.2 秒
+ *       ⇒ 加上后面的恒速热身 1.0s ≈ 6.2s，仍在 OL_STARTUP_TICKS_MAX(8s) 之内。
+ *     · 大部分时间花在【低频段】= 起步最需要时间的阶段 ✓ 越往后越快 ✓
+ *   ★ 只动"频率怎么涨"，占空比/油门/交棒判据一行没动。
+ *   ⚠ 想更快就把本值调大（时间≈与 r 成反比）；想更缓就调小。 */
+#ifndef OL_RAMP_UP_Q
+#define OL_RAMP_UP_Q   13
+#endif
 
 /* ★★★ 2026-10-09 三步定位计数器（回答"交棒后为什么认不到过零"）★★★
  *   ① ol_adc_isr_n：ADC 完成中断进入次数 ⇒ 中断本身在不在跑
@@ -1019,12 +1036,12 @@ static void olStartupTick(void)
             commutate();
             ol_zc_reseed = 1;   /* ★ 换相后"重新取样"：避免切换悬空相造成的假跳变被当成过零 */
             ol_steps++;
-            /* ★★ 恒定斜率升频（不再按比例缩）★
-             *   df = slope x dt = slope / f，定点（f_q = f x 256）：
-             *       ol_freq_q += (ol_freq_slope x 65536) / ol_freq_q;
-             *   再由 div = 20000x256 / f_q 反算步长 ⇒ 频率线性上升时 div 自动双曲线下降。 */
+            /* ★★ 指数升频（前缓后陡）—— 见 OL_RAMP_UP_Q 的说明 ★★
+             *   旧式 ol_freq_q += K/ol_freq_q 积分出 f ∝ √n = 前陡后缓，形态是反的。
+             *   现在每次换相乘 (1 + OL_RAMP_UP_Q/256) ⇒ f ∝ (1+r)ⁿ。 */
             if (ol_freq_q < ol_freq_tgt_q) {
-                ol_freq_q += ((uint32_t)ol_freq_slope * 65536UL) / ol_freq_q;
+                ol_freq_q += (ol_freq_q * (uint32_t)OL_RAMP_UP_Q) >> 8;
+                if (ol_freq_q <= 0UL) { ol_freq_q = 1UL; }   /* 防 0 起步卡死 */
                 if (ol_freq_q >= ol_freq_tgt_q) {
                     ol_freq_q = ol_freq_tgt_q;
                     ol_step_div_cur = OL_STEP_DIV;
