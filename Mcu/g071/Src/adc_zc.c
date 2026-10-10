@@ -122,6 +122,14 @@ static uint16_t   zcw_stop_at  = 0;
 
 void adc_zc_wave_push(int16_t e, uint8_t zc_kind)
 {
+    /* ★ 已冻结 ⇒ 立刻返回，绝不能再写 ★
+     *   上一版漏了这一句：state 到 2 之后仍在写，缓冲被后续空转数据一路覆盖
+     *   ⇒ dump 出来只剩噪声。实测线索：冻结后两次读 zcw_idx 分别是 1024 和 134，
+     *   还在涨 —— 冻结态下 index 不该动，这本身就说明在写。 */
+    if (zcw_state == 2u) {
+        return;
+    }
+
     zcw_buf[zcw_idx] = e;
     zcw_zc[zcw_idx]  = zc_kind;
     zcw_idx = (uint16_t)((zcw_idx + 1u) % ZCW_N);
