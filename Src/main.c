@@ -489,6 +489,17 @@ void adc_capture_sample(uint16_t va, uint16_t vb)
     }
 }
 
+/* ★★★ 2026-10-10 关键修复②：发送必须等 TXE ★★★
+ *   LL_USART_TransmitData8() 只是往 TDR 寄存器写一个字节，【不等发完】。
+ *   而 TDR 只有一个字节的坑 ⇒ 连写 344 字节时前面的全被后面的覆盖 ✗
+ *   ⇒ 实测现象：串口上只收到约 2.1KB/s 的杂乱字节、完全找不到帧头 0xAA55。
+ *   修法：每次写之前等 TXE（发送数据寄存器空）。 */
+static void cap_putc(uint8_t b)
+{
+    while (LL_USART_IsActiveFlag_TXE(USART1) == 0) { }
+    LL_USART_TransmitData8(USART1, b);
+}
+
 /* 主循环里调用：把写满的窗口发出去 */
 void adc_capture_drain(void)
 {
@@ -513,19 +524,19 @@ void adc_capture_drain(void)
     adc_cap_wr ^= 1;              /* 立刻切到另一个缓冲，让 ISR 继续采 */
     adc_cap_ready = 0;
 
-    LL_USART_TransmitData8(USART1, 0xAA);
-    LL_USART_TransmitData8(USART1, 0x55);
+    cap_putc(0xAA);
+    cap_putc(0x55);
     sq = adc_cap_seq++;
-    for (k = 0; k < 4; k++) { LL_USART_TransmitData8(USART1, (uint8_t)((sq >> (k * 8)) & 0xFF)); }
-    LL_USART_TransmitData8(USART1, (uint8_t)(ADC_CAP_POINTS & 0xFF));
-    LL_USART_TransmitData8(USART1, (uint8_t)((ADC_CAP_POINTS >> 8) & 0xFF));
+    for (k = 0; k < 4; k++) { cap_putc((uint8_t)((sq >> (k * 8)) & 0xFF)); }
+    cap_putc((uint8_t)(ADC_CAP_POINTS & 0xFF));
+    cap_putc((uint8_t)((ADC_CAP_POINTS >> 8) & 0xFF));
     for (k = 0; k < ADC_CAP_POINTS; k++) {
         uint16_t va = adc_cap_buf[b][k][0];
         uint16_t vb = adc_cap_buf[b][k][1];
-        LL_USART_TransmitData8(USART1, (uint8_t)(va & 0xFF));
-        LL_USART_TransmitData8(USART1, (uint8_t)(va >> 8));
-        LL_USART_TransmitData8(USART1, (uint8_t)(vb & 0xFF));
-        LL_USART_TransmitData8(USART1, (uint8_t)(vb >> 8));
+        cap_putc((uint8_t)(va & 0xFF));
+        cap_putc((uint8_t)(va >> 8));
+        cap_putc((uint8_t)(vb & 0xFF));
+        cap_putc((uint8_t)(vb >> 8));
     }
 }
 #endif
