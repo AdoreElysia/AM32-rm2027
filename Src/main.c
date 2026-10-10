@@ -1422,7 +1422,19 @@ void commutate()
 #endif
     bemfcounter = 0;
     zcfound = 0;
-    commutation_intervals[step - 1] = commutation_interval; // just used to calulate average
+    /* ★★★ 2026-10-10 改存【本步实测步长】，不再存滤波后的 ci ★★★
+     *   原来存的是 commutation_interval（滤波输出）⇒ 6 个槽其实是【同一个值】，
+     *   下面那个"6 步平均"等于白算、没有任何额外平滑作用。
+     *   参考 TI SPRABZ3《Sensorless Trapezoidal Control of BLDC Motors》的
+     *   "Commutation Instants Computation"：30° 换相延迟应当基于【上一整转】的计时器 ——
+     *       cmtn_delay = v_timer / 12   （v_timer = 6 个换相步的计数）
+     *   ⇒ 把每一步的实测步长存进环里，再用六步和 ÷6 作为换相周期
+     *     （= TI 的 v_timer/12 的两倍 = 一个完整换相步）。 */
+    {
+        uint32_t meas_step = (uint32_t)((lastzctime + thiszctime) >> 1);
+        commutation_intervals[step - 1] =
+            (uint16_t)((meas_step > 0xFFFFu) ? 0xFFFFu : meas_step);
+    }
 
     /* ★★★ 2026-10-09 决定性埋点：记录【换相那一刻】的 "悬空相 − V0" ★★★
      *   它直接回答"换相落在反电势周期的哪个位置" —— 这是判断闭环相位对不对的
@@ -1468,7 +1480,26 @@ void PeriodElapsedCallback()
      *   ——"输出成了恒定高的 PWM、电机不转"。
      *   （正常跟踪时每步的变化只有千分之几，这个闸完全不影响正常调速。） */
     {
-        uint32_t ci_new = ((commutation_interval) + ((lastzctime + thiszctime) >> 1)) >> 1;
+        /* ★★★ 2026-10-10 换相周期改用【上一整转(6 步)】的平均 —— 对齐 TI SPRABZ3 ★★★
+         *   TI 原文："let T be the time that the rotor spent to complete the previous
+         *   revolution... cmtn_delay = v_timer / 12"（v_timer = 6 个换相步的计数）
+         *   ⇒ 他们的 30° 延迟基于 6 步平均；而我们原来只有 2 步滤波:
+         *        ci = (ci + (last+this)/2) / 2
+         *     再叠加"每次换相最多只许变 ±1/64"的限速 ⇒ 周期估计又慢又抖。
+         *     实测：4.5 倍的误差要约 95 次换相（≈1 秒）才收敛 ——
+         *     正是"交棒后要晃一秒才稳"的来源。
+         *   ⇒ 用 commutation_intervals[] 的六步和 ÷6。环里存的是【实测步长】（见上面），
+         *     所以这次才是真正的整转平均。
+         *   注：环还没填满时（开机/刚解锁）退回原式，避免用零值把 ci 打到 0。 */
+        uint32_t ci_sum = (uint32_t)commutation_intervals[0] + (uint32_t)commutation_intervals[1]
+                        + (uint32_t)commutation_intervals[2] + (uint32_t)commutation_intervals[3]
+                        + (uint32_t)commutation_intervals[4] + (uint32_t)commutation_intervals[5];
+        uint32_t ci_new;
+        if (ci_sum >= 6u) {
+            ci_new = ci_sum / 6u;              /* 整转(6 步)平均 —— 对齐 TI 的做法 */
+        } else {
+            ci_new = ((commutation_interval) + ((lastzctime + thiszctime) >> 1)) >> 1;  /* 环未填满 ⇒ 退回原式 */
+        }
         /* ★★★ 2026-10-09 关键修复⑦：闸门改成【双向】，不许换相频率"一步投降" ★★★
          *   台架实测（duty 351、电流 0.46~0.55A 已与开环同量级、提前量已为 0）：
          *     交棒后【一步】ci 就从 1500 跳到 ~7000（≈475RPM）。
