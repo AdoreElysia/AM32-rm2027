@@ -74,12 +74,30 @@ void adc_zc_reset(void);
  * 返回 0 = 本次没有过零；ADC_ZC_RISE / ADC_ZC_FALL = 报了过零。 */
 uint8_t adc_zc_push(int16_t e, uint16_t t_cnt);
 
+/* 事件环长度（2 的幂，掩码寻址）。64 条过零 ≈ 35ms ≈ 10 个电周期 ——
+ * 刚好盖住开环"每 4~5 个电周期丢一步"那个已知毛病的周期，才看得出规律。 */
+#ifndef ADC_ZC_EV_N
+#define ADC_ZC_EV_N 64
+#endif
+
 /* ---- 观测量（全部 volatile，供 SWD 非侵入式读取）---- */
 extern volatile uint32_t adc_zc_n_rise;      /* 上升过零累计 */
 extern volatile uint32_t adc_zc_n_fall;      /* 下降过零累计 */
 extern volatile uint32_t adc_zc_n_reject;    /* 变号了但被单调/斜率关掉的次数 */
-extern volatile uint16_t adc_zc_ev_cnt[32];  /* 最近 32 次过零的 INTERVAL_TIMER 读数 */
-extern volatile uint8_t  adc_zc_ev_kind[32]; /* 与上面对应：ADC_ZC_RISE / ADC_ZC_FALL */
+extern volatile uint16_t adc_zc_ev_cnt[ADC_ZC_EV_N];  /* 最近 N 次过零的 INTERVAL_TIMER 读数 */
+extern volatile uint16_t adc_zc_ev_gap[ADC_ZC_EV_N];  /* ★ 与【上一次过零】的差值（拍）—— 见下 */
+extern volatile uint8_t  adc_zc_ev_kind[ADC_ZC_EV_N]; /* 与上面对应：ADC_ZC_RISE / ADC_ZC_FALL */
 extern volatile uint8_t  adc_zc_ev_idx;      /* 上面那个小环的下一个写入位置 */
+
+/* ★ 为什么要有 ev_gap（2026-10-10 加，上一轮踩过的坑）★
+ *   ev_cnt 记的是 INTERVAL_TIMER->CNT 的【绝对值】，而那个定时器只有
+ *   interruptRoutine() 会把它清零 ⇒ 【开环期间没人清】，它自由跑，
+ *   绝对值毫无意义（上一轮读回来一串乱数就是这么来的）。
+ *   ev_gap = 本次 t_cnt − 上次 t_cnt（16 位模减）：定时器自由跑时它就等于
+ *   真实间隔（只要间隔 < 65536 拍 = 32.8ms，换相步才 ~1100 拍，安全）。
+ *   ⇒ 开环看 ev_gap（间隔），闭环看 ev_cnt（绝对值），两个数组各管一种模式。
+ *   间隔 × 0.5µs = 过零周期：目标转速下应恒 ≈ 一个换相步（实测约 550µs = 1100 拍）。
+ *   若出现 2 倍值 ⇒ 中间漏认了一次过零（开环在交棒转速下有"每 4~5 个电周期丢一步"
+ *   的已知毛病，这个数组能把丢步率直接量化出来）。 */
 
 #endif /* ADC_ZC_H */

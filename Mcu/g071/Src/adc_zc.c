@@ -21,17 +21,24 @@ static uint8_t zc_count = 0;   /* 已写入的有效样本数（封顶到 BUF_LE
 volatile uint32_t adc_zc_n_rise   = 0;
 volatile uint32_t adc_zc_n_fall   = 0;
 volatile uint32_t adc_zc_n_reject = 0;
-volatile uint16_t adc_zc_ev_cnt[32]  = { 0 };
-volatile uint8_t  adc_zc_ev_kind[32] = { 0 };
+volatile uint16_t adc_zc_ev_cnt[ADC_ZC_EV_N]  = { 0 };
+volatile uint16_t adc_zc_ev_gap[ADC_ZC_EV_N]  = { 0 };
+volatile uint8_t  adc_zc_ev_kind[ADC_ZC_EV_N] = { 0 };
 volatile uint8_t  adc_zc_ev_idx      = 0;
+
+/* 上一次过零时的定时器读数（用来算 ev_gap） */
+static uint16_t zc_last_cnt  = 0;
+static uint8_t  zc_have_last = 0;
 
 void adc_zc_reset(void)
 {
     for (uint8_t i = 0; i < ADC_ZC_BUF_LEN; i++) {
         zc_buf[i] = 0;
     }
-    zc_head  = 0;
-    zc_count = 0;
+    zc_head      = 0;
+    zc_count     = 0;
+    zc_last_cnt  = 0;
+    zc_have_last = 0;
 }
 
 /* 取"往回数 back 个"的样本：back=0 是最新那个，back=1 是前一个 …… */
@@ -96,9 +103,19 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt)
     }
 
     /* ---- 过零成立 ---- */
+    /* ev_gap：与上一次过零的差值。16 位模减 ⇒ 定时器自由跑（开环）时它
+     * 就是真实间隔；定时器被清零（闭环）时它没意义，那种模式看 ev_cnt。 */
+    uint16_t gap = 0;
+    if (zc_have_last) {
+        gap = (uint16_t)(t_cnt - zc_last_cnt);
+    }
+    zc_last_cnt  = t_cnt;
+    zc_have_last = 1;
+
     adc_zc_ev_cnt[adc_zc_ev_idx]  = t_cnt;
+    adc_zc_ev_gap[adc_zc_ev_idx]  = gap;
     adc_zc_ev_kind[adc_zc_ev_idx] = rise ? ADC_ZC_RISE : ADC_ZC_FALL;
-    adc_zc_ev_idx = (uint8_t)((adc_zc_ev_idx + 1u) & 31u);
+    adc_zc_ev_idx = (uint8_t)((adc_zc_ev_idx + 1u) & (ADC_ZC_EV_N - 1u));
 
     if (rise) {
         adc_zc_n_rise++;
