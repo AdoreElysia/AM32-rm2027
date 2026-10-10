@@ -497,6 +497,18 @@ void adc_capture_drain(void)
     int k;
 
     if (!adc_cap_ready) { return; }
+
+    /* ★★★ 2026-10-10 关键修复：先把【发送方向】打开 ★★★
+     *   实测（SWD 读寄存器）：USART1->CR1 = 0x00000005 ⇒ UE=1、RE=1，但 **TE=0**
+     *   —— 发送器被关着！而 adc_cap_seq 已经数到 53930 ⇒ 固件在拼命"发"，
+     *   字节写进 TDR 却一个都没出去 ⇒ 串口上收不到任何数据。
+     *   根因：serial_telemetry.c 初始化末尾调了
+     *     LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_RX);
+     *   而 LL 的实现里设成 RX 会【清掉 TE】⇒ 之后谁写 TDR 都不发。
+     *   ⇒ 这里在发之前显式打开 TX（本板是半双工，TE=1 时发送器独占这条线，
+     *     正是我们要的：只往外倒数据）。 */
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
+
     b = adc_cap_wr;
     adc_cap_wr ^= 1;              /* 立刻切到另一个缓冲，让 ISR 继续采 */
     adc_cap_ready = 0;
