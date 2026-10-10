@@ -600,6 +600,38 @@ volatile uint16_t OL_REJ_CNT[OL_REJ_LEN];      /* 被拒时的位置（拍数）
 volatile uint16_t OL_REJ_CI[OL_REJ_LEN];       /* 被拒时的 CI */
 volatile uint8_t  ol_rej_idx = 0;
 
+/* ================== ★★ 2026-10-10 实验埋点：开环驱动期间"路径 B 的判据" ★★ ==================
+ * 用户的要求（原话）："开环跑，但开环时候要用测出闭环的数据，以便我去排查是什么有问题"。
+ *
+ * 为什么原来的观测有盲区：
+ *   路径 B 的【接受侧记录】(OL_TRACE_*) 写在 interruptRoutine() 里，而那个函数在
+ *   开环驱动期间【根本不被调用】（换相由 olStartupTick() 独占）⇒ 开环时我们只拿得到
+ *   "被拒"的记录（OL_REJ_*），拿不到"判成接受"的记录 ⇒ 判据到底怎么走的看不见。
+ *
+ * 这个实验把两件事彻底分开：
+ *   换相时基：仍由【开环链】独占 —— 转速已知且正确，反电势一定出得来（开环已跑通）。
+ *   路径 B  ：只"听"不驱动 —— 对每个边沿做一次完整的判据运算，把结果原样记下来。
+ * 数据直接回答三个问题：
+ *   ① 开环转得好好的时候，路径 B 到底认不认得到过零？→ ol_olp_n / ol_olp_acc
+ *   ② 认到的那些，CNT 落在哪？开环下真过零应在【半个步长】处（= 0.5×CI）；
+ *      若挤在 0 或 满步 附近 ⇒ 认的是换相振铃 / 迟到边沿 ⇒ 判据本身错。
+ *   ③ 为什么接受/拒掉？同时记 waitTime / average_interval / delta ⇒
+ *      一眼看出是哪个门槛在起作用（开环期间 average_interval 停滞不更新，这条尤其关键）。
+ * 全部是环形缓冲 + SWD 直读，不改变任何行为。 */
+#define OL_OLP_LEN 64
+volatile uint16_t OL_OLP_CNT[OL_OLP_LEN];  /* 边沿出现时 INTERVAL_TIMER 读数（2MHz 拍） */
+volatile uint16_t OL_OLP_CI[OL_OLP_LEN];   /* 当时的 commutation_interval（= 开环步长） */
+volatile uint16_t OL_OLP_WT[OL_OLP_LEN];   /* 当时的 waitTime（换相点，开环期间是陈旧值） */
+volatile uint16_t OL_OLP_AI[OL_OLP_LEN];   /* 当时的 average_interval（闭环统计量，开环期间停滞） */
+volatile int16_t  OL_OLP_D[OL_OLP_LEN];    /* 当时的"悬空相 − V0"（ADC 码） */
+volatile uint8_t  OL_OLP_OK[OL_OLP_LEN];   /* 路径 B 的结论：1=接受 0=被时间窗拒掉 */
+volatile uint8_t  OL_OLP_ST[OL_OLP_LEN];   /* 当时的 step */
+volatile uint8_t  ol_olp_idx   = 0;
+volatile uint32_t ol_olp_n     = 0;        /* 开环驱动期间路径 B 判过多少次（有边沿、未被 blank） */
+volatile uint32_t ol_olp_acc   = 0;        /* 其中判"接受"的次数 */
+volatile uint32_t ol_olp_blank = 0;        /* 其中"换相后第一帧"被作废的次数 */
+volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的步长（对上转速） */
+
 #if !RM2027_OL_ARM_ONLY
 
 /* ================== 闭环的"开环起步"（正统三段式，2026-10-08 加） ==================
@@ -631,6 +663,24 @@ volatile uint8_t  ol_rej_idx = 0;
 #endif
 #ifndef OL_VERIFY_OK_NEED
 #define OL_VERIFY_OK_NEED   3      /* 连续多少个合格窗口才交棒 ⇒ 3 = 300ms */
+#endif
+/* ★★★ 2026-10-10 实验开关：开环跑，但不交棒 ★★★
+ *   用户要求："开环跑，但开环时候要用测出闭环的数据，以便我去排查是什么有问题"。
+ *   置 1 ⇒ 斜坡跑到底后【不交棒】，长期保持开环驱动：换相由开环链独占（转速已知、
+ *          且已被开环台架证明是好的），路径 B 只"听"不驱动，持续把判据结果写进
+ *          OL_OLP_* 环（见 Src/main.c 上面的说明）。这样用户能一边看示波器、
+ *          我一边用 SWD 从容取数。
+ *   置 0 ⇒ 恢复"验证过再交棒"的正常行为。
+ *   ⚠ 这是实验开关，不是产品行为 —— 实验做完必须改回 0 再谈后续。 */
+#ifndef OL_HOLD_OPENLOOP
+#define OL_HOLD_OPENLOOP    1
+#endif
+#if OL_HOLD_OPENLOOP
+/* 实验模式不交棒 ⇒ 总时长上限必须放宽，否则 8 秒会自己停机、数据就没了。
+ * 3600000 拍 = 180 秒；真正停车的路径仍是"油门回 0"与过流跳闸（都不受影响）。*/
+#define OL_STARTUP_TICKS_MAX 3600000UL
+#else
+#define OL_STARTUP_TICKS_MAX 160000UL
 #endif
 #define OL_STARTUP_ZC_NEED 3    /* 旧判据（已被窗口校验取代，保留以防别处引用）*/
 /* ★ 起步期间判过零用的"最小 |delta|"（ADC 码）。
@@ -709,7 +759,7 @@ static void olStartupTick(void)
      * 而 2222RPM 下一步 750µs、认 3 次过零只要 2.3ms ⇒ 余量绰绰有余。
      * （原来写 200 秒是为了配合"斜坡要 13 秒"的；现在斜坡 3.2 秒就完，
      *   再留 200 秒只会把"起步失败"变成"电机一直硬踹不停"。） */
-    if (++ol_startup_ticks > 160000UL) {
+    if (++ol_startup_ticks > OL_STARTUP_TICKS_MAX) {
         allOff();
         running = 0;
         ol_startup_arm = 0;
@@ -826,7 +876,7 @@ static void olStartupTick(void)
         }
     }
 
-    if (ol_step_div_cur <= OL_STEP_DIV && ol_verify_ok >= OL_VERIFY_OK_NEED) {
+    if (!OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && ol_verify_ok >= OL_VERIFY_OK_NEED) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         old_routine = 0;
         /* ★★ 交棒时必须把闭环的时间基准初始化正确 ★★

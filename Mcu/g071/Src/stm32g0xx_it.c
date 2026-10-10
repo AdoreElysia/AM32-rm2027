@@ -37,6 +37,38 @@
 
 /* USER CODE END Includes */
 
+/* ★★ 2026-10-10 实验埋点：开环驱动期间把"路径 B 的判据结果"记下来 ★★
+ *   用户要求："开环跑，但开环时候要用测出闭环的数据"。
+ *   本宏只在 ol_startup_arm=1（开环链在驱动换相）时生效 —— 那时路径 B 只"听"不驱动，
+ *   所以把它的结论原样落盘不改变任何行为。变量说明见 Src/main.c 的 OL_OLP_* 注释。
+ *   为什么用宏而不是函数：这是中断上下文，函数调用要多压一整套寄存器；
+ *   而且两份调用点（接受侧 / 拒收侧）需要完全一致的取数次序。 */
+#define OL_OLP_RECORD(okflag)                                                  \
+    do {                                                                       \
+        extern volatile uint8_t  ol_startup_arm;                               \
+        if (ol_startup_arm) {                                                  \
+            extern volatile uint8_t  ol_olp_idx;                               \
+            extern volatile uint16_t OL_OLP_CNT[64], OL_OLP_CI[64];            \
+            extern volatile uint16_t OL_OLP_WT[64], OL_OLP_AI[64];             \
+            extern volatile uint16_t ol_olp_ci_last;                           \
+            extern volatile int16_t  OL_OLP_D[64];                             \
+            extern volatile uint8_t  OL_OLP_OK[64], OL_OLP_ST[64];             \
+            extern volatile uint32_t ol_olp_n, ol_olp_acc;                     \
+            uint8_t _oi = ol_olp_idx;                                          \
+            OL_OLP_CNT[_oi] = (uint16_t)(zc_cnt);                              \
+            OL_OLP_CI[_oi]  = (uint16_t)commutation_interval;                  \
+            OL_OLP_WT[_oi]  = waitTime;                                        \
+            OL_OLP_AI[_oi]  = (uint16_t)average_interval;                      \
+            OL_OLP_D[_oi]   = adc_bemf_get_delta();                            \
+            OL_OLP_OK[_oi]  = (okflag);                                        \
+            OL_OLP_ST[_oi]  = (uint8_t)(step);                                 \
+            ol_olp_ci_last  = (uint16_t)commutation_interval;                  \
+            ol_olp_idx = (uint8_t)((_oi + 1) & 63);                            \
+            ol_olp_n++;                                                        \
+            if (okflag) { ol_olp_acc++; }                                      \
+        }                                                                      \
+    } while (0)
+
 /* Private typedef
  * -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
@@ -335,6 +367,13 @@ void DMA1_Channel2_3_IRQHandler(void)
 
             if (blanked) {
                 edge_rise = edge_fall = 0;
+                /* ★ 2026-10-10：开环期间"换相后第一帧被作废"也要计数 ——
+                 *   配平用：边沿帧数 = 接受 + 窗外拒收 + 未武装丢弃 + 本项。 */
+                {
+                    extern volatile uint8_t ol_startup_arm;
+                    extern volatile uint32_t ol_olp_blank;
+                    if (ol_startup_arm) { ol_olp_blank++; }
+                }
             }
             /* ★ 判据一：极性无关 —— 只问"这一步里状态翻转过没有"。
              *   物理上六步换相每一步的悬空相恰好过一次零 ⇒ 恰好一个边沿，
@@ -399,6 +438,14 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *   钳到 0xFFFF：语义变成"间隔至少 32.7ms"，ci 会被拉大而不是拉小，
                  *   闭环就能自己从丢锁里往回爬（变大方向不受速率闸限制）。 */
                 bemf_zc_time = (zc_cnt > 0xFFFFu) ? (uint16_t)0xFFFFu : (uint16_t)zc_cnt;
+
+                /* ★★ 2026-10-10 实验埋点（用户要求："开环跑，但用闭环的数据"）★★
+                 *   开环驱动期间（ol_startup_arm=1）路径 B 不驱动换相，但这里
+                 *   照样把"判成接受"这条记录写下来 —— 原来只有 interruptRoutine()
+                 *   里才有接受侧记录，而它在开环期间不被调用 ⇒ 开环时有边沿、
+                 *   判成接受的次数完全不可见。见 Src/main.c 的 OL_OLP_* 说明。 */
+                OL_OLP_RECORD(1);
+
 #ifdef USE_ADC_BEMF
                 /* ★★ 闭环的"开环起步"期间（ol_startup_arm=1）：这里【什么都不做】，
                  *   只把武装标志放回去 —— 换相由 olStartupTick() 的固定时基独占，
@@ -430,6 +477,9 @@ void DMA1_Channel2_3_IRQHandler(void)
                     if (ol_trace_rej < 60000) {
                         ol_trace_rej++;
                     }
+                    /* ★ 2026-10-10：开环驱动期间的拒收也要进实验环（OK=0），
+                     *   这样 ol_olp_n 才等于"开环期间路径 B 遇到的全部边沿"。 */
+                    OL_OLP_RECORD(0);
                 }
             }
         }
