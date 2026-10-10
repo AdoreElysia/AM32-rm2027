@@ -2922,10 +2922,13 @@
  *        —— 因为要 A、B 同帧拿到值
  *     ② USART1 波特率 115200 → 1 Mbaud
  *     ③ KISS 遥测停发，改成发 ADC 原始流（帧头 0xAA55 + 序号 + 点数 + 数据）
- *   ⚠ 本模式下"闭环判据"用的是垃圾数据（vph=[0]=VA、v0=[1]=VB），
+ *   ⚠ 本模式下"闭环判据"用的是垃圾数据（[0]=V0、[1]=VB ⇒ delta = V0−VB，
+ *     【符号与正常模式相反】；且只有 B 悬空的那 2 步才是有效反电势 ⇒
+ *     每电周期只能看到 2 次过零，而正常模式是每步 1 次）。
+ *     —— 2026-10-10 核实：旧注释写"[0]=VA"是 ae28847 之前的排法，已过期。
  *     所以必须同时开 OL_HOLD_OPENLOOP=1 只跑开环。 */
 #ifndef ADC_CAPTURE_MODE
-#define ADC_CAPTURE_MODE 1
+#define ADC_CAPTURE_MODE 0
 #endif
 #define ADC_CAP_POINTS   84        /* 每窗口点数（14 点/步 × 6 步） */
 /* ★ 抓哪两路（rank1 → 数据第 0 列；rank2 → 数据第 1 列）★

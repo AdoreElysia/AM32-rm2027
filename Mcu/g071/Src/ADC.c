@@ -60,9 +60,16 @@ void ADC_DMA_Callback()
      *   另两相不再采 —— 判据用不到它们（原来的 va/vb/vc 只有被选中的那个会被读）。
      *   ⚠ 数组下标与 rank 是一体，改顺序必须两处一起改。 */
 #if ADC_CAPTURE_MODE
-    /* 捕获模式：rank1=VA rank2=VB rank3=VC rank4=V0 rank5=电流 rank6=电压 rank7=温度 */
-    bemf_adc_vph    = ADCDataDMA[0];   /* = VA（本模式下判据无意义）*/
-    bemf_adc_v0     = ADCDataDMA[1];   /* = VB */
+    /* 捕获模式：7 档由下面 SetSequencerRanks 排定 ——
+     *   rank1 = ADC_CAP_CH1（默认 V0/PA3）   rank2 = ADC_CAP_CH2（默认 VB/PA4）
+     *   rank3 = VC   rank4 = VA   rank5 = 电流   rank6 = 电压   rank7 = 温度
+     * ⚠ 这两行把 [0]/[1] 当成 vph/v0，但默认配置下 [0] 是 V0、[1] 是 VB
+     *   ⇒ delta = V0 − VB，【符号与正常模式相反】⇒ 判出来的 rise/fall 标签是反的；
+     *     而且 rank1 固定为 V0（不随换相改成悬空相）⇒ 只有 B 悬空那 2 步是有效反电势。
+     *   本模式下闭环判据整体无意义，只用于看波形。
+     *   （2026-10-10 核实：旧注释"rank1=VA … rank4=V0"是 ae28847 改默认抓取通道之前的排法。）*/
+    bemf_adc_vph    = ADCDataDMA[0];   /* = V0（默认配置）*/
+    bemf_adc_v0     = ADCDataDMA[1];   /* = VB（默认配置）*/
     ADC_raw_current = ADCDataDMA[4];
     ADC_raw_volts   = ADCDataDMA[5];
     ADC_raw_temp    = ADCDataDMA[6];
