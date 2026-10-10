@@ -109,3 +109,33 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt)
     adc_zc_n_fall++;
     return ADC_ZC_FALL;
 }
+
+/* ================= 闭环波形捕获（见 adc_zc.h 顶部说明） ================= */
+
+volatile int16_t  zcw_buf[ZCW_N] = { 0 };
+volatile uint8_t  zcw_zc[ZCW_N]  = { 0 };
+volatile uint16_t zcw_idx      = 0;
+volatile uint8_t  zcw_state    = 0;   /* 0=空转 1=已触发 2=冻结 */
+volatile uint16_t zcw_trig_idx = 0;
+volatile uint32_t zcw_n_trig   = 0;
+static uint16_t   zcw_stop_at  = 0;
+
+void adc_zc_wave_push(int16_t e, uint8_t zc_kind)
+{
+    zcw_buf[zcw_idx] = e;
+    zcw_zc[zcw_idx]  = zc_kind;
+    zcw_idx = (uint16_t)((zcw_idx + 1u) % ZCW_N);
+
+    if (zcw_state == 1u && zcw_idx == zcw_stop_at) {
+        zcw_state = 2u;          /* 填够触发后 ZCW_POST 个点 ⇒ 冻结 */
+    }
+}
+
+/* 交棒那一刻调用：重新触发（多次起步时以最后一次为准） */
+void adc_zc_wave_trigger(void)
+{
+    zcw_trig_idx = zcw_idx;
+    zcw_stop_at  = (uint16_t)((zcw_idx + ZCW_POST) % ZCW_N);
+    zcw_state    = 1u;
+    zcw_n_trig++;
+}

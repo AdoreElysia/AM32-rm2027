@@ -333,8 +333,10 @@ void DMA1_Channel2_3_IRQHandler(void)
             (void)getCompOutputLevel();        /* 只更新 bemf_state，不再用于判据 */
             adc_bemf_take_edges(0, 0, 1, 1);   /* 旧判据的边沿读出来丢掉 */
             {
-                uint8_t zc = adc_zc_push(adc_bemf_get_delta(),
-                                         (uint16_t)INTERVAL_TIMER->CNT);
+                int16_t dzc = adc_bemf_get_delta();
+                uint8_t zc  = adc_zc_push(dzc, (uint16_t)INTERVAL_TIMER->CNT);
+                /* 顺手把这一帧写进闭环波形环形缓冲（交棒时冻结，供 SWD dump 画图）*/
+                adc_zc_wave_push(dzc, zc);
                 if (zc) {
                     edge_rise = 1;   /* 方向不参与判据（本板 rising 的极性约定无可靠对照）*/
                 }

@@ -74,6 +74,33 @@ void adc_zc_reset(void);
  * 返回 0 = 本次没有过零；ADC_ZC_RISE / ADC_ZC_FALL = 报了过零。 */
 uint8_t adc_zc_push(int16_t e, uint16_t t_cnt);
 
+/* ★★★ 闭环波形捕获（2026-10-10 加，用户要求"看闭环的过零点"）★★★
+ *   为什么不能用原来的 ADC_CAPTURE_MODE：它把 ADC 序列改成固定的 V0/VB 两路，
+ *   delta 就不再是"动态悬空相 − V0" ⇒ 闭环判据拿到的是垃圾数据
+ *   ⇒【开捕获就没有闭环，两者互斥】。
+ *   这里改成：正常 ADC 序列【一行不改】，把每帧 delta 原样写进一块 RAM 环形缓冲，
+ *   交棒那一刻触发冻结。跑完用 SWD 非侵入式 dump ⇒ 不动控制回路、不占串口。
+ *
+ *   冻结后缓冲里的内容 = 触发前 ZCW_N−ZCW_POST 个样本 + 触发后 ZCW_POST 个样本
+ *   （环形缓冲天然给出这个窗口；从 zcw_idx 处开始按环序读就是时间顺序）。
+ */
+#ifndef ZCW_N
+#define ZCW_N    2048      /* 全速 24kHz ⇒ 2048 点 = 85.3ms */
+#endif
+#ifndef ZCW_POST
+#define ZCW_POST 1728      /* 触发后保留多少点（触发前 320 点 ≈ 13ms）*/
+#endif
+
+extern volatile int16_t  zcw_buf[ZCW_N];  /* 每帧的 delta */
+extern volatile uint8_t  zcw_zc[ZCW_N];   /* 该帧判据的结论：0=无 1=上升过零 2=下降过零 */
+extern volatile uint16_t zcw_idx;         /* 环形写指针；冻结后从这里按环序读=最旧 */
+extern volatile uint8_t  zcw_state;       /* 0=空转 1=已触发正在填 2=已冻结 */
+extern volatile uint16_t zcw_trig_idx;    /* 触发时刻的 idx */
+extern volatile uint32_t zcw_n_trig;      /* 触发过几次（多次起步时用来看最后一次）*/
+
+void adc_zc_wave_push(int16_t e, uint8_t zc_kind);  /* 每帧调 */
+void adc_zc_wave_trigger(void);                     /* 交棒时调 */
+
 /* 事件环长度（2 的幂，掩码寻址）。64 条过零 ≈ 35ms ≈ 10 个电周期 ——
  * 刚好盖住开环"每 4~5 个电周期丢一步"那个已知毛病的周期，才看得出规律。 */
 #ifndef ADC_ZC_EV_N
