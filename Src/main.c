@@ -918,7 +918,7 @@ static void olStartupTick(void)
         /* ★ 交棒后第一帧也屏蔽掉：交棒点落在一个步长的中途，这一帧的 delta 同样
          *   不能代表"新的悬空相"（悬空相还没换，但定时基准刚被重置），
          *   顺手丢弃它的边沿，避免又给正反馈送第一脚。 */
-        bemf_blank = 1;
+        bemf_blank = BEMF_BLANK_FRAMES;   /* 与 changeCompInput 一致：屏蔽 10 帧 */
         enableCompInterrupts();
     }
 }

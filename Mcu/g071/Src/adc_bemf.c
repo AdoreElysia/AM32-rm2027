@@ -95,7 +95,10 @@ void changeCompInput(void)
      *   0.75× 衰减到 62（≈31µs，比 PWM 周期 41.6µs 还短）⇒ 换相比 PWM 还快
      *   ⇒ 六步波形被搅烂，现场表现就是"输出成了恒定高的 PWM、电机不转"。
      *   把这一帧的边沿整个丢弃，就等于把"换相振铃"从过零判据里摘出去。 */
-    bemf_blank = 1;
+    /* ★ 2026-10-10：从"屏蔽 1 帧"改成"屏蔽 BEMF_BLANK_FRAMES 帧"（用户要的 10）。
+     *   原因见 targets.h 里该宏的说明：1 帧只有 41.7µs，盖不住 33~73µs 的换相振铃，
+     *   尾巴会被当成过零收下 ⇒ 闭环锁在自己的换相动作上 ⇒ 拖转子、滑步、抖。 */
+    bemf_blank = BEMF_BLANK_FRAMES;
 
     /* ★★★ 2026-10-10：把"新的悬空相"写到 ADC 序列的 rank1 ★★★
      *   这样每帧采到的 ADCDataDMA[0] 就恒等于"当前悬空相"，rank2 恒为 V0
@@ -271,11 +274,16 @@ void enableCompInterrupts(void) { bemf_irq_armed = 1; }
 void maskPhaseInterrupts(void) { bemf_irq_armed = 0; }
 
 /* 取走并清掉"屏蔽下一帧"标志（ADC-DMA 中断里用） */
+/* ★ 2026-10-10 语义改成【倒计数】：每个 ADC 帧减 1，减到 0 之前都算"屏蔽中"。
+ *   调用点（ADC-DMA 中断）不用改 —— 它每帧调一次、返回非 0 就丢掉本帧边沿，
+ *   正好等价于"屏蔽 N 帧"。 */
 uint8_t adc_bemf_blank_take(void)
 {
-    uint8_t b = bemf_blank;
-    bemf_blank = 0;
-    return b;
+    if (bemf_blank == 0) {
+        return 0;
+    }
+    bemf_blank--;
+    return 1;
 }
 
 #endif /* USE_ADC_BEMF */
