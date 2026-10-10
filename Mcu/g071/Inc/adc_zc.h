@@ -84,20 +84,27 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt);
 extern volatile uint32_t adc_zc_n_rise;      /* 上升过零累计 */
 extern volatile uint32_t adc_zc_n_fall;      /* 下降过零累计 */
 extern volatile uint32_t adc_zc_n_reject;    /* 变号了但被单调/斜率关掉的次数 */
-extern volatile uint16_t adc_zc_ev_cnt[ADC_ZC_EV_N];  /* 最近 N 次过零的 INTERVAL_TIMER 读数 */
-extern volatile uint16_t adc_zc_ev_gap[ADC_ZC_EV_N];  /* ★ 与【上一次过零】的差值（拍）—— 见下 */
-extern volatile uint8_t  adc_zc_ev_kind[ADC_ZC_EV_N]; /* 与上面对应：ADC_ZC_RISE / ADC_ZC_FALL */
+extern volatile uint16_t adc_zc_ev_cnt[ADC_ZC_EV_N];
+extern volatile uint8_t  adc_zc_ev_kind[ADC_ZC_EV_N]; /* 对应方向：ADC_ZC_RISE / ADC_ZC_FALL */
 extern volatile uint8_t  adc_zc_ev_idx;      /* 上面那个小环的下一个写入位置 */
 
-/* ★ 为什么要有 ev_gap（2026-10-10 加，上一轮踩过的坑）★
- *   ev_cnt 记的是 INTERVAL_TIMER->CNT 的【绝对值】，而那个定时器只有
- *   interruptRoutine() 会把它清零 ⇒ 【开环期间没人清】，它自由跑，
- *   绝对值毫无意义（上一轮读回来一串乱数就是这么来的）。
- *   ev_gap = 本次 t_cnt − 上次 t_cnt（16 位模减）：定时器自由跑时它就等于
- *   真实间隔（只要间隔 < 65536 拍 = 32.8ms，换相步才 ~1100 拍，安全）。
- *   ⇒ 开环看 ev_gap（间隔），闭环看 ev_cnt（绝对值），两个数组各管一种模式。
- *   间隔 × 0.5µs = 过零周期：目标转速下应恒 ≈ 一个换相步（实测约 550µs = 1100 拍）。
- *   若出现 2 倍值 ⇒ 中间漏认了一次过零（开环在交棒转速下有"每 4~5 个电周期丢一步"
- *   的已知毛病，这个数组能把丢步率直接量化出来）。 */
+/* ★★ ev_cnt[] 的语义（2026-10-10 实测确认，别再猜）★★
+ *   记的是每次过零时的 INTERVAL_TIMER->CNT ⇒ 因为该定时器【每次换相都被清零】
+ *   （开环换相也清，不只是 interruptRoutine 清 —— 数据证据：64 条读数全在
+ *   840~990 且不单调），所以这个值恒等于：
+ *
+ *        【换相 → 过零】的延迟（拍，1 拍 = 0.5µs）
+ *
+ *   它就是相位关系的直接测量：
+ *     · 理想（TI 的六步无感）应该是 0.50 个换相步；
+ *     · 台架实测开环下是 0.81 个换相步（中位 890 拍，全部落在 796~968）
+ *       —— 这正体现"开环时转子必然滞后于磁场"。
+ *   ⇒ 看 ev_cnt 就能判断过零认在了步内的什么位置：偏小=认早了（可能是伪过零），
+ *     偏大=认晚了（中间可能漏了一次）。
+ *
+ *   ⚠ 曾经这里还有一个 ev_gap[]（记"与上一次过零的差值"），已删：
+ *     换相时 adc_zc_reset() 会让每个事件都变成"复位后的第一个" ⇒ 差值恒为 0，
+ *     结构性不可能有值。绝对 CNT 才是有效量。
+ */
 
 #endif /* ADC_ZC_H */
