@@ -953,7 +953,12 @@ static void olStartupTick(void)
         {
             uint32_t cmd_ci = (uint32_t)ol_step_div_cur * 100u;
             uint16_t m = ol_meas_ci;
-            if (m != 0 && (uint32_t)m >= (cmd_ci >> 1) && (uint32_t)m <= (cmd_ci << 1)) {
+            /* ★★★ 2026-10-10 窗口从 0.5~2 倍放宽到 1/8~8 倍 ★★★
+             *   实测教训：开环滑步可能远超 2 倍 —— 实测 ol_meas_ci=10743 而命令值 2400
+             *   （滑步 4.5 倍，转子 310RPM vs 磁场 1389RPM），于是实测值被我原来的
+             *   `m <= cmd_ci<<1`(=4800) 挡掉、退回命令值 ⇒ 交棒后还得靠滤波收敛 1 秒。
+             *   放宽到 1/8~8 倍即可覆盖真实滑步，同时仍能挡掉离谱噪声。 */
+            if (m >= 200u && (uint32_t)m >= (cmd_ci >> 3) && (uint32_t)m <= (cmd_ci << 3)) {
                 commutation_interval = (uint32_t)m;   /* 用实测（跟随转子）*/
                 ol_meas_used = m;
             } else {
