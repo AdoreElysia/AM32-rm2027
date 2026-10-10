@@ -794,6 +794,25 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
  *     开环安全网仍在：过流 OL_TRIP_CURRENT=8A、总时长 OL_RUN_LIMIT=8s。 */
 #define OL_HOLD_OPENLOOP    0
 #endif
+
+/* ★★★ 2026-10-11 临时实验开关：跳过交棒的"验证窗口" ★★★
+ *   为什么：交棒与否由 ol_verify_ok 决定，而那个计数走的是 olStartupTick() 里的
+ *   【旧判据】（固定 8 码阈值 + 时间窗）—— 和我已经换成环形缓冲的新判据是两套。
+ *   实测交棒因此变成"抛硬币"：同一固件前几轮 ver=3 能交棒、后几轮 ver=0 不交。
+ *   而本次要抓的"交棒时电机反转"必须发生在【确定交棒】的前提下才能复现
+ *   （三次都没交棒 ⇒ 捕获一次都没点火）。⇒ 临时把这道验证拿掉：
+ *   "斜坡跑到底就交棒"。
+ *   ⚠ 实验开关，不是产品行为 —— 抓完必须改回 0。
+ *   ★ 去掉的只是"看不看过零计数"这一步；斜坡、对齐、交棒时的相位/周期初始化
+ *     全部照旧 ⇒ 交棒后的行为与之前几轮可比。 */
+#ifndef OL_SKIP_VERIFY
+#define OL_SKIP_VERIFY      1
+#endif
+#if OL_SKIP_VERIFY
+#define OL_VERIFY_PASS      1
+#else
+#define OL_VERIFY_PASS      (ol_verify_ok >= OL_VERIFY_OK_NEED)
+#endif
 #if OL_HOLD_OPENLOOP
 /* 实验模式不交棒 ⇒ 时长上限用 160000 拍 = 8.0 秒（用户要求"时间别太长"）。
  * 斜坡本身要 3.4 秒（对齐 0.2 + 斜坡 3.2）⇒ 稳速段约 4.6 秒，够看波形/取数。
@@ -1102,7 +1121,7 @@ static void olStartupTick(void)
         }
     }
 
-    if (!OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && ol_verify_ok >= OL_VERIFY_OK_NEED) {
+    if (!OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         old_routine = 0;
         /* ★ 交棒这一刻【武装】闭环波形捕获：阈值 = 交棒实测步长的 2 倍。
