@@ -50,7 +50,11 @@ void telem_UART_Init()
     LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_3, LL_DMA_MDATAALIGN_BYTE);
 
     USART_InitStruct.PrescalerValue = LL_USART_PRESCALER_DIV1;
+#if ADC_CAPTURE_MODE
+    USART_InitStruct.BaudRate = ADC_CAP_BAUD;   /* ★ 捕获模式：1 Mbaud */
+#else
     USART_InitStruct.BaudRate = 115200;
+#endif
     USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
     USART_InitStruct.Parity = LL_USART_PARITY_NONE;

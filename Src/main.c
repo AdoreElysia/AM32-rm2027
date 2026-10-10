@@ -463,6 +463,60 @@ uint16_t ADC_raw_input;
 uint16_t ADC_raw_ntc;
 uint8_t PROCESS_ADC_FLAG = 0;
 volatile char send_telemetry = 0;
+
+#if ADC_CAPTURE_MODE
+/* ================= ★ ADC 原始波形捕获（用户要求"看波形"）★ =================
+ * 双缓冲窗口：一边采集、一边发送 ⇒ 采集不中断（窗口之间自然留出间隔）。
+ * 每窗口 84 点 × 2 路(VA,VB) × 2 字节 = 336 字节 + 8 字节帧头。 */
+volatile uint16_t adc_cap_buf[2][ADC_CAP_POINTS][2];
+volatile uint16_t adc_cap_n     = 0;
+volatile uint8_t  adc_cap_wr    = 0;
+volatile uint8_t  adc_cap_ready = 0;
+volatile uint32_t adc_cap_seq   = 0;   /* 已发出的窗口号 */
+volatile uint32_t adc_cap_drop  = 0;   /* 因上一窗口未发完而丢弃的采样点数 */
+volatile uint32_t adc_cap_pts   = 0;   /* 累计采集到的点数（用于对账） */
+
+/* 由 ADC-DMA 中断（24kHz）每帧调用一次 */
+void adc_capture_sample(uint16_t va, uint16_t vb)
+{
+    if (adc_cap_ready) { adc_cap_drop++; return; }   /* 上一窗口还没发完 ⇒ 丢 */
+    adc_cap_buf[adc_cap_wr][adc_cap_n][0] = va;
+    adc_cap_buf[adc_cap_wr][adc_cap_n][1] = vb;
+    adc_cap_pts++;
+    if (++adc_cap_n >= ADC_CAP_POINTS) {
+        adc_cap_n = 0;
+        adc_cap_ready = 1;
+    }
+}
+
+/* 主循环里调用：把写满的窗口发出去 */
+void adc_capture_drain(void)
+{
+    uint8_t b;
+    uint32_t sq;
+    int k;
+
+    if (!adc_cap_ready) { return; }
+    b = adc_cap_wr;
+    adc_cap_wr ^= 1;              /* 立刻切到另一个缓冲，让 ISR 继续采 */
+    adc_cap_ready = 0;
+
+    LL_USART_TransmitData8(USART1, 0xAA);
+    LL_USART_TransmitData8(USART1, 0x55);
+    sq = adc_cap_seq++;
+    for (k = 0; k < 4; k++) { LL_USART_TransmitData8(USART1, (uint8_t)((sq >> (k * 8)) & 0xFF)); }
+    LL_USART_TransmitData8(USART1, (uint8_t)(ADC_CAP_POINTS & 0xFF));
+    LL_USART_TransmitData8(USART1, (uint8_t)((ADC_CAP_POINTS >> 8) & 0xFF));
+    for (k = 0; k < ADC_CAP_POINTS; k++) {
+        uint16_t va = adc_cap_buf[b][k][0];
+        uint16_t vb = adc_cap_buf[b][k][1];
+        LL_USART_TransmitData8(USART1, (uint8_t)(va & 0xFF));
+        LL_USART_TransmitData8(USART1, (uint8_t)(va >> 8));
+        LL_USART_TransmitData8(USART1, (uint8_t)(vb & 0xFF));
+        LL_USART_TransmitData8(USART1, (uint8_t)(vb >> 8));
+    }
+}
+#endif
 char telemetry_done = 0;
 char prop_brake_active = 0;
 
@@ -3078,6 +3132,9 @@ int main(void)
 #endif
 
     while (1) {
+#if ADC_CAPTURE_MODE
+        adc_capture_drain();     /* ★ 把装满的 ADC 窗口发到串口 */
+#endif
 e_com_time = ((commutation_intervals[0] + commutation_intervals[1] + commutation_intervals[2] + commutation_intervals[3] + commutation_intervals[4] + commutation_intervals[5]) + 4) >> 1; // COMMUTATION INTERVAL IS 0.5US INCREMENTS 
 
 #if defined(FIXED_DUTY_MODE) || defined(FIXED_SPEED_MODE)
@@ -3325,6 +3382,9 @@ if(zero_crosses < 5){
              NVIC_SetPriority(COMPARATOR_IRQ, 0);
          }
 #endif
+#endif
+#if ADC_CAPTURE_MODE
+        send_telemetry = 0;      /* ★ 捕获模式：停发 KISS 遥测，串口专供 ADC 原始流 */
 #endif
         if (send_telemetry) {
 #ifdef USE_SERIAL_TELEMETRY

@@ -59,11 +59,24 @@ void ADC_DMA_Callback()
      *   （A 悬空→CH5、B 悬空→CH4、C 悬空→CH2），这样 [0] 永远是"当前悬空相"。
      *   另两相不再采 —— 判据用不到它们（原来的 va/vb/vc 只有被选中的那个会被读）。
      *   ⚠ 数组下标与 rank 是一体，改顺序必须两处一起改。 */
+#if ADC_CAPTURE_MODE
+    /* 捕获模式：rank1=VA rank2=VB rank3=VC rank4=V0 rank5=电流 rank6=电压 rank7=温度 */
+    bemf_adc_vph    = ADCDataDMA[0];   /* = VA（本模式下判据无意义）*/
+    bemf_adc_v0     = ADCDataDMA[1];   /* = VB */
+    ADC_raw_current = ADCDataDMA[4];
+    ADC_raw_volts   = ADCDataDMA[5];
+    ADC_raw_temp    = ADCDataDMA[6];
+    {
+        extern void adc_capture_sample(uint16_t va, uint16_t vb);
+        adc_capture_sample(ADCDataDMA[0], ADCDataDMA[1]);   /* ★ 抓 A、B 两路 */
+    }
+#else
     bemf_adc_vph = ADCDataDMA[0];      /* rank1 = 当前悬空相 */
     bemf_adc_v0  = ADCDataDMA[1];      /* rank2 = V0 */
     ADC_raw_current = ADCDataDMA[2];   /* rank3 */
     ADC_raw_volts   = ADCDataDMA[3];   /* rank4 */
     ADC_raw_temp    = ADCDataDMA[4];   /* rank5 */
+#endif
 #else
     ADC_raw_temp = ADCDataDMA[2];
     ADC_raw_volts = ADCDataDMA[1];
@@ -85,8 +98,12 @@ void enableADC_DMA()
 
     /* Set DMA transfer size */
 #ifdef USE_ADC_BEMF
+#if ADC_CAPTURE_MODE
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 7);
+#else
     /* 5 档：悬空相 / V0 / 电流 / 电压 / 温度（与 rank 顺序一体，改一处必须改另一处） */
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 5);
+#endif
 #elif defined(USE_ADC_INPUT)
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 4);
 #else
@@ -221,8 +238,13 @@ void ADC_Init(void)
     ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
 #endif
     #ifdef USE_ADC_BEMF
+#if ADC_CAPTURE_MODE
+    /* 捕获模式：7 档 VA/VB/VC/V0/电流/电压/温度 */
+    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_7RANKS;
+#else
     /* 5 档：悬空相 / V0 / 电流 / 电压 / 温度（见 ADC_DMA_Callback 的说明） */
     ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_5RANKS;
+#endif
 #else
     ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_3RANKS;
 #endif
@@ -298,6 +320,23 @@ void ADC_Init(void)
      * 源阻抗（按网表实算）：相通道 = R1∥R2∥R12 = 47k∥10k∥4.7k ≈ 3.0k
      * （早先注释写的 8.3k 漏了 R12 那只 4.7k 到 GND 的电阻）⇒ 19.5 周期绰绰有余，
      * 采样时间保持不动（COMMON_1 是全部通道共用的一个设置）。 */
+#if ADC_CAPTURE_MODE
+    /* ★ 捕获模式：固定 7 档 VA/VB/VC/V0/电流/电压/温度 —— 保证 A、B 同帧都有值 */
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_A_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, BEMF_ADC_PHASE_B_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, BEMF_ADC_PHASE_C_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, BEMF_ADC_NEUTRAL_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5, CURRENT_ADC_CHANNEL);
+    LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_6, VOLTAGE_ADC_CHANNEL);
+    LL_ADC_SetChannelSamplingTime(ADC1, VOLTAGE_ADC_CHANNEL, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7, LL_ADC_CHANNEL_TEMPSENSOR);
+    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR, LL_ADC_SAMPLINGTIME_COMMON_2);
+#else
     /* rank1 = 悬空相（开机先放 A 相，之后由 changeCompInput() 每次换相改写）
      * rank2 = V0（固定）—— 这两路就是过零判据要的全部，排在最前 ⇒ 只需 40 拍。 */
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_A_CH);
@@ -320,6 +359,7 @@ void ADC_Init(void)
         LL_ADC_CHANNEL_TEMPSENSOR);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
         LL_ADC_SAMPLINGTIME_COMMON_2);
+#endif
 #else
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, CURRENT_ADC_CHANNEL);
     LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL,
