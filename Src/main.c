@@ -773,11 +773,21 @@ void ol_startup_zc_inc(void)
  *   交棒时优先用实测值当初值 ⇒ 切过去即与转子同步，不用再收敛。 */
 volatile uint16_t ol_meas_ci    = 0;    /* 实测转子周期（0.5µs 拍）；0 = 尚未量到 */
 volatile uint16_t ol_meas_used  = 0;    /* 观测：本次交棒实际用了多少（0 = 退回命令值）*/
+volatile uint16_t ol_meas_gap_used = 0;  /* 观测：交棒实际用的 gap（0 = 退回半步）*/
 static   uint32_t ol_meas_sum   = 0;
 static   uint16_t ol_meas_n     = 0;
 static   uint16_t ol_meas_prev  = 0;    /* 上一次的 8 样本平均（做一致性比较用）*/
 static   uint8_t  ol_meas_ok    = 0;    /* 连续一致的次数 */
 volatile uint16_t ol_cross_prev = 0;    /* 上一次过零落在当前步内的位置 */
+/* ★★★ 2026-10-10 相位连续交棒用：开环期间"过零 → 下一次换相"的实测间隔 ★★★
+ *   开环实测：真过零落在 0.91 步处（拒绝环 CNT≈1000 / 步长 1100）
+ *   ⇒ 开环的换相点离过零只有 0.09 步（转子滞后磁场约 24.6°）。
+ *   而闭环原来一交棒就按"过零后 0.5 步（理想 30°）"换相 ⇒ 相位前跳 0.41 步
+ *   ⇒ 转子当场失同步 ⇒ 边沿从 ~1400/秒 塌到 ~130/秒 ⇒ 被拖成慢速锁定。
+ *   ⇒ 开环期间把实际 gap 量出来，交棒时用它当初始 waitTime。 */
+volatile uint16_t ol_meas_gap_sum = 0;
+volatile uint16_t ol_meas_gap_n   = 0;
+volatile uint16_t ol_meas_gap     = 0;
 
 /* 由 ISR 在每个"被接受的过零"处调用（开环期间）。
  * 定时器在每次换相时被 olStartupTick 清 0 ⇒
@@ -792,6 +802,17 @@ void ol_meas_cross(uint16_t cnt)
     }
     iv = step - (uint32_t)ol_cross_prev + (uint32_t)cnt;
     ol_cross_prev = cnt;
+
+    /* 顺带量"过零 → 下一次换相"的间隔：开环换相发生在 timer 达到 step 时，
+     * 所以从本次过零的 cnt 到下一次换相还有 (step - cnt) 拍。 */
+    {
+        uint32_t gap = step - (uint32_t)cnt;
+        if (gap <= 0xFFFFu) {
+            ol_meas_gap_sum = (uint16_t)((ol_meas_gap_sum + gap) / 2u);  /* 指数平均，够用 */
+            if (ol_meas_gap_n < 1000u) { ol_meas_gap_n++; }
+            if (ol_meas_gap_n >= 4u) { ol_meas_gap = ol_meas_gap_sum; }
+        }
+    }
 
     if (iv > 65535u) {          /* 超过 uint16 能表示的范围 ⇒ 丢弃 */
         return;
@@ -1059,11 +1080,24 @@ static void olStartupTick(void)
         } else {
             advance = (uint16_t)((commutation_interval * auto_advance_level) >> 6);
         }
-        waitTime = (uint16_t)((commutation_interval >> 1) - advance);
-        /* ★ 定时器不要清零：交棒点落在一个步长的【中途】，清 0 会让第一次过零
-         *   只量到"半个步长"、同样污染 commutation_interval。摆到半步处，
-         *   使得到第一次过零时量到的正好是整步。 */
-        SET_INTERVAL_TIMER_COUNT(commutation_interval >> 1);
+        /* ★★★ 2026-10-10 相位连续交棒 ★★★
+         *   原来这里一律用"过零后 0.5 步(理想 30°)"当 waitTime，并把定时器重设到半步处
+         *   —— 等于在交棒瞬间把相位【往前跳】。而开环实测真过零落在 0.91 步处
+         *   （拒绝环 CNT≈1000 / 步长 1100）⇒ 开环的换相点离过零只有 0.09 步
+         *   ⇒ 交棒按 0.5 步排 ⇒ 相位前跳 0.41 步 ⇒ 转子当场失同步
+         *   ⇒ 边沿从 ~1400/秒 塌到 ~130/秒 ⇒ 被慢速磁场拖住 ⇒ 稳定错误锁定（现场抖动）。
+         *   改用开环期间实测的 gap(≈0.09 步)：相位接着开环走，不跳。
+         *   合理性检查：gap 必须在 (0, ci/2] 之间，否则退回原式。 */
+        if (ol_meas_gap > 0u && (uint32_t)ol_meas_gap <= (commutation_interval >> 1)) {
+            waitTime = ol_meas_gap;                          /* 相位连续 */
+            ol_meas_gap_used = ol_meas_gap;
+        } else {
+            waitTime = (uint16_t)((commutation_interval >> 1) - advance);
+            ol_meas_gap_used = 0;
+        }
+        /* 定时器【不再重设】：它一直按开环的节奏在走，保持相位连续。
+         * （原来 SET_INTERVAL_TIMER_COUNT(ci>>1) 会把相位强行挪到半步处。） */
+        ol_meas_gap_used = waitTime;
         /* ★ 交棒后第一帧也屏蔽掉：交棒点落在一个步长的中途，这一帧的 delta 同样
          *   不能代表"新的悬空相"（悬空相还没换，但定时基准刚被重置），
          *   顺手丢弃它的边沿，避免又给正反馈送第一脚。 */
