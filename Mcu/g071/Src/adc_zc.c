@@ -112,7 +112,9 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt)
 
 /* ================= 闭环波形捕获（见 adc_zc.h 顶部说明） ================= */
 
-volatile int16_t  zcw_buf[ZCW_N] = { 0 };
+volatile int16_t  zcw_vph[ZCW_N] = { 0 };
+volatile int16_t  zcw_v0[ZCW_N]  = { 0 };
+volatile uint8_t  zcw_step[ZCW_N] = { 0 };
 volatile uint8_t  zcw_zc[ZCW_N]  = { 0 };
 volatile uint16_t zcw_idx      = 0;
 volatile uint8_t  zcw_state    = 0;   /* 0=空转 1=已触发 2=冻结 */
@@ -120,7 +122,7 @@ volatile uint16_t zcw_trig_idx = 0;
 volatile uint32_t zcw_n_trig   = 0;
 static uint16_t   zcw_stop_at  = 0;
 
-void adc_zc_wave_push(int16_t e, uint8_t zc_kind)
+void adc_zc_wave_push(int16_t vph, int16_t v0, uint8_t step, uint8_t zc_kind)
 {
     /* ★ 已冻结 ⇒ 立刻返回，绝不能再写 ★
      *   上一版漏了这一句：state 到 2 之后仍在写，缓冲被后续空转数据一路覆盖
@@ -130,8 +132,10 @@ void adc_zc_wave_push(int16_t e, uint8_t zc_kind)
         return;
     }
 
-    zcw_buf[zcw_idx] = e;
-    zcw_zc[zcw_idx]  = zc_kind;
+    zcw_vph[zcw_idx]  = vph;
+    zcw_v0[zcw_idx]   = v0;
+    zcw_step[zcw_idx] = step;
+    zcw_zc[zcw_idx]   = zc_kind;
     zcw_idx = (uint16_t)((zcw_idx + 1u) % ZCW_N);
 
     if (zcw_state == 1u && zcw_idx == zcw_stop_at) {
