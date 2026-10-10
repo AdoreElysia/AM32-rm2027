@@ -809,7 +809,15 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
 #define OL_SKIP_VERIFY      1
 #endif
 #if OL_SKIP_VERIFY
-#define OL_VERIFY_PASS      1
+/* ★ 交棒条件改成"斜坡跑到底 + 恒速热身满"（ol_soak_ticks 由上面那段自增，
+ *   封顶在 OL_SOAK_TICKS）——而不是简单置 1。
+ *   为什么不能用"置 1"：那样开环只跑 3.4 秒（斜坡一到头就交）⇒ 开环整段看不见了，
+ *   用户当场就发现"开环跑不动了"（他只看到电机进闭环后不对）。
+ *   改成等热身满 ⇒ 开环完整跑「对齐 0.2s + 斜坡 3.2s + 恒速 1.0s」≈4.4s 之后再交，
+ *   既看得见开环、交棒又是确定的。
+ *   ★ 附带好处：热身跑满之后 ol_meas_ci 是从【整段恒速】量出来的 ⇒ 交棒时给闭环的
+ *     周期初值更可信（之前验证窗和热身混在一起，样本未必够）。 */
+#define OL_VERIFY_PASS      (ol_soak_ticks >= OL_SOAK_TICKS)
 #else
 #define OL_VERIFY_PASS      (ol_verify_ok >= OL_VERIFY_OK_NEED)
 #endif
