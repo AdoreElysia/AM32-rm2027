@@ -676,11 +676,11 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
 #define OL_HOLD_OPENLOOP    1
 #endif
 #if OL_HOLD_OPENLOOP
-/* 实验模式不交棒 ⇒ 总时长上限必须放宽，否则 8 秒会自己停机、数据就没了。
- * 400000 拍 = 20 秒：够看清波形、够我 dump 一轮 RAM，又不会太久 ——
+/* 实验模式不交棒 ⇒ 时长上限用 160000 拍 = 8.0 秒（用户要求"时间别太长"）。
+ * 斜坡本身要 3.4 秒（对齐 0.2 + 斜坡 3.2）⇒ 稳速段约 4.6 秒，够看波形/取数。
  * 开环在交棒转速下有个已知毛病（每 4~5 个电周期丢一步 ⇒ 丢步即制动 ⇒ 电流尖峰 ⇒ 发热），
- * 连续跑太久会把电机热起来。真正停车的路径仍是"油门回 0"与过流跳闸。*/
-#define OL_STARTUP_TICKS_MAX 400000UL
+ * 所以不宜久跑。真正停车的路径仍是"油门回 0"与过流跳闸。*/
+#define OL_STARTUP_TICKS_MAX 160000UL
 #else
 #define OL_STARTUP_TICKS_MAX 160000UL
 #endif
