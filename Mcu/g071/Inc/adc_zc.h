@@ -108,12 +108,25 @@ extern volatile uint8_t  zcw_zc[ZCW_N];   /* 该帧判据的结论：0=无 1=上
  *   但"采样点相对 PWM 的相位变了"和"驱动实际变小了"这两种成因靠 vph/v0 分不开，
  *   只有把占空比本身记下来才能分辨。ARR / CCR4 是常量，用 SWD 现读即可，不必捕获。 */
 extern volatile uint16_t zcw_duty[ZCW_N];
+/* ★ 2026-10-10 加：方向/刹车/油门三个量。
+ *   用户肉眼观察到「交棒时电机反转了一下」—— 这能解释掉全部现象（那个 10ms 停顿
+ *   就是"反向磁场刹车→停→倒转"，而 v0/delta/CCR1 全程健康、相位量对方向不敏感）。
+ *   要把它钉成寄存器级的事实，就得把这三个量也逐帧记下来：
+ *     forward            —— 1=正转 0=反转（commutate() 就是按它决定 step++ / step--）
+ *     prop_brake_active  —— 1 时 commutate() 会跳过 comStep() ⇒ 门极停驱动（=那个"停顿"）
+ *     adjusted_input     —— 有效油门；被改小就说明有逻辑在收油门
+ *   （实测 EEPROM 里 dir_reversed = 0xFF（擦除态）—— 初始化按 `==1` 判成"未反转"，
+ *     而任何按真值判的地方会当成"已反转" ⇒ 同一标志两处读法相反，正是会翻方向的样子。）*/
+extern volatile uint8_t  zcw_fwd[ZCW_N];
+extern volatile uint8_t  zcw_brake[ZCW_N];
+extern volatile uint16_t zcw_ain[ZCW_N];
 extern volatile uint16_t zcw_idx;         /* 环形写指针；冻结后从这里按环序读=最旧 */
 extern volatile uint8_t  zcw_state;       /* 0=空转 1=已触发正在填 2=已冻结 */
 extern volatile uint16_t zcw_trig_idx;    /* 触发时刻的 idx */
 extern volatile uint32_t zcw_n_trig;      /* 触发过几次（多次起步时用来看最后一次）*/
 
-void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint8_t zc_kind);
+void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint8_t zc_kind,
+                      uint8_t fwd, uint8_t brake, uint16_t ain);
 /* ★ 2026-10-10 触发方式改成"ci 外扩触发"：
  *   实测交棒那一刻的 16ms 窗口里一切正常（v0 健康、回路 13~22 点/步的快节奏，
  *   只有占空比在交棒后 4.5~6ms 从 462 线性降到 387）⇒ 真正的掉速在那之后，

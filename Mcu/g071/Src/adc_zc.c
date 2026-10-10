@@ -117,6 +117,9 @@ volatile int16_t  zcw_v0[ZCW_N]  = { 0 };
 volatile uint8_t  zcw_step[ZCW_N] = { 0 };
 volatile uint8_t  zcw_zc[ZCW_N]  = { 0 };
 volatile uint16_t zcw_duty[ZCW_N] = { 0 };
+volatile uint8_t  zcw_fwd[ZCW_N]   = { 0 };
+volatile uint8_t  zcw_brake[ZCW_N] = { 0 };
+volatile uint16_t zcw_ain[ZCW_N]   = { 0 };
 volatile uint16_t zcw_idx      = 0;
 volatile uint8_t  zcw_state    = 0;   /* 0=空转 1=已触发 2=冻结 */
 volatile uint16_t zcw_trig_idx = 0;
@@ -124,7 +127,8 @@ volatile uint32_t zcw_n_trig   = 0;
 static uint16_t   zcw_stop_at  = 0;
 volatile uint32_t zcw_ci_trig  = 0;   /* ci 超过它就触发冻结（0=未武装）*/
 
-void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint8_t zc_kind)
+void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint8_t zc_kind,
+                      uint8_t fwd, uint8_t brake, uint16_t ain)
 {
     /* ★ 已冻结 ⇒ 立刻返回，绝不能再写 ★
      *   上一版漏了这一句：state 到 2 之后仍在写，缓冲被后续空转数据一路覆盖
@@ -139,6 +143,9 @@ void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint
     zcw_step[zcw_idx] = step;
     zcw_zc[zcw_idx]   = zc_kind;
     zcw_duty[zcw_idx] = duty;
+    zcw_fwd[zcw_idx]   = fwd;
+    zcw_brake[zcw_idx] = brake;
+    zcw_ain[zcw_idx]   = ain;
     zcw_idx = (uint16_t)((zcw_idx + 1u) % ZCW_N);
 
     if (zcw_state == 1u && zcw_idx == zcw_stop_at) {

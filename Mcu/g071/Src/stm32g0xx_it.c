@@ -340,8 +340,15 @@ void DMA1_Channel2_3_IRQHandler(void)
                 /* 顺手把这一帧写进闭环波形环形缓冲（交棒时冻结，供 SWD dump 画图）
                  * ★ vph / v0 / step 分开记 —— 这样才分得清交棒时的偏置跳变
                  *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */
-                adc_zc_wave_push((int16_t)bemf_adc_vph, (int16_t)bemf_adc_v0,
-                                 (uint16_t)TIM1->CCR1, (uint8_t)step, zc);
+                {
+                    extern char forward;
+                    extern volatile uint8_t prop_brake_active;
+                    extern uint16_t adjusted_input;   /* common.h:13 —— 非 volatile */
+                    adc_zc_wave_push((int16_t)bemf_adc_vph, (int16_t)bemf_adc_v0,
+                                     (uint16_t)TIM1->CCR1, (uint8_t)step, zc,
+                                     (uint8_t)forward, (uint8_t)prop_brake_active,
+                                     (uint16_t)adjusted_input);
+                }
                 if (zc) {
                     edge_rise = 1;   /* 方向不参与判据（本板 rising 的极性约定无可靠对照）*/
                 }
