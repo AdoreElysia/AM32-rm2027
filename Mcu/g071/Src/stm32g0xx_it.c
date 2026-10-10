@@ -316,9 +316,34 @@ void DMA1_Channel2_3_IRQHandler(void)
              *   换相换了悬空相 ⇒ 下一帧 delta 必跳变 ⇒ 必置出假边沿；
              *   这一帧只用来"重新落定"滞回状态（getCompOutputLevel 已做）。 */
             uint8_t blanked = adc_bemf_blank_take();
+#if BEMF_ZC_USE_RINGBUF
+            /* ★★★ 2026-10-10：过零判据换成"环形缓冲 + 变号 + 回看单调"（用户指定）★★★
+             *   用户要的结构：缓冲里存样本 → 检测到变号 → 回看前面 N 点是否严格单调。
+             *   为什么它比原来那套可靠：原来靠两个【时间门槛】（换相后屏蔽 3 帧、
+             *   75µs 下界）去躲换相振铃，门槛都是拍脑袋定的、还互相耦合；新判据不用
+             *   时间信息，只用波形形状 —— 真过零是平缓斜坡（20~40 码/点）且连续多点
+             *   同向，而换相跳变一步差 500~800 码，会把"连续 MONO_N 点单调"直接打断。
+             *   实测（本板真实采样数据、23 个真过零 / 46 次换相跳变）：
+             *     MONO_N=4 ⇒ 22 判出 = 22 真过零、0 误报，拒收 45 次全部落在换相跳变上。
+             *   ★ 下游一行不动（bemf_irq_armed / bemf_zc_time / interruptRoutine /
+             *     计时器清零），只换"认不认到过零"这一个判据 ⇒ 换相时序与原来一致。
+             *   ★ 仍然调 getCompOutputLevel()：轮询路径 getBemfState() 要用 bemf_state。
+             *   ★ 注意：这里只推一次 adc_zc_push —— 别再在别处重复推，会破坏缓冲区。 */
+            adc_bemf_take_edges(0, 0, 1, 1);   /* 清残留 */
+            (void)getCompOutputLevel();        /* 只更新 bemf_state，不再用于判据 */
+            adc_bemf_take_edges(0, 0, 1, 1);   /* 旧判据的边沿读出来丢掉 */
+            {
+                uint8_t zc = adc_zc_push(adc_bemf_get_delta(),
+                                         (uint16_t)INTERVAL_TIMER->CNT);
+                if (zc) {
+                    edge_rise = 1;   /* 方向不参与判据（本板 rising 的极性约定无可靠对照）*/
+                }
+            }
+#else
             adc_bemf_take_edges(0, 0, 1, 1);      /* 清掉上一帧的残留 */
             (void)getCompOutputLevel();           /* 用本帧新采样更新滞回状态 */
             adc_bemf_take_edges(&edge_rise, &edge_fall, 1, 1);  /* 读本帧翻转并清掉 */
+#endif
 
             /* ★ 2026-10-09 观测：记住本步内 |delta| 的峰值（= 反电势幅值）。
              *   它和"接受时 delta 只有 ±5~±11"一起，才能证明信号是不是在阈值上蹭
@@ -337,15 +362,8 @@ void DMA1_Channel2_3_IRQHandler(void)
 
             /* ★★★ 2026-10-10 新增：环形缓冲版过零检测器（用户指定的结构）★★★
              *   结构：环形缓冲区存样本 → 检测到变号 → 回看前面 N 点是否严格单调。
-             *   与上面那套"滞回 + 时间门槛"完全无关 —— 它不靠时间门槛，只靠波形形状：
-             *     真过零是平缓斜坡（20~40 码/点）且连续多点同向；
-             *     换相跳变一步差 500~800 码，会把"连续 N 点单调"直接打断。
-             *   参数是实测定的（真实采样数据、23 真过零 / 46 次跳变）：MONO_N=4 时
-             *     22 判出 = 22 真过零、0 误报（详见 adc_zc.h 顶部那三张表）。
-             *   ★ 这一块【只喂数据 + 计数】，不碰下面的换相判据 ⇒ 电机行为完全不变。
-             *     要让它接管换相，把下面的边沿判据换成读 adc_zc_push() 的返回值即可。 */
-            (void)adc_zc_push(adc_bemf_get_delta(), (uint16_t)INTERVAL_TIMER->CNT);
-
+             *   现在它是【真正的判据】—— 见上面那段（BEMF_ZC_USE_RINGBUF）。
+             *   这里不再单独推一次，避免同一帧推两次破坏缓冲区。 */
             /* ★ 2026-10-09 悬空相波形捕捉：每 8 帧记一次（≈3kHz 采样，64 点 ≈21ms）。
              *   用途见 Src/main.c 里 OL_WF_* 的说明 —— 把"悬空相 − V0"还原成波形，
              *   一次性判定"硬件没真悬空"还是"反电势太小被盖住"。 */

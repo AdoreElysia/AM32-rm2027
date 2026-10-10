@@ -54,6 +54,15 @@
 #define ADC_ZC_SLOPE_CAP 0
 #endif
 
+/* ★★ 过零判据选择开关 ★★
+ *   0 = 原方案：施密特滞回(getCompOutputLevel) + 边沿标志 + 换相屏蔽 + 75µs 下界
+ *   1 = 新方案：本模块（环形缓冲 + 变号 + 回看 MONO_N 点严格单调）
+ * 两套都保留 bemf_irq_armed 当"每步只认一次"的闸、下游时序完全一致
+ * （见 Mcu/g071/Src/stm32g0xx_it.c 里那段）。改回 0 即可无痛回退。 */
+#ifndef BEMF_ZC_USE_RINGBUF
+#define BEMF_ZC_USE_RINGBUF 1
+#endif
+
 #define ADC_ZC_RISE 1u    /* 上升过零：prev <= 0 < now */
 #define ADC_ZC_FALL 2u    /* 下降过零：prev >= 0 > now */
 
