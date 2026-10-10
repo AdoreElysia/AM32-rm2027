@@ -20,11 +20,17 @@
 
 #ifdef USE_ADC_BEMF
 
-/* ---- ADC 扫描结果（DMA 目标；上电初值取中点，避免未采样时乱跳） ---- */
-volatile uint16_t bemf_adc_va = 2048;
-volatile uint16_t bemf_adc_vb = 2048;
-volatile uint16_t bemf_adc_vc = 2048;
-volatile uint16_t bemf_adc_v0 = 2048;
+/* ---- ADC 扫描结果（DMA 目标；上电初值取中点，避免未采样时乱跳） ----
+ * ★ 2026-10-10 重排后只有两路与判据有关：
+ *   bemf_adc_vph = rank1 = 【当前悬空相】（通道由 changeCompInput 每次换相动态改写）
+ *   bemf_adc_v0  = rank2 = V0
+ *   另两相不再采样 —— 判据只用"悬空相 − V0"，它们没人读（原来是采了不用，
+ *   白占 40 拍采样窗口，而窗口正是 duty 下限的瓶颈）。 */
+volatile uint16_t bemf_adc_vph = 2048;
+volatile uint16_t bemf_adc_v0  = 2048;
+
+/* 由 ADC.c 提供：动态改写 ADC 序列的 rank1 通道 */
+extern void adc_set_first_rank(uint32_t channel);
 
 /* ---- 施密特滞回阈值（ADC 码，12 位） ----
  * 换算（按网表实算，别再套"47K∥10K"那个旧口径）：
@@ -91,30 +97,32 @@ void changeCompInput(void)
      *   把这一帧的边沿整个丢弃，就等于把"换相振铃"从过零判据里摘出去。 */
     bemf_blank = 1;
 
+    /* ★★★ 2026-10-10：把"新的悬空相"写到 ADC 序列的 rank1 ★★★
+     *   这样每帧采到的 ADCDataDMA[0] 就恒等于"当前悬空相"，rank2 恒为 V0
+     *   ⇒ 判据要的两路只占 2 档 40 拍（原来是 4 档 80 拍）
+     *   ⇒ 采样窗口的需求从 CCR4+80 降到 CCR4+40 ⇒ duty 下限从约 13% 降到约 9%。
+     *   映射与 comStep 一致：step 1/4 → C 悬空，2/5 → A 悬空，3/6 → B 悬空。 */
     if (step == 1 || step == 4) {
         active_phase = 2;
+        adc_set_first_rank(BEMF_ADC_PHASE_C_CH);
 
     } else if (step == 2 || step == 5) {
         active_phase = 0;
+        adc_set_first_rank(BEMF_ADC_PHASE_A_CH);
 
     } else if (step == 3 || step == 6) {
         active_phase = 1;
+        adc_set_first_rank(BEMF_ADC_PHASE_B_CH);
     }
 }
 
 int16_t adc_bemf_get_delta(void)
 {
-    int16_t vph;
-
-    switch (active_phase) {
-    case 0:  vph = (int16_t)bemf_adc_va; break;
-
-    case 1:  vph = (int16_t)bemf_adc_vb; break;
-
-    default: vph = (int16_t)bemf_adc_vc; break;
-    }
-
-    return (int16_t)(vph - (int16_t)bemf_adc_v0);
+    /* ★ 2026-10-10 重排后不再需要按 active_phase 选路：
+     *   rank1 已经被 changeCompInput() 动态设成"当前悬空相"，所以
+     *   ADCDataDMA[0] 就是它 ⇒ 直接相减即可（也省掉一次 switch 的开销，
+     *   这个函数跑在 24kHz 的中断里）。 */
+    return (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0);
 }
 
 /* ★ 2026-10-10 记录（A 相读不到的那一段已结案，别再从"软件绕过"这个方向想）：
