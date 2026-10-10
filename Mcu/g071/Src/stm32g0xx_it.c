@@ -343,7 +343,12 @@ void DMA1_Channel2_3_IRQHandler(void)
                 extern uint8_t  OL_WF_S[64];
                 extern uint8_t  ol_wf_idx, ol_wf_div;
                 /* step 已在包含的头里声明（非 volatile），不要在这里重复限定符 */
-                if (++ol_wf_div >= 8) {
+                /* ★★★ 2026-10-10 由 8 改成 64 —— 用户要求"把 ADC 采样的波形画出来" ★★★
+             *   原来每 8 帧记一点 = 3kHz 采样、64 点只覆盖 21ms；
+             *   而转子实测只有约 300 RPM ⇒ 电频率约 30Hz(周期 33ms)
+             *   ⇒ 21ms 连一个电周期都不到，画不出转子的形状。
+             *   改成每 64 帧一点 ⇒ 375Hz 采样、64 点覆盖 170ms ⇒ 可包住约 5 个电周期 ✓ */
+            if (++ol_wf_div >= 64) {
                     ol_wf_div = 0;
                     OL_WF_D[ol_wf_idx] = adc_bemf_get_delta();
                     OL_WF_T[ol_wf_idx] = (uint16_t)INTERVAL_TIMER->CNT;
