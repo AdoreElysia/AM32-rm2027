@@ -1033,6 +1033,27 @@ static void olStartupTick(void)
         }
         thiszctime = (uint16_t)commutation_interval;
         lastzctime = thiszctime;
+
+        /* ★★★ 2026-10-10 关键修复：交棒时把"六步环形缓冲"一并填上实测周期 ★★★
+         *   用户提问："为什么开环频率这么高能跟上且转速稳定，但一闭环频率就降低？"
+         *   —— 问对了。真相是【闭环自己把周期算错了】，不是电机跟不上：
+         *     · 开环时转子确实跟着 1818Hz 跑（ol_meas_ci = 1089 ≈ 命令 1100，±1%）；
+         *     · 但 commutation_interval 现在直接取自 commutation_intervals[] 的六步平均，
+         *       而那 6 个槽【只在闭环的 PeriodElapsedCallback 里写】——
+         *       开环期间那个函数不跑 ⇒ 交棒那一刻环里装的是【上一次运行的残留值】
+         *       （上一次因母线被拉塌、停在 OL_CI_FLOOR_DIV 附近 ≈13000）
+         *       ⇒ 六步平均立刻给出一个错约 9 倍的周期 ⇒ 闭环锁错 ⇒ 频率一交棒就掉。
+         *   ⇒ 交棒时把 6 个槽全部填成刚定下的周期（实测优先），闭环第一拍就是对的。
+         *   顺带把统计量 average_interval / last_average_interval 也对齐，
+         *   免得 ISR 里 average_interval < 50 那条捷径把窗口判据短路掉。 */
+        {
+            uint8_t k;
+            for (k = 0; k < 6u; k++) {
+                commutation_intervals[k] = (uint16_t)commutation_interval;
+            }
+            average_interval = commutation_interval;
+            last_average_interval = average_interval;
+        }
         if (!eepromBuffer.auto_advance) {
             advance = (uint16_t)((commutation_interval * temp_advance) >> 6);
         } else {
