@@ -2928,6 +2928,16 @@
 #define ADC_CAPTURE_MODE 1
 #endif
 #define ADC_CAP_POINTS   84        /* 每窗口点数（14 点/步 × 6 步） */
+/* ★ 抓哪两路（rank1 → 数据第 0 列；rank2 → 数据第 1 列）★
+ *   改这两个宏就能换通道，不用动其它代码。
+ *   常用：BEMF_ADC_NEUTRAL_CH=V0(PA3) / BEMF_ADC_PHASE_B_CH=VB(PA4)
+ *         BEMF_ADC_PHASE_A_CH=VA(PA5) / BEMF_ADC_PHASE_C_CH=VC(PA2)      */
+#ifndef ADC_CAP_CH1
+#define ADC_CAP_CH1  BEMF_ADC_NEUTRAL_CH    /* 第 0 列 = V0 (PA3) */
+#endif
+#ifndef ADC_CAP_CH2
+#define ADC_CAP_CH2  BEMF_ADC_PHASE_B_CH    /* 第 1 列 = VB (PA4) */
+#endif
 #ifndef ADC_CAP_BAUD
 #define ADC_CAP_BAUD     1000000   /* 1 Mbaud */
 #endif
