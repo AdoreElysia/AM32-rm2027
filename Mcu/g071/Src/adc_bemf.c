@@ -102,12 +102,57 @@ void changeCompInput(void)
     }
 }
 
+/* ★★★ 2026-10-10：A 相采样脚 PA5 已损坏 ⇒ 改用虚拟中性点反推 A 相电压 ★★★
+ *
+ * 【故障实测，三条独立证据】
+ *   ① 把 PA5 配成数字输出并驱高：同一个寄存器快照里 MODER=输出、ODR=高，而 IDR=0、
+ *      ADC 仍只读 16 码。同一测试对 PA4 做 → 读到 4063 码（满量程），
+ *      ⇒ 整条 引脚→ADC→DMA→缓冲 链路正常，是 PA5 自己拉不上去。
+ *   ② 把 PA5 配成"数字输入 + 内部上拉"（≈40kΩ，与节点对地 3.7kΩ 分压 ⇒ 应读 ~350 码）：
+ *      PA5 仍只有 4 码；同一测试 PA4 读到 351 码 ⇒ PA5 的 ADC 输入也失效。
+ *   ③ 用户万用表实测 VA_SENSE 节点对地 4.67 kΩ（= R12 的值），无短路、无低阻通路
+ *      ⇒ 板级分压网络是好的，故障在芯片内部（PA5 焊盘损毁）。
+ *   旁证：本板在 A 相引脚上已有前科 —— targets.h 记着原理图把 A 相下管画在 PB15、
+ *   实物其实是 PB1。
+ *
+ * 【为什么能绕过去：数学上 A 相电压可以从另外三路精确反推】
+ *   V0 是三个 10K 电阻的星形中点，除 PA3（高阻 ADC 输入）外不接任何负载
+ *   ⇒ 中点电流守恒：(VA−V0)/10K + (VB−V0)/10K + (VC−V0)/10K = 0
+ *   ⇒ **V0 = (VA + VB + VC) / 3**（精确成立，与各相电压无关）
+ *   ⇒ **VA = 3·V0 − VB − VC**，而 VB/VC/V0 三路采样都是好的。
+ *   ⇒ A 相悬空时的判据量：VA − V0 = 2·V0 − VB − VC
+ *
+ * 【精度】误差只有两项：10K 电阻容差（1% 级 ⇒ 约 3 码）和 ADC 量化（约 4 码）。
+ *   而交棒转速下 BEMF 幅值实测 ±30~60 码（见 OL_TRACE_D 的接受记录）⇒ 仍有 5~10 倍余量。
+ *
+ * ⚠ 这是【绕过硬件故障】的权宜之计：硬件把 VA_SENSE 修好/改接到好脚之后，
+ *   把 USE_BEMF_VA_RECONSTRUCT 置 0 即恢复直接读 PA5。 */
+#ifndef USE_BEMF_VA_RECONSTRUCT
+#define USE_BEMF_VA_RECONSTRUCT 1
+#endif
+#if USE_BEMF_VA_RECONSTRUCT
+static uint16_t bemf_va_from_neutral(void)
+{
+    /* VA = 3·V0 − VB − VC（int32 中间量，避免 uint16 下溢）*/
+    int32_t v = 3 * (int32_t)bemf_adc_v0 - (int32_t)bemf_adc_vb - (int32_t)bemf_adc_vc;
+    if (v < 0)    { v = 0; }
+    if (v > 4095) { v = 4095; }
+    return (uint16_t)v;
+}
+#endif
+
 int16_t adc_bemf_get_delta(void)
 {
     int16_t vph;
 
     switch (active_phase) {
-    case 0:  vph = (int16_t)bemf_adc_va; break;
+    case 0:
+#if USE_BEMF_VA_RECONSTRUCT
+        vph = (int16_t)bemf_va_from_neutral();   /* PA5 坏了 ⇒ 从 V0/VB/VC 反推 */
+#else
+        vph = (int16_t)bemf_adc_va;
+#endif
+        break;
 
     case 1:  vph = (int16_t)bemf_adc_vb; break;
 
