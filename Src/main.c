@@ -736,6 +736,48 @@ void ol_startup_zc_inc(void)
     }
 }
 
+/* ★★★ 2026-10-10 开环期间的"转子周期"实测 —— 用户猜想 1 的修法 ★★★
+ *   用户原话："有没有可能是开环切换到闭环的时候闭环没有数据所以导致切换的时候跟不上"。
+ *   —— 对。原来交棒是把【命令值】硬塞给闭环：
+ *        commutation_interval = ol_step_div_cur * 100;
+ *      而开环期间闭环的测量/滤波链（interruptRoutine / PeriodElapsedCallback）是停着的
+ *      ⇒ average_interval、commutation_intervals[] 全是陈旧值
+ *      ⇒ 切过去的头几步没有历史，必然晃一阵才能收敛。
+ *   改法：开环期间让"测量"一直跑（只测不换相）——累计【过零到过零】的真实间隔。
+ *      反电势过零是跟着【转子】走的，所以量到的就是转子真实周期；
+ *      ★ 如果它和命令值不一致，那本身就是"开环滑步"的直接证据。
+ *   交棒时优先用实测值当初值 ⇒ 切过去即与转子同步，不用再收敛。 */
+volatile uint16_t ol_meas_ci    = 0;    /* 实测转子周期（0.5µs 拍）；0 = 尚未量到 */
+volatile uint16_t ol_meas_used  = 0;    /* 观测：本次交棒实际用了多少（0 = 退回命令值）*/
+static   uint32_t ol_meas_sum   = 0;
+static   uint16_t ol_meas_n     = 0;
+volatile uint16_t ol_cross_prev = 0;    /* 上一次过零落在当前步内的位置 */
+
+/* 由 ISR 在每个"被接受的过零"处调用（开环期间）。
+ * 定时器在每次换相时被 olStartupTick 清 0 ⇒
+ *   本步周期 = ol_step_div_cur*100；间隔 = (本步周期 − 上次过零位置) + 本次位置。 */
+void ol_meas_cross(uint16_t cnt)
+{
+    uint32_t step = (uint32_t)ol_step_div_cur * 100u;
+    uint32_t iv;
+
+    if (cnt >= step) {          /* 位置超过一步 ⇒ 数据不可信，丢弃 */
+        return;
+    }
+    iv = step - (uint32_t)ol_cross_prev + (uint32_t)cnt;
+    ol_cross_prev = cnt;
+
+    if (iv > 65535u) {          /* 超过 uint16 能表示的范围 ⇒ 丢弃 */
+        return;
+    }
+    ol_meas_sum += iv;
+    if (++ol_meas_n >= 8u) {    /* 8 次平均，够稳又够快 */
+        ol_meas_ci = (uint16_t)(ol_meas_sum / (uint32_t)ol_meas_n);
+        ol_meas_sum = 0;
+        ol_meas_n   = 0;
+    }
+}
+
 /* 由主循环每轮调用（与 olStepTick 同层）。返回时若已交棒，ol_startup_arm 已清 0。 */
 static void olStartupTick(void)
 {
@@ -902,7 +944,23 @@ static void olStartupTick(void)
          *     commutation_interval = (ci + (lastzctime+thiszctime)/2)/2 也是在
          *     朝"整步"收敛。原先这里写成 commutation_interval >> 1 是错的：
          *     它会让 ci 一次性被砍掉 25%，等于凭空命令电机加速 1/3 ⇒ 起步就丢步。 */
-        commutation_interval = (uint32_t)ol_step_div_cur * 100;
+        /* ★★★ 2026-10-10：优先用【开环期间实测到的转子周期】做初值 ★★★
+         *   原来一律用命令值 ol_step_div_cur*100。若开环时转子其实没完全跟上
+         *   （滑步），命令值 ≠ 真实周期 ⇒ 切过去的瞬间就错，得靠滤波慢慢收敛。
+         *   实测值来自 ol_meas_cross()（开环期间"只测不换相"累计的过零间隔）
+         *   ⇒ 天然与转子同步 ⇒ 切过去即吻合，不再有"头几步跟丢"。
+         *   合理性检查：只接受命令值 0.5~2 倍之间的结果，避免把噪声当周期。 */
+        {
+            uint32_t cmd_ci = (uint32_t)ol_step_div_cur * 100u;
+            uint16_t m = ol_meas_ci;
+            if (m != 0 && (uint32_t)m >= (cmd_ci >> 1) && (uint32_t)m <= (cmd_ci << 1)) {
+                commutation_interval = (uint32_t)m;   /* 用实测（跟随转子）*/
+                ol_meas_used = m;
+            } else {
+                commutation_interval = cmd_ci;        /* 退回命令值 */
+                ol_meas_used = 0;
+            }
+        }
         thiszctime = (uint16_t)commutation_interval;
         lastzctime = thiszctime;
         if (!eepromBuffer.auto_advance) {

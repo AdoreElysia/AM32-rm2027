@@ -456,7 +456,14 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *     （那里还能顺便用"跨越必须落在本步中间段"的时间窗滤掉振铃，
                  *     比这里靠 average_interval 的门槛更可靠）。 */
                 extern volatile uint8_t ol_startup_arm;
+                extern void ol_meas_cross(uint16_t cnt);
                 if (ol_startup_arm) {
+                    /* ★ 2026-10-10：开环期间【只测不换相】——把每个被接受的过零
+                     *   交给 main.c 的 ol_meas_cross() 累计"过零到过零"的真实间隔
+                     *   （= 转子周期，因为反电势过零跟着转子走）。
+                     *   交棒时用这个实测值做闭环初值 ⇒ 不再"切过去没数据、跟不上"。
+                     *   这里仍然不调 interruptRoutine()：换相仍由开环链独占。 */
+                    ol_meas_cross((zc_cnt > 0xFFFFu) ? (uint16_t)0xFFFFu : (uint16_t)zc_cnt);
                     bemf_irq_armed = 1;
                 } else {
                     interruptRoutine();
