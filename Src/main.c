@@ -615,7 +615,7 @@ uint32_t ol_freq_tgt_q = 0;      /* 斜坡终点频率 x 256 */
  *   转子能否跟上，看恒速段的 ol_meas_ci 偏差即可（±1% = 跟得很好）。
  *   ⚠ 顶端转速仍保持 OL_STEP_DIV=11（3030RPM）不变 —— 实测恒速段的稳定性随转速升高而变好：
  *     3030RPM 偏差仅 ±1%，而 303RPM 那版是 ±5%（低速齿槽力矩占比大）。 */
-uint16_t ol_freq_slope = 1800;   /* 旧：恒定斜率升频的斜率 Hz/s —— 已不用（见 OL_RAMP_UP_Q）*/
+uint16_t ol_freq_slope = 554;    /* * 归档版(开环-线性升频-可用)的值：1800 -> 554 */
 
 /* ★★★ 2026-10-11 斜坡形态改成【指数升频】= 前缓后陡 ★★★
  *   用户要求："起步阶段改成曲线增速，前缓后陡，只是别太陡"。
@@ -1041,11 +1041,15 @@ static void olStartupTick(void)
             commutate();
             ol_zc_reseed = 1;   /* ★ 换相后"重新取样"：避免切换悬空相造成的假跳变被当成过零 */
             ol_steps++;
-            /* ★★ 指数升频（前缓后陡）—— 见 OL_RAMP_UP_Q 的说明 ★★
-             *   旧式 ol_freq_q += K/ol_freq_q 积分出 f ∝ √n = 前陡后缓，形态是反的。
-             *   现在每次换相乘 (1 + OL_RAMP_UP_Q/256) ⇒ f ∝ (1+r)ⁿ。 */
+            /* ★★★ 2026-10-11 切回【斜线（线性升频）】形态 —— 用户要求 ★★★
+             *   df = slope x dt / f，定点（f_q = f x 256）：
+             *       ol_freq_q += (ol_freq_slope x 65536) / ol_freq_q;
+             *   积分出 f ∝ √n。实测形态（slope=554）：
+             *     第 1 步 250ms（4.0 步/秒）→ 第 2 步直接跳到 142.5 步/秒（7ms/步）
+             *     → 之后近似线性爬升 → 第 2965 步 / 3.27 秒 到 1818 步/秒。
+             *   （指数版 OL_RAMP_UP_Q 的定义保留但不再使用。） */
             if (ol_freq_q < ol_freq_tgt_q) {
-                ol_freq_q += (ol_freq_q * (uint32_t)OL_RAMP_UP_Q) >> 8;
+                ol_freq_q += ((uint32_t)ol_freq_slope * 65536UL) / ol_freq_q;
                 if (ol_freq_q <= 0UL) { ol_freq_q = 1UL; }   /* 防 0 起步卡死 */
                 if (ol_freq_q >= ol_freq_tgt_q) {
                     ol_freq_q = ol_freq_tgt_q;
@@ -3216,7 +3220,14 @@ int main(void)
                                               * 唯一与之前"母线稳 12V"那批会话不同的、行为性的
                                               * 改动就是这一行 ⇒ 先撤回到 0，把变量逐个排除。
                                               * （闭环要用时再加回 350 并单独验证。）*/
-    startup_max_duty_cycle = 400;
+    /* ★★★ 2026-10-11 上限 400 -> 700（用户要求"提高开环占空比"）★★★
+     *   这一句是【起步期占空比的硬上限】：main.c:2338 会
+     *       if (duty_cycle_setpoint > startup_max_duty_cycle) duty_cycle_setpoint = ...;
+     *   所以把 OL_INPUT_START/RUN 从 400 提到 600 也没用 —— 实测占空比正好卡在 400。
+     *   改成 700：输入 600 ⇒ 占空比约 553（≈ 原来 351 的 1.6 倍），
+     *   目的是让低频段（反电势≈0）有足够电压把转子带起来。
+     *   安全网仍在：过流 OL_TRIP_CURRENT=8A、总时长 8.0s。 */
+    startup_max_duty_cycle = 700;
     tim1_arr = TIMER1_MAX_ARR;
 #if RM2027_OL_ARM_ONLY
     old_routine = 1;                         /* 开环独占版：换相由 olStepTick 独占 */
