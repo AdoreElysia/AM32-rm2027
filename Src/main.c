@@ -671,6 +671,22 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
 #ifndef OL_VERIFY_WIN
 #define OL_VERIFY_WIN       2000   /* 校验窗口：20kHz 拍 ⇒ 2000 = 100ms */
 #endif
+/* ★★★ 2026-10-10 新增：斜坡跑到底后先【恒速热身】多久才开始验证交棒 ★★★
+ *   用户指出："你开环压根没到匀速转的时候"。
+ *   实测：斜坡(4000→110 拍、斜率 554Hz/s)只要 0.32 秒就走完，而验证窗一达标
+ *   （3×100ms）立刻就交棒 ⇒ 开环全程约 0.5 秒，电机【从没在恒定转速上稳过】。
+ *   TI SPRABZ3 的原话同样是 "the motor will gradually speed up and finally
+ *   **run at a constant speed** in open loop commutation mode" —— 恒速段不是可选项：
+ *     ① 转子稳下来（不在加速中途）⇒ 反电势波形干净；
+ *     ② ol_meas_cross() 的"8 次平均实测周期"才有机会填满【恒速样本】
+ *        （斜坡里步长动辄 200ms，8 个样本根本凑不齐 ⇒ 实测值可能是陈旧/中途值）；
+ *     ③ 交棒才是"从恒速切到闭环"，而不是"在加速中途硬切"。
+ *   取 30000 拍 = 1.5 秒：足够让 8 样本平均（每步 5.5ms ⇒ 8 步仅 44ms）反复刷新，
+ *   也足够转子速度稳定；总开环 ≈ 0.2(对齐)+0.32(斜坡)+1.5(热身)+0.3(验证) ≈ 2.3 秒，
+ *   远低于 8 秒的时长上限。 */
+#ifndef OL_SOAK_TICKS
+#define OL_SOAK_TICKS       30000
+#endif
 #ifndef OL_VERIFY_OK_NEED
 #define OL_VERIFY_OK_NEED   3      /* 连续多少个合格窗口才交棒 ⇒ 3 = 300ms */
 #endif
@@ -719,6 +735,7 @@ volatile uint8_t  ol_zc_inwin = 0;     /* 观测：本拍的跨越是否落在"�
 volatile uint8_t  ol_stage_show = 0;   /* 观测：起步阶段 0=对齐 1=斜坡 */
 static uint8_t    ol_zc_reseed = 0;    /* 换相后重新取样标志（见下面判过零处） */
 static uint16_t   ol_verify_ticks = 0; /* 验证段：本窗口已过拍数 */
+static uint32_t   ol_soak_ticks   = 0; /* ★ 恒速热身段已过拍数（见 OL_SOAK_TICKS）*/
 static uint16_t   ol_verify_ok    = 0; /* 验证段：连续合格窗口数 */
 volatile uint16_t ol_verify_last = 0;  /* 观测：上一窗口认到的过零数 */
 volatile uint16_t ol_verify_ok_show = 0;/* 观测：当前连续合格窗口数 */
@@ -917,7 +934,17 @@ static void olStartupTick(void)
     /* ---- 交棒前先"验证"：开环继续驱动，只在旁边核对闭环认到的过零速率 ---- */
     ol_verify_ok_show = ol_verify_ok;
     if (ol_step_div_cur <= OL_STEP_DIV) {
-        if (++ol_verify_ticks >= OL_VERIFY_WIN) {
+        /* ★★★ 2026-10-10 先恒速热身 OL_SOAK_TICKS 拍，再开始验证计数 ★★★
+         *   用户指出："你开环压根没到匀速转的时候"。原来斜坡一跑到底、验证窗一达标
+         *   （3×100ms）就交棒 ⇒ 开环全程约 0.5 秒，电机从没在恒定转速上稳过
+         *   ⇒ 交棒等于"在加速中途硬切"。TI SPRABZ3 也明确要求开环先
+         *   "run at a constant speed" 再切闭环。
+         *   而且这一步是实测周期能用的前提：ol_meas_cross() 的 8 次平均需要【恒速样本】，
+         *   斜坡里步长动辄 200ms，样本根本凑不齐。
+         *   热身期间一切照旧（开环驱动 + 只测不换相的过零测量），只是不数验证窗。 */
+        if (ol_soak_ticks < OL_SOAK_TICKS) {
+            ol_soak_ticks++;              /* 恒速热身中：只跑、不判 */
+        } else if (++ol_verify_ticks >= OL_VERIFY_WIN) {
             uint16_t expect = (uint16_t)(OL_VERIFY_WIN / OL_STEP_DIV);
             ol_verify_ticks = 0;
             if (ol_startup_zc >= (uint16_t)(expect - (expect / 3))) {
