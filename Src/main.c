@@ -673,7 +673,7 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
  *   置 0 ⇒ 恢复"验证过再交棒"的正常行为。
  *   ⚠ 这是实验开关，不是产品行为 —— 实验做完必须改回 0 再谈后续。 */
 #ifndef OL_HOLD_OPENLOOP
-#define OL_HOLD_OPENLOOP    1
+#define OL_HOLD_OPENLOOP    0   /* 0 = 正常行为：斜坡跑到底 → 验证窗核对 → 交棒给闭环 */
 #endif
 #if OL_HOLD_OPENLOOP
 /* 实验模式不交棒 ⇒ 时长上限用 160000 拍 = 8.0 秒（用户要求"时间别太长"）。
