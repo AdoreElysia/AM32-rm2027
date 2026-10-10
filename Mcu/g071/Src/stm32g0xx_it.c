@@ -418,7 +418,18 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *     真的穿过了零点"。 */
                 extern volatile uint16_t waitTime;             /* 定义在 Src/main.c */
                 extern volatile uint32_t commutation_interval; /* 定义在 Src/main.c */
-                uint32_t zc_lo = (uint32_t)waitTime + ((uint32_t)commutation_interval >> 4);
+                /* ★★★ 2026-10-10 下界从"与 CI 成正比"改成【固定小常数】—— 治自锁 ★★★
+                 *   实测（接受环/拒绝环）：
+                 *     · 真转子周期 meas_ci = 1100（开环实测）⇒ 转子真在发 1818 个过零/秒；
+                 *     · 闭环 CI 却漂到 ~8500 ⇒ 按 1/8 速度换相 ⇒ 剧烈抖动；
+                 *     · 拒绝环里被拒的 CNT ≈ 900~1070 —— 正是【真过零】的位置！
+                 *   原因：原下界 zc_lo = waitTime + CI>>4 ≈ 0.5625×CI 与 CI 成正比，
+                 *   而 CI 来自"被接受的过零" ⇒ CI 一旦偏大，下界就高到把所有真过零
+                 *   判成"太早"拒掉 ⇒ 拒掉后计时器不重置 ⇒ 下次接受的间隔更长 ⇒ CI 再涨
+                 *   ⇒ 自锁（实测 0.8 秒内 CI 从 1204 飙到 9358）。
+                 *   修法：下界改成固定 OL_ZC_MIN_TICKS(150 拍 = 75µs)，只挡换相振铃
+                 *   （实测 33~73µs），不再随 CI 变化 ⇒ 自锁结构被拆掉。 */
+                uint32_t zc_lo = (uint32_t)OL_ZC_MIN_TICKS;
                 if ((average_interval < 50) || (zc_cnt > zc_lo)) {
                 /* 边沿已经在"读的时候"清掉了（见上），这里只把过零【发生】的时刻
                  * 交给 interruptRoutine()：它必须用 bemf_zc_time，不能用
