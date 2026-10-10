@@ -930,8 +930,18 @@ static void olStartupTick(void)
             /* 只认"落在本步中间段"的跨越：真过零在换相后约半个步长处，
              * 振铃紧跟在换相之后 ⇒ 用时间窗把两者分开（与幅度无关，最可靠）。 */
             uint32_t cnt = INTERVAL_TIMER_COUNT;
-            uint8_t inwin = (cnt > (commutation_interval >> 2))
-                         && (cnt < (commutation_interval - (commutation_interval >> 2)));
+            /* ★★★ 2026-10-10 窗口上界从 3/4 步放开到 整步 ★★★
+             *   实测（恒速段、3030RPM、路径B 的 ol_meas_ci 偏差仅 ±1%，说明过零确实存在）：
+             *   路径A 每 100ms 窗口只数到 0~5 次（交棒需要 ≥121）⇒ 交棒永不成立
+             *   ⇒ 8 秒上限到、电调重启（数据里 arm 全程 1、div 在 8.5s 跳回 5000）。
+             *   根因：路径A 的时间窗原为 [ci/4, 3ci/4]（0.25~0.75 步），
+             *   而实测真过零落在 **0.75~0.9 步** —— 恰好被上界挡在外面。
+             *   ★ 这在物理上是应该的：开环时转子必然滞后于磁场，过零就比"半步"晚；
+             *     TI 那条"过零在换相后 30°(半步)"的前提是【已对齐的闭环】。
+             *     窗口卡 3/4 上界等于要求"先闭环对齐才准交棒" ⇒ 死锁。
+             *   下界仍留 1/8 步：避开换相后紧跟的振铃（那一段另有 ol_zc_reseed + 3 帧屏蔽）。 */
+            uint8_t inwin = (cnt > (commutation_interval >> 3))
+                         && (cnt < commutation_interval);
             ol_zc_inwin = inwin;
             if (ol_zc_reseed) {
                 /* 刚换相：悬空相变了，delta 会跳变 ⇒ 只把基准电平对齐到新值，不计数 */
