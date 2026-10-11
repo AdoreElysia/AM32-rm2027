@@ -295,12 +295,22 @@ uint32_t MAXIMUM_RPM_SPEED_CONTROL = 10000;
 uint32_t MINIMUM_RPM_SPEED_CONTROL = 1000;
 
 // assign speed control PID values values are x10000
+/* ★★★ 2026-10-11 速度环参数（"改全"的一部分）★★★
+ *   这段是外环：参考 = 油门映射出的目标换相周期，实际 = e_com_time，
+ *   PID 输出累加进 input_override（占空比），见 main.c 的
+ *       input_override += doPidCalculations(&speedPid, e_com_time, target_e_com_time);
+ *   注意它是【累加】形式 ⇒ Kp 本身起的就是积分作用（Ki 保持 0 是对的）。
+ *   改动：
+ *     · Kd 100 -> 0：误差是带噪的 µs 量，微分没有收益、只会把抖动注入占空比。
+ *     · output_limit 50000 -> 3000：每次调用最多改 0.3 个油门刻度
+ *       （3000/10000）⇒ 主循环约 17kHz ⇒ 满量程约 0.4 秒 ⇒ 够快也不振荡。
+ *       （原来 50000 折算每次 5 个刻度 ⇒ 满量程 20ms ⇒ 太猛、易振荡。） */
 fastPID speedPid = { // commutation speed loop time
     .Kp = 10,
     .Ki = 0,
-    .Kd = 100,
+    .Kd = 0,
     .integral_limit = 10000,
-    .output_limit = 50000
+    .output_limit = 3000
 };
 
 fastPID currentPid = { // 1khz loop time
@@ -1194,6 +1204,16 @@ static void olStartupTick(void)
     if (ol_startup_arm && !OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         old_routine = 0;
+        /* ★★★ 2026-10-11 交棒时给速度环一个干净的起点 ★★★
+         *   input_override 是速度环的工作变量（单位 = 油门 x10000），而它全流程
+         *   没有"用当前油门初始化"的地方 ⇒ 不初始化的话速度环从 0 爬起、交棒瞬间
+         *   占空比会先掉下去。这里用交棒时刻的实际油门给它赋初值 ⇒ 交棒平滑。
+         *   同时清掉 PID 的历史（integral/last_error/error）⇒ 不把开环段的陈旧误差
+         *   带进闭环造成第一下猛冲。 */
+        input_override = (int32_t)adjusted_input * 10000;
+        speedPid.integral   = 0;
+        speedPid.last_error = 0;
+        speedPid.error      = 0;
         /* ★ 交棒这一刻【武装】闭环波形捕获：阈值 = 交棒实测步长的 2 倍。
          *   实测交棒的 16ms 窗口内一切正常 ⇒ 改由"ci 涨到 2 倍"来触发冻结，
          *   窗口才罩得住塌陷本身（见 adc_zc.h 的说明）。 */
@@ -2697,7 +2717,14 @@ void tenKhzRoutine()
                     stall_protection_adjust = 0;
                 }
             }
-            if (use_speed_control_loop && running) {
+            /* ★★★ 2026-10-11 三个守卫，缺一不可 ★★★
+             *   ① !ol_startup_arm —— 开环斜坡/交棒期间不许速度环插手（否则和固定时基打架）
+             *   ② target 合理性闸 —— target_e_com_time 若为 0 或离谱（映射没生效/EEPROM 垃圾），
+             *      PID 误差会恒为正 ⇒ input_override 一路顶到最大 ⇒ 满油门飞车。这里限死
+             *      200~60000µs（5000 ~ 16.7 步/秒）之外一律不调。
+             *   ③ running —— 原就有 */
+            if (use_speed_control_loop && running && !ol_startup_arm &&
+                target_e_com_time >= 200 && target_e_com_time <= 60000) {
                 input_override += doPidCalculations(&speedPid, e_com_time, target_e_com_time);
                 if (input_override > 2047 * 10000) {
                     input_override = 2047 * 10000;
@@ -3223,6 +3250,27 @@ int main(void)
      *   需把这两项写进 EEPROM（写之前先确认 rc_car_reverse 非 0，见下条）。 */
     eepromBuffer.motor_kv = 114;
     eepromBuffer.motor_poles = 12;
+    /* ★★★ 2026-10-11 接通"外环速度环"（缺的就是这一环）★★★
+     *   背景：实测闭环后转子稳定在 ~385 步/秒（波形自身周期就是 2.62ms ⇒ 是转子真的慢，
+     *   不是判据漏检；判据 8/8 全中、相位 0.51 步理想、占空比恒定）。而开环靠固定时基
+     *   硬拖能到 1000 步/秒 ⇒ 说明"占空比固定"时转子只能停在那个电压支撑得起的转速上。
+     *   业界结构（MATLAB/Microchip）：
+     *       外环 PI 速度环 → 占空比给定 ；过零 → +30° → 六步换相
+     *   而 AM32 本来就有这个外环（speedPid + target_e_com_time）⇒ 只需接通：
+     *     · drive_by_rpm = 1 会自动把 use_speed_control_loop 置 1（见 receiveDshotDma 处）
+     *     · MIN/MAXIMUM_RPM_SPEED_CONTROL 决定"油门 → 目标转速"的映射：
+     *         target_e_com_time = 60000000 / map(input,47,2047,MIN,MAX) / (poles/2)
+     *       单位核对过：e_com_time = 6 个换相步(µs) = 一个电周期(µs)，与 target 同量纲 ✓
+     *     · 台架油门约 400 ⇒ (400-47)/2000 = 17.6% ⇒ 要让工作点落在 1667 机械 RPM
+     *       （= 开环的终速，在齿槽门槛 900RPM 之上）：
+     *         800 + 0.176 x (5700-800) ≈ 1665 ⇒ 取 MIN=800 / MAX=5700 ✓ */
+    drive_by_rpm = 1;
+    /* ★ 注意顺序：main() 里第 3159 行有 `if (drive_by_rpm) use_speed_control_loop = 1;`
+     *   而它在本行【之前】执行 ⇒ 只靠 drive_by_rpm 拉不起来 ⇒ 这里再显式置一次，
+     *   不依赖执行顺序。 */
+    use_speed_control_loop = 1;
+    MINIMUM_RPM_SPEED_CONTROL  = 800;
+    MAXIMUM_RPM_SPEED_CONTROL  = 5700;
     /* ---- 堵直通隐患：temp_comp_pwm 非 0 时 phaseXPWM() 会把低边栅极常开
      *   （Mcu/g071/Src/phaseouts.c:139 的 else 分支），与高边斩波叠加就是半桥直通。
      *   擦除态 eepromBuffer.comp_pwm = 0xFF（非 0），目前只靠 rc_car_reverse 那条路径
