@@ -484,7 +484,10 @@ volatile uint16_t adc_frame_cnt;      /* 24kHz ADC 帧计数（ISR 自增）*/
  *   ⚠ 风险（本分支实测）：超前角过大转矩变差 —— 提前约 12 度时曾实测转速
  *     从 2222 塌到 390。扫的时候要盯"转速是否反而下降"。
  *   默认 84（= 1 帧，即之前那一版）。 */
-volatile uint16_t bemf_zc_lead_ticks = 84;
+/* ★ 实测定值：扫过 0/84/168/336 拍 ⇒ 前移越多转速越低（168/336 拍时稳态
+ *   只剩 643 转/分，而 0 拍时稳态中位 1.000ms）。原因是前移 = 换相提前 =
+ *   相位超前 ⇒ 转矩下降。所以定为 0（不前移）。 */
+volatile uint16_t bemf_zc_lead_ticks = 0;
 static   uint16_t ccm_last_frame;     /* 上一次换相时的帧计数 */
 volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔：真实换相间隔（帧，41.67us/帧）*/
 volatile uint8_t  ccm_step[CCM_N];
