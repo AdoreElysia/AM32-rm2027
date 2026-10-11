@@ -110,61 +110,57 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt)
     return ADC_ZC_FALL;
 }
 
-/* ================= 闭环波形捕获（见 adc_zc.h 顶部说明） ================= */
-
-volatile int16_t  zcw_vph[ZCW_N] = { 0 };
-volatile int16_t  zcw_v0[ZCW_N]  = { 0 };
-volatile uint8_t  zcw_step[ZCW_N] = { 0 };
-volatile uint8_t  zcw_zc[ZCW_N]  = { 0 };
-volatile uint16_t zcw_duty[ZCW_N] = { 0 };
-volatile uint8_t  zcw_fwd[ZCW_N]   = { 0 };
-volatile uint8_t  zcw_brake[ZCW_N] = { 0 };
-volatile uint16_t zcw_ain[ZCW_N]   = { 0 };
+/* ================= 闭环波形捕获（多窗口版） =================
+ * 用户要求"窗口采样，多采几个" ⇒ 连续采 ZCW_WIN(4) 个窗口，
+ * 每样本压到 4 字节（delta i16 + step u8 + zc u8）才装得下。
+ *
+ * 时序：交棒时 arm() ⇒ 进入"滚动"状态（只在第 0 窗口内环形滚动，记录触发前 10.7ms）
+ *       触发（ci 涨过阈值）⇒ 记下 trig_idx、写指针跳到第 1 窗口
+ *       ⇒ 之后线性填满第 1~3 窗口 ⇒ 冻结
+ * ⇒ 冻结后 = 【触发前 10.7ms】 + 【触发后 32ms】 = 42.7ms 连续波形。
+ * （第 0 窗口是环形滚动的 ⇒ dump 时要用 trig_idx 旋转还原，见 zcw-dump.py） */
+volatile int16_t  zcw_d[ZCW_WIN * ZCW_N]    = { 0 };
+volatile uint8_t  zcw_step[ZCW_WIN * ZCW_N] = { 0 };
+volatile uint8_t  zcw_zc[ZCW_WIN * ZCW_N]   = { 0 };
 volatile uint16_t zcw_idx      = 0;
-volatile uint8_t  zcw_state    = 0;   /* 0=空转 1=已触发 2=冻结 */
+volatile uint8_t  zcw_win      = 0;
+volatile uint8_t  zcw_state    = 0;   /* 0=滚动(未触发) 1=触发后填充 2=冻结 */
 volatile uint16_t zcw_trig_idx = 0;
 volatile uint32_t zcw_n_trig   = 0;
-static uint16_t   zcw_stop_at  = 0;
-volatile uint32_t zcw_ci_trig  = 0;   /* ci 超过它就触发冻结（0=未武装）*/
+volatile uint32_t zcw_ci_trig  = 0;
 
-void adc_zc_wave_push(int16_t vph, int16_t v0, uint16_t duty, uint8_t step, uint8_t zc_kind,
-                      uint8_t fwd, uint8_t brake, uint16_t ain)
-{
-    /* ★ 已冻结 ⇒ 立刻返回，绝不能再写 ★
-     *   上一版漏了这一句：state 到 2 之后仍在写，缓冲被后续空转数据一路覆盖
-     *   ⇒ dump 出来只剩噪声。实测线索：冻结后两次读 zcw_idx 分别是 1024 和 134，
-     *   还在涨 —— 冻结态下 index 不该动，这本身就说明在写。 */
-    if (zcw_state == 2u) {
-        return;
-    }
-
-    zcw_vph[zcw_idx]  = vph;
-    zcw_v0[zcw_idx]   = v0;
-    zcw_step[zcw_idx] = step;
-    zcw_zc[zcw_idx]   = zc_kind;
-    zcw_duty[zcw_idx] = duty;
-    zcw_fwd[zcw_idx]   = fwd;
-    zcw_brake[zcw_idx] = brake;
-    zcw_ain[zcw_idx]   = ain;
-    zcw_idx = (uint16_t)((zcw_idx + 1u) % ZCW_N);
-
-    if (zcw_state == 1u && zcw_idx == zcw_stop_at) {
-        zcw_state = 2u;          /* 填够触发后 ZCW_POST 个点 ⇒ 冻结 */
-    }
-}
-
-/* 交棒那一刻调用：武装"ci 外扩触发"，并让缓冲从此刻起空转（state=0 仍会写） */
 void adc_zc_wave_arm(uint32_t ci_trig)
 {
     zcw_ci_trig = ci_trig;
-    zcw_state   = 0u;      /* 空转：缓冲继续滚，等 ci 涨上去才冻结 */
+    zcw_state   = 0;      /* 滚动：只在第 0 窗口环形记录 */
+    zcw_idx     = 0;
+    zcw_win     = 0;
 }
 
-/* 触发冻结（交棒处已不再直接调用；现在由 ISR 在 ci 超阈值时调） */
+/* 触发：由 ISR 在"已武装且 ci 超阈值"时调用 */
 void adc_zc_wave_trigger(void)
 {
-    zcw_trig_idx = zcw_idx;
-    zcw_stop_at  = (uint16_t)((zcw_idx + ZCW_POST) % ZCW_N);
+    if (zcw_state != 0u) { return; }      /* 只触发一次 */
+    zcw_trig_idx = zcw_idx;               /* 记下触发点在滚动环里的位置 */
+    zcw_idx      = ZCW_N;                 /* 写指针跳到第 1 窗口，之后线性填 */
     zcw_state    = 1u;
     zcw_n_trig++;
+}
+
+void adc_zc_wave_push(int16_t delta, uint8_t step, uint8_t zc_kind)
+{
+    if (zcw_state == 2u) { return; }      /* 冻结 */
+    zcw_d[zcw_idx]    = delta;
+    zcw_step[zcw_idx] = step;
+    zcw_zc[zcw_idx]   = zc_kind;
+    if (zcw_state == 0u) {
+        zcw_idx = (uint16_t)((zcw_idx + 1u) % ZCW_N);   /* 滚动 */
+    } else {
+        zcw_idx++;
+        zcw_win = (uint8_t)(zcw_idx / ZCW_N);
+        if (zcw_idx >= ZCW_WIN * ZCW_N) {               /* 4 窗填满 ⇒ 冻结 */
+            zcw_state = 2u;
+            zcw_win   = ZCW_WIN;
+        }
+    }
 }

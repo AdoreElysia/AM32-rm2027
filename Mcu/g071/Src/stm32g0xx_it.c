@@ -333,22 +333,13 @@ void DMA1_Channel2_3_IRQHandler(void)
             (void)getCompOutputLevel();        /* 只更新 bemf_state，不再用于判据 */
             adc_bemf_take_edges(0, 0, 1, 1);   /* 旧判据的边沿读出来丢掉 */
             {
-                extern volatile uint16_t bemf_adc_vph;   /* rank1 = 当前悬空相 */
-                extern volatile uint16_t bemf_adc_v0;    /* rank2 = V0 */
                 int16_t dzc = adc_bemf_get_delta();
                 uint8_t zc  = adc_zc_push(dzc, (uint16_t)INTERVAL_TIMER->CNT);
                 /* 顺手把这一帧写进闭环波形环形缓冲（交棒时冻结，供 SWD dump 画图）
                  * ★ vph / v0 / step 分开记 —— 这样才分得清交棒时的偏置跳变
                  *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */
-                {
-                    extern char forward;
-                    extern volatile uint8_t prop_brake_active;
-                    extern uint16_t adjusted_input;   /* common.h:13 —— 非 volatile */
-                    adc_zc_wave_push((int16_t)bemf_adc_vph, (int16_t)bemf_adc_v0,
-                                     (uint16_t)TIM1->CCR1, (uint8_t)step, zc,
-                                     (uint8_t)forward, (uint8_t)prop_brake_active,
-                                     (uint16_t)adjusted_input);
-                }
+                /* 多窗口捕获：每样本只留 delta + step + 判据结论（4 字节）*/
+                adc_zc_wave_push(dzc, (uint8_t)step, zc);
                 if (zc) {
                     edge_rise = 1;   /* 方向不参与判据（本板 rising 的极性约定无可靠对照）*/
                 }
