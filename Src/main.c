@@ -1105,8 +1105,9 @@ static void olStartupTick(void)
                      *   触发点落在"转速一开始掉"那一刻 ⇒ 窗口 = 开环尾段 + 开始变慢过程。
                      *   阈值取"目标步长 x 1.125"：开环时步长恒 = OL_STEP_DIV x 100，
                      *   一旦闭环接管后转速掉，步长就会超过它 ⇒ 正好是"开始变慢"的时刻。 */
-                    adc_zc_wave_arm((uint32_t)OL_STEP_DIV * 100u
-                                    + ((uint32_t)OL_STEP_DIV * 100u >> 3));
+                    /* ★ 本轮实验：改用"油门切 0（开始滑行）"触发，所以 ci 阈值给成
+                     *   永不触发（0xFFFFFFFF）—— 但要保留这次 arm（它负责清环形缓冲）。*/
+                    adc_zc_wave_arm(0xFFFFFFFFu);
                 } else {
                     uint32_t d = (20000UL * 256UL) / ol_freq_q;
                     if (d > 0xFFFFu) {
@@ -2573,6 +2574,10 @@ static void olStepTick(void)
         ol_run_ticks = 0; /* 不在驱动 ⇒ 运行计时清零 */
         if (running && input < 47) { /* 油门回 0 ⇒ 停机，并复位起步序列 */
             ol_stop_site = 4;            /* 停机站点：油门回 0 */
+            /* ★★ 本轮实验：这一刻触发波形捕获 —— 驱动刚关掉，电机开始自由滑行，
+             *    之后采到的 delta 是【纯反电势】（相上没有 PWM 驱动）
+             *    ⇒ 它的频率就是转子真实转速，能直接回答"转速到底降没降"。 */
+            adc_zc_wave_trigger();
             allOff();
             running = 0;
             ol_state = 0;
