@@ -1056,7 +1056,13 @@ static void olStartupTick(void)
      * 而 2222RPM 下一步 750µs、认 3 次过零只要 2.3ms ⇒ 余量绰绰有余。
      * （原来写 200 秒是为了配合"斜坡要 13 秒"的；现在斜坡 3.2 秒就完，
      *   再留 200 秒只会把"起步失败"变成"电机一直硬踹不停"。） */
-    if (++ol_startup_ticks > OL_STARTUP_TICKS_MAX) {
+    /* ★★ 2026-10-11 修：这个时限只在【还没交棒】时计时 ★★
+     *   原来是无条件 ++ol_startup_ticks，而 olStartupTick() 在 main.c:2767
+     *   每轮主循环都被调用 ⇒ 交棒进了闭环它照样数 ⇒ 从电调启动算起满 8 秒
+     *   就把正常运行的电机停掉（实测 ssite=1），油门还挂着 ⇒ 自动重启 ⇒
+     *   每 8 秒一轮"停一下又转"。台架粗时间线（ccm_slow）在 7.4 秒处的
+     *   突变就是这个。本意只是"起步失败别无限硬踹"，所以加上 ol_startup_arm。 */
+    if (ol_startup_arm && (++ol_startup_ticks > OL_STARTUP_TICKS_MAX)) {
         allOff();
         running = 0;
         ol_stop_site = 1;                 /* 停机站点：开环 8 秒时限 */
