@@ -488,6 +488,17 @@ volatile uint16_t adc_frame_cnt;      /* 24kHz ADC 帧计数（ISR 自增）*/
  *   只剩 643 转/分，而 0 拍时稳态中位 1.000ms）。原因是前移 = 换相提前 =
  *   相位超前 ⇒ 转矩下降。所以定为 0（不前移）。 */
 volatile uint16_t bemf_zc_lead_ticks = 0;
+
+/* ★★ 2026-10-11 波形捕获的触发时刻做成可设定（用户要求看不同时段的全速采样）★★
+ *   原来只抓"交棒那一刻"。要对比"塌陷前 vs 塌陷后"的波形，必须能指定时刻：
+ *       mww <zcw_trig_delay_frames 地址> <帧数>     1 帧 = 41.67us
+ *         e.g. 1500ms => 36000 帧 ； 5000ms => 120000 帧
+ *       mwb <zcw_arm_st 地址> 0                    跑下一轮前清零
+ *       mwb <zcw_state 地址> 0                     同上（连同冻结状态一起清）
+ *   触发后 21ms（ZCW_WIN=2 窗）的原始 delta 会被冻结，跑完用 SWD 读。 */
+volatile uint32_t zcw_trig_delay_frames = 36000;   /* 默认交棒后 1500ms */
+volatile uint32_t zcw_arm_frame = 0;
+volatile uint8_t  zcw_arm_st = 0;
 static   uint16_t ccm_last_frame;     /* 上一次换相时的帧计数 */
 volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔：真实换相间隔（帧，41.67us/帧）*/
 volatile uint8_t  ccm_step[CCM_N];

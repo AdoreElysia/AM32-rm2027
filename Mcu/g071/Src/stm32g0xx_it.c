@@ -367,10 +367,22 @@ void DMA1_Channel2_3_IRQHandler(void)
                      *   是噪声穿零 ⇒ 换相被噪声驱动 ⇒ 抖。
                      *   要看清它从哪一刻、以什么方式消失，必须在【交棒刚过】就抓
                      *   波形；原来等收油门才触发，采到的只是收油门后的滑行段。 */
-                    extern volatile uint8_t ol_startup_arm;   /* 定义处是 volatile */
+                    extern volatile uint8_t  ol_startup_arm;   /* 定义处是 volatile */
                     extern uint8_t running;
-                    if (zcw_state == 0u && ol_startup_arm == 0u && running) {
-                        adc_zc_wave_trigger();
+                    extern volatile uint32_t adc_frame_total;
+                    extern volatile uint32_t zcw_trig_delay_frames;
+                    extern volatile uint32_t zcw_arm_frame;
+                    extern volatile uint8_t  zcw_arm_st;
+                    if (running && ol_startup_arm == 0u) {
+                        if (zcw_arm_st == 0u) {
+                            /* 交棒那一刻：只记下帧号，不抓 */
+                            zcw_arm_st = 1u;
+                            zcw_arm_frame = adc_frame_total;
+                        } else if (zcw_state == 0u &&
+                                   (uint32_t)(adc_frame_total - zcw_arm_frame) >= zcw_trig_delay_frames) {
+                            /* 到了设定时刻才抓（用户要求看不同时段的全速采样）*/
+                            adc_zc_wave_trigger();
+                        }
                     }
                 }
             }
