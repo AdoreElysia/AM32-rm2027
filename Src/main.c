@@ -478,6 +478,8 @@ volatile uint16_t ccm_slow_ci[CCM_SLOW_N];
 volatile uint16_t ccm_slow_duty[CCM_SLOW_N];  /* 该点占空比（0..2000，2000 = 100%）*/
 volatile uint16_t ccm_slow_cur[CCM_SLOW_N];   /* 该点 actual_current（电调内部单位）*/
 volatile uint32_t ccm_slow_iov[CCM_SLOW_N];   /* 该点速度环累加量 input_override */
+volatile uint16_t ccm_slow_in[CCM_SLOW_N];    /* 该点 input（= iov/10000，速度环输出）*/
+volatile uint16_t ccm_slow_sp[CCM_SLOW_N];    /* 该点 duty_cycle_setpoint（各上限截断前）*/
 volatile uint16_t ccm_slow_head;
 volatile uint32_t ccm_slow_total;
 volatile uint32_t average_interval = 0;
@@ -1764,6 +1766,32 @@ void getBemfState()
     }
 }
 
+/* ccm_record：换相历史记录（诊断'闭环抖且慢'）
+ *   为什么单列成函数、且必须在【离群值钳制之前】调用：
+ *   commutate() 里有一道离群值剔除，把本步实测步长钳在 [ci/4, ci*2] 之间，
+ *   剧烈抖动/停顿会被抹平。若记 commutation_interval（六步平均 + 钳制），
+ *   读出来是光滑曲线、看不出抖 —— 而用户肉眼看到的抖正是被这段抹掉的部分。
+ *   所以这里记【未钳制的原始实测步长】，粗时间线里同时记平滑值作对比。 */
+static void ccm_record(uint32_t raw_step)
+{
+    uint16_t _ci = ccm_head;
+    ccm_ci[_ci]   = (uint16_t)((raw_step > 0xFFFFu) ? 0xFFFFu : raw_step);
+    ccm_step[_ci] = (uint8_t)step;
+    ccm_head = (uint16_t)((_ci + 1u) & (CCM_N - 1u));
+    ccm_total++;
+    if ((ccm_total & (CCM_SLOW_DIV - 1u)) == 0u) {
+        uint16_t _si = ccm_slow_head;
+        ccm_slow_ci[_si]   = (uint16_t)commutation_interval;
+        ccm_slow_duty[_si] = duty_cycle;
+        ccm_slow_cur[_si]  = (uint16_t)actual_current;
+        ccm_slow_iov[_si]  = (uint32_t)input_override;
+        ccm_slow_in[_si]   = input;
+        ccm_slow_sp[_si]   = duty_cycle_setpoint;
+        ccm_slow_head = (uint16_t)((_si + 1u) & (CCM_SLOW_N - 1u));
+        ccm_slow_total++;
+    }
+}
+
 void commutate()
 {
     if (forward == 1) {
@@ -1797,24 +1825,6 @@ void commutate()
 #endif
     bemfcounter = 0;
     zcfound = 0;
-    /* 实验埋点：记一笔换相历史（说明见变量定义处）。放在这里是因为此刻
-     * step 已更新、changeCompInput() 已切好下一相的采样通道。 */
-    {
-        uint16_t _ci = ccm_head;
-        ccm_ci[_ci]   = (uint16_t)commutation_interval;
-        ccm_step[_ci] = (uint8_t)step;
-        ccm_head = (uint16_t)((_ci + 1u) & (CCM_N - 1u));
-        ccm_total++;
-        if ((ccm_total & (CCM_SLOW_DIV - 1u)) == 0u) {
-            uint16_t _si = ccm_slow_head;
-            ccm_slow_ci[_si]   = (uint16_t)commutation_interval;
-            ccm_slow_duty[_si] = duty_cycle;
-            ccm_slow_cur[_si]  = (uint16_t)actual_current;
-            ccm_slow_iov[_si]  = (uint32_t)input_override;
-            ccm_slow_head = (uint16_t)((_si + 1u) & (CCM_SLOW_N - 1u));
-            ccm_slow_total++;
-        }
-    }
     /* ★★★ 2026-10-10 改存【本步实测步长】，不再存滤波后的 ci ★★★
      *   原来存的是 commutation_interval（滤波输出）⇒ 6 个槽其实是【同一个值】，
      *   下面那个"6 步平均"等于白算、没有任何额外平滑作用。
@@ -1825,6 +1835,7 @@ void commutate()
      *     （= TI 的 v_timer/12 的两倍 = 一个完整换相步）。 */
     {
         uint32_t meas_step = (uint32_t)((lastzctime + thiszctime) >> 1);
+        ccm_record(meas_step);   /* ★ 记【未钳制】的原始实测步长（抖动会在这里显形）*/
         /* ★★★ 2026-10-10 关键修复⑨：离群值剔除 —— 单次离谱的间隔不许进六步平均 ★★★
          *   台架实测（闭环交棒后约 10ms 处）：转子瞬时停顿一次 ⇒ 本步实测
          *     284 点 = 11.8ms = 23600 拍（正常步长是 1080 拍，这是它的 22 倍）。
