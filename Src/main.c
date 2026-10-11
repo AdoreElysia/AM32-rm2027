@@ -812,7 +812,7 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
  *   ⚠ 这一步是唯一"动到电机驱动行为"的改动。开环那一侧（对齐→斜坡→验证计数）
  *     一行没动，用的还是被台架反复验证过的那条链；换掉的只是"交棒之后怎么认过零"。
  *     开环安全网仍在：过流 OL_TRIP_CURRENT=8A、总时长 OL_RUN_LIMIT=8s。 */
-#define OL_HOLD_OPENLOOP    1
+#define OL_HOLD_OPENLOOP    0
 #endif
 
 /* ★★★ 2026-10-11 临时实验开关：跳过交棒的"验证窗口" ★★★
