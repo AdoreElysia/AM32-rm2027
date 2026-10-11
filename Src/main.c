@@ -463,6 +463,17 @@ uint16_t commutation_intervals[6] = { 0 };
  *     ccm_step[] = 换相后的 step（1..6；若出现跳号/回退 ⇒ 换相乱套）
  *   1024 笔 x 2.64ms 约覆盖 2.7 秒；把 ccm_ci 逐笔累加就是真实时间轴。
  *   只写 RAM，不改变任何控制行为；ccm_idx 不清零 ⇒ 跨越"过流停机→重启"也能连起来看。 */
+/* ★★ 2026-10-11 闭环速度环的油门上限（防累加漂移）★★
+ *   实测依据：开环用 340（约 17% 占空比）就稳定跑到 1670 转/分、电流 0.6A；
+ *   而闭环速度环是【增量累加】结构（input_override += error*Kp，Ki=Kd=0），
+ *   只要'实际转速比目标慢一点'就每拍往上加、没有停止条件 ⇒ 实测 4 秒内
+ *   duty_cycle_setpoint 从 333 漂到 505（+52%）、峰值电流触到 110（= 1.8A 保护线）
+ *   ⇒ 再跑几秒必被掐断（长跑'掉速重启'的来源）。
+ *   既然开环 17% 就够，就不允许闭环油门漂过 450（约 20% 占空比）。 */
+#ifndef RM2027_CL_INPUT_CAP
+#define RM2027_CL_INPUT_CAP 450
+#endif
+
 #define CCM_N 1024
 volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔（循环覆盖）*/
 volatile uint8_t  ccm_step[CCM_N];
@@ -1835,7 +1846,10 @@ void commutate()
      *     （= TI 的 v_timer/12 的两倍 = 一个完整换相步）。 */
     {
         uint32_t meas_step = (uint32_t)((lastzctime + thiszctime) >> 1);
-        ccm_record(meas_step);   /* ★ 记【未钳制】的原始实测步长（抖动会在这里显形）*/
+        /* ★ 记本步的【过零间隔】(thiszctime = 两次过零之间的时间 = 一个换相步)。
+         *   为 0 就代表这一步【没有过零事件】、是被超时兜底硬踹换相的
+         *   —— 那正是"抖/失步"的直接证据（开环的换相由固定时基给，不会有 0）。 */
+        ccm_record(thiszctime);
         /* ★★★ 2026-10-10 关键修复⑨：离群值剔除 —— 单次离谱的间隔不许进六步平均 ★★★
          *   台架实测（闭环交棒后约 10ms 处）：转子瞬时停顿一次 ⇒ 本步实测
          *     284 点 = 11.8ms = 23600 拍（正常步长是 1080 拍，这是它的 22 倍）。
@@ -2824,6 +2838,11 @@ void tenKhzRoutine()
             if (use_speed_control_loop && running && !ol_startup_arm &&
                 target_e_com_time >= 200 && target_e_com_time <= 60000) {
                 input_override += doPidCalculations(&speedPid, e_com_time, target_e_com_time);
+#if RM2027_CL_INPUT_CAP > 0
+                if (input_override > (int32_t)RM2027_CL_INPUT_CAP * 10000) {
+                    input_override = (int32_t)RM2027_CL_INPUT_CAP * 10000;
+                }
+#endif
                 if (input_override > 2047 * 10000) {
                     input_override = 2047 * 10000;
                 }
