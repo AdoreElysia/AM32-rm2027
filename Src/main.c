@@ -475,6 +475,9 @@ volatile uint32_t ccm_total;          /* 累计笔数（>1024 说明已绕过一
 #define CCM_SLOW_N   128
 #define CCM_SLOW_DIV 64
 volatile uint16_t ccm_slow_ci[CCM_SLOW_N];
+volatile uint16_t ccm_slow_duty[CCM_SLOW_N];  /* 该点占空比（0..2000，2000 = 100%）*/
+volatile uint16_t ccm_slow_cur[CCM_SLOW_N];   /* 该点 actual_current（电调内部单位）*/
+volatile uint32_t ccm_slow_iov[CCM_SLOW_N];   /* 该点速度环累加量 input_override */
 volatile uint16_t ccm_slow_head;
 volatile uint32_t ccm_slow_total;
 volatile uint32_t average_interval = 0;
@@ -1803,8 +1806,12 @@ void commutate()
         ccm_head = (uint16_t)((_ci + 1u) & (CCM_N - 1u));
         ccm_total++;
         if ((ccm_total & (CCM_SLOW_DIV - 1u)) == 0u) {
-            ccm_slow_ci[ccm_slow_head] = (uint16_t)commutation_interval;
-            ccm_slow_head = (uint16_t)((ccm_slow_head + 1u) & (CCM_SLOW_N - 1u));
+            uint16_t _si = ccm_slow_head;
+            ccm_slow_ci[_si]   = (uint16_t)commutation_interval;
+            ccm_slow_duty[_si] = duty_cycle;
+            ccm_slow_cur[_si]  = (uint16_t)actual_current;
+            ccm_slow_iov[_si]  = (uint32_t)input_override;
+            ccm_slow_head = (uint16_t)((_si + 1u) & (CCM_SLOW_N - 1u));
             ccm_slow_total++;
         }
     }
