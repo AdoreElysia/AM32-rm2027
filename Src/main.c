@@ -491,6 +491,24 @@ volatile uint16_t bemf_zc_lead_ticks = 0;
 static   uint16_t ccm_last_frame;     /* 上一次换相时的帧计数 */
 volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔：真实换相间隔（帧，41.67us/帧）*/
 volatile uint8_t  ccm_step[CCM_N];
+/* ★★★ 2026-10-11 串口【换相事件流】（分支 1011）★★★
+ *   目的：芯片只有 16KB RAM，内存记录只能存 1 秒多，看不到"跑久了会不会变慢"。
+ *   做法（用户提的方案）：中断里只把事件写进内存环形缓冲；主循环攒够一批再用
+ *   DMA 一口气发出去 —— 采集与发送在时间上完全错开，采到的数据永不被自己干扰。
+ *   帧格式（18 字节，小端，与 PC 端 evt-dump.py 一致）：
+ *     AA 55 | seq u16 | ts u32 | delta i16 | step u8 | wait u16 | duty u16 | cur i16 | chk u8
+ *   带宽：每次换相 18 字节、约 1000 次/秒 => 约 18KB/s，1Mbaud 下很轻松。 */
+#define EVT_FRAME   18
+#define EVT_BUF_N   1024
+#define EVT_BATCH   180          /* 攒 10 个事件发一次 */
+volatile uint8_t  evt_buf[EVT_BUF_N];
+volatile uint16_t evt_head;
+volatile uint16_t evt_tail;
+volatile uint32_t evt_total;     /* 打包过的事件数 */
+volatile uint32_t evt_drop;      /* 缓冲满而丢弃的 */
+volatile uint8_t  evt_tx[EVT_BATCH];
+volatile uint32_t adc_frame_total;   /* 24kHz 总帧数（u32，不会回绕）*/
+
 volatile uint16_t ccm_head;           /* 下一个写入位置 */
 
 /* ★★ 2026-10-11 诊断"卡顿"：每次【超时硬踹】时记下当时的占空比/电流/等了多久 ★★
@@ -1805,6 +1823,63 @@ void getBemfState()
     }
 }
 
+/* ---- 串口换相事件流 ---- */
+static void evt_send(uint8_t *p, uint16_t len)
+{
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
+    LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
+    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_3, (uint32_t)p);
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, len);
+    LL_USART_EnableDMAReq_TX(USART1);
+    LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_3);
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_RX);
+}
+
+/* 在换相那一刻打包一个事件（中断上下文：只写内存，不发送）*/
+static void evt_push(void)
+{
+    uint16_t nxt = (uint16_t)((evt_head + EVT_FRAME) & (EVT_BUF_N - 1u));
+    if (nxt == evt_tail) { evt_drop++; return; }
+    uint8_t *p = (uint8_t *)&evt_buf[evt_head];
+    uint16_t seq  = (uint16_t)evt_total;
+    uint32_t ts   = adc_frame_total;
+    int16_t  dl   = adc_bemf_get_delta();
+    uint8_t  st   = (uint8_t)step;
+    uint16_t wt   = waitTime;
+    uint16_t dt   = duty_cycle;
+    int16_t  cr   = (int16_t)actual_current;
+    p[0] = 0xAA; p[1] = 0x55;
+    p[2] = (uint8_t)(seq & 0xFF);  p[3] = (uint8_t)(seq >> 8);
+    p[4] = (uint8_t)(ts & 0xFF);   p[5] = (uint8_t)((ts >> 8) & 0xFF);
+    p[6] = (uint8_t)((ts >> 16) & 0xFF); p[7] = (uint8_t)((ts >> 24) & 0xFF);
+    p[8] = (uint8_t)(dl & 0xFF);   p[9] = (uint8_t)((dl >> 8) & 0xFF);
+    p[10] = st;
+    p[11] = (uint8_t)(wt & 0xFF);  p[12] = (uint8_t)(wt >> 8);
+    p[13] = (uint8_t)(dt & 0xFF);  p[14] = (uint8_t)(dt >> 8);
+    p[15] = (uint8_t)(cr & 0xFF);  p[16] = (uint8_t)((cr >> 8) & 0xFF);
+    uint8_t chk = 0;
+    for (uint8_t i = 0; i < 17u; i++) { chk ^= p[i]; }
+    p[17] = chk;
+    evt_head = nxt;
+    evt_total++;
+}
+
+/* 主循环调用：攒够一批就用 DMA 发（不在中断里做）*/
+void evt_pump(void)
+{
+    static uint8_t busy = 0;
+    if (busy && !LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) { busy = 0; }
+    if (busy) { return; }
+    uint16_t avail = (uint16_t)((evt_head - evt_tail) & (EVT_BUF_N - 1u));
+    if (avail < EVT_BATCH) { return; }
+    for (uint16_t i = 0; i < EVT_BATCH; i++) {
+        evt_tx[i] = evt_buf[(uint16_t)((evt_tail + i) & (EVT_BUF_N - 1u))];
+    }
+    evt_tail = (uint16_t)((evt_tail + EVT_BATCH) & (EVT_BUF_N - 1u));
+    evt_send((uint8_t *)evt_tx, EVT_BATCH);
+    busy = 1;
+}
+
 /* ccm_record：换相历史记录（诊断'闭环抖且慢'）
  *   为什么单列成函数、且必须在【离群值钳制之前】调用：
  *   commutate() 里有一道离群值剔除，把本步实测步长钳在 [ci/4, ci*2] 之间，
@@ -1822,6 +1897,7 @@ static void ccm_record(uint32_t raw_step)
         ccm_ci[_ci] = (uint16_t)(f - ccm_last_frame);
         ccm_last_frame = f;
     }
+    evt_push();          /* ★ 串口事件流：每笔换相打包一个事件 */
     ccm_step[_ci] = (uint8_t)step;
     ccm_head = (uint16_t)((_ci + 1u) & (CCM_N - 1u));
     ccm_total++;
@@ -2838,6 +2914,7 @@ void tenKhzRoutine()
         olStepTick(); /* ★ 开环调试：本函数独占换相，上面的 BEMF 轮询换相已关掉 */
 #else
         olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
+        { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
 #endif
         if (one_khz_loop_counter > PID_LOOP_DIVIDER) { // 1khz PID loop
             PROCESS_ADC_FLAG = 1; // set flag to do new adc read at lower priority

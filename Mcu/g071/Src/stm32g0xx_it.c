@@ -346,7 +346,9 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *   中断里自增，与任何"认到/没认到过零"的逻辑无关 ⇒ 是纯粹的时间轴。 */
                 {
                     extern volatile uint16_t adc_frame_cnt;
+                    extern volatile uint32_t adc_frame_total;
                     adc_frame_cnt++;
+                    adc_frame_total++;   /* u32 总帧数：串口事件流的时间戳 */
                 }
                 if (zc) {
                     edge_rise = 1;   /* 方向不参与判据（本板 rising 的极性约定无可靠对照）*/

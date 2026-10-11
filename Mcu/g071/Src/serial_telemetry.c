@@ -53,7 +53,7 @@ void telem_UART_Init()
 #if ADC_CAPTURE_MODE
     USART_InitStruct.BaudRate = ADC_CAP_BAUD;   /* ★ 捕获模式：1 Mbaud */
 #else
-    USART_InitStruct.BaudRate = 115200;
+    USART_InitStruct.BaudRate = 1000000;   /* ★ 2026-10-11 1 Mbaud：事件流需要 ~10KB/s */
 #endif
     USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits = LL_USART_STOPBITS_1;

@@ -101,7 +101,8 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt);
 #define ZCW_N    256       /* 每窗口点数：256 x 41.67µs = 10.7ms */
 #endif
 #ifndef ZCW_WIN
-#define ZCW_WIN  4         /* ★ 连续采几个窗口（用户要求"多采几个"）：4 窗 = 42.7ms 连续 */
+#define ZCW_WIN  2         /* ★ 2026-10-11 改成 2 窗（21.3ms）：RAM 只剩 456 字节，
+                            *   腾 2KB 给"串口换相事件流"的缓冲。仍覆盖交棒前后。 */
 #endif
 
 /* ★ 每样本 4 字节（原 8 字节）：只留判据真正用的三样，才装得下 4 个窗口。
