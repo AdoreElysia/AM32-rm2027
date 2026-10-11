@@ -455,6 +455,19 @@ uint16_t throttle_max_at_low_rpm = 400;
 uint16_t throttle_max_at_high_rpm = 2000;
 
 uint16_t commutation_intervals[6] = { 0 };
+
+/* ★★ 2026-10-11 实验埋点：闭环换相历史（诊断"越转越慢"）★★
+ *   每次 commutate() 记一笔，按【时间顺序】存（只记一次即停，不循环覆盖）：
+ *     ccm_ci[]   = 换相后的 commutation_interval（六步平均的实测步长，1 tick = 0.5us）
+ *     ccm_wait[] = waitTime（换相后要等的 30 度延迟，= ci/2 - advance）
+ *     ccm_step[] = 换相后的 step（1..6；若出现跳号/回退 ⇒ 换相乱套）
+ *   1024 笔 x 2.64ms 约覆盖 2.7 秒；把 ccm_ci 逐笔累加就是真实时间轴。
+ *   只写 RAM，不改变任何控制行为；ccm_idx 不清零 ⇒ 跨越"过流停机→重启"也能连起来看。 */
+#define CCM_N 1024
+volatile uint16_t ccm_ci[CCM_N];
+volatile uint16_t ccm_wait[CCM_N];
+volatile uint8_t  ccm_step[CCM_N];
+volatile uint16_t ccm_idx;
 volatile uint32_t average_interval = 0;
 uint32_t last_average_interval;
 int e_com_time;
@@ -1766,6 +1779,15 @@ void commutate()
 #endif
     bemfcounter = 0;
     zcfound = 0;
+    /* 实验埋点：记一笔换相历史（说明见变量定义处）。放在这里是因为此刻
+     * step 已更新、changeCompInput() 已切好下一相的采样通道。 */
+    if (ccm_idx < CCM_N) {
+        uint16_t _ci = ccm_idx;
+        ccm_ci[_ci]   = (uint16_t)commutation_interval;
+        ccm_wait[_ci] = waitTime;
+        ccm_step[_ci] = (uint8_t)step;
+        ccm_idx = (uint16_t)(_ci + 1u);
+    }
     /* ★★★ 2026-10-10 改存【本步实测步长】，不再存滤波后的 ci ★★★
      *   原来存的是 commutation_interval（滤波输出）⇒ 6 个槽其实是【同一个值】，
      *   下面那个"6 步平均"等于白算、没有任何额外平滑作用。
