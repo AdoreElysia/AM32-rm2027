@@ -1155,7 +1155,20 @@ static void olStartupTick(void)
         }
     }
 
-    if (!OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS) {
+    /* ★★★ 2026-10-11 关键修复⑩：交棒块必须【锁存】—— 只执行一次 ★★★
+     *   原条件 `!OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS`
+     *   在交棒之后【仍然成立】：
+     *     · ol_step_div_cur 停在 OL_STEP_DIV 不再变；
+     *     · ol_verify_ok 只在开环 tick 里更新，而交棒后开环 tick 不再跑 ⇒ 它保持
+     *       在达标值不降。
+     *   ⇒ 这个块就在主循环里【每轮都跑一遍】（每秒几千次）⇒ 每次都把
+     *     commutation_interval / waitTime / 六步环 / average_interval 重新初始化
+     *     ⇒ 把闭环刚测出来的时序【覆盖掉】⇒ 换相时刻成了"初值 + 实测值"的混合物
+     *     ⇒ 相位必乱、转子表现异常。
+     *   实测铁证：闭环波形捕获的触发次数 = 8000 次（应为 1 次）—— 因为每次跑这段
+     *   都会调 adc_zc_wave_arm() 把捕获重新武装。
+     *   ⇒ 加 ol_startup_arm 作锁存（本块自己会清它）⇒ 保证只执行一次。 */
+    if (ol_startup_arm && !OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         old_routine = 0;
         /* ★ 交棒这一刻【武装】闭环波形捕获：阈值 = 交棒实测步长的 2 倍。
