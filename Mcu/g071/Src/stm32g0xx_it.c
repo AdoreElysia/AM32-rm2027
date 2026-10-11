@@ -346,9 +346,14 @@ void DMA1_Channel2_3_IRQHandler(void)
                 /* ★ 闭环波形捕获的触发：ci 涨到交棒实测值的 2 倍 ⇒ 塌陷开始，冻结。
                  *   只在"已武装且还没触发"时判一次；触发后 state 变 1/2 就不再进。 */
                 {
-                    extern volatile uint32_t commutation_interval;
-                    if (zcw_ci_trig != 0u && zcw_state == 0u &&
-                        commutation_interval > zcw_ci_trig) {
+                    /* ★★ 本轮实验（滑行）：触发条件改成"油门已回 0 / 已停机"
+                     *   为什么不在某个调用点上触发：上一版我插在 olStepTick() 里，
+                     *   而闭环走的是 olStartupTick() ⇒ 那个点【从来不执行】，
+                     *   结果捕获一次没触发（实测 state=0）。
+                     *   ⇒ 直接在中断里看全局量（input / running），与调用点无关。 */
+                    extern uint16_t input;                 /* common.h */
+                    extern uint8_t  running;
+                    if (zcw_state == 0u && (input < 48u || running == 0u)) {
                         adc_zc_wave_trigger();
                     }
                 }
