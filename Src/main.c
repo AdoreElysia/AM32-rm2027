@@ -660,6 +660,15 @@ volatile uint32_t ol_noarm_n   = 0;
 volatile uint8_t ol_startup_arm = 0;        /* 1 = 闭环开环起步链在跑（ISR 也要读，故无条件定义）*/
 /* ★ 台架过流切断用的计数（见 tenKhzRoutine 里的说明与 targets.h 的 RM2027_BENCH_OC_*） */
 uint16_t ol_bench_oc_count = 0;
+
+/* ★★★ 2026-10-11 停机原因持久埋点（重启不清，用 SWD 读）★★★
+ *   为什么需要：能清 running 的路径有 7~8 处，其中多数**没有累积计数器**
+ *   （比如开环 8 秒时限用的是 ol_startup_ticks，本分支没有观测量），
+ *   而 ol_stop_reason 在重启时会被清零 ⇒ 事后读不出来上一轮为什么停。
+ *   这里在每一处清 running 的地方写一个编号，只增不清 ⇒ 一轮跑完读它即可定位。
+ *   编号：1=开环8s时限 2=过流跳闸 3=台架过流 4=油门回0 5=失步(非ADC_BEMF支路)
+ *         6=闭环刹车/停转 7=低压截止 8=其它 */
+volatile uint8_t ol_stop_site = 0;
 uint32_t ol_bench_oc_trips = 0;
 /* ↑ 这一组是"开环版 / 闭环开环起步链"共用的运行时状态。闭环也要用（起步链复用它们），
  *   所以下面的起步链代码【不能】再包在 #if RM2027_OL_ARM_ONLY 里。 */
@@ -1011,6 +1020,7 @@ static void olStartupTick(void)
         if (++ol_startup_trip > OL_TRIP_TICKS) {
             allOff();
             running = 0;
+                ol_stop_site = 2;            /* 停机站点：起步链过流跳闸 */
             ol_startup_arm = 0;
             return;
         }
@@ -1027,6 +1037,7 @@ static void olStartupTick(void)
     if (++ol_startup_ticks > OL_STARTUP_TICKS_MAX) {
         allOff();
         running = 0;
+        ol_stop_site = 1;                 /* 停机站点：开环 8 秒时限 */
         ol_startup_arm = 0;
         return;
     }
@@ -1217,7 +1228,12 @@ static void olStartupTick(void)
         /* ★ 交棒这一刻【武装】闭环波形捕获：阈值 = 交棒实测步长的 2 倍。
          *   实测交棒的 16ms 窗口内一切正常 ⇒ 改由"ci 涨到 2 倍"来触发冻结，
          *   窗口才罩得住塌陷本身（见 adc_zc.h 的说明）。 */
-        adc_zc_wave_arm(commutation_interval * 2u);
+        /* ★ 2026-10-11 触发门槛收紧：x2 -> x1.125
+         *   实测教训：门槛设成 2 倍时，ci 在交棒后头几次换相内就翻倍了
+         *   ⇒ 触发时塌陷【已经完成】⇒ 捕获窗口抓不到"交棒 + 停"的过程
+         *   （窗口里已经是稳定慢态：delta 变号间隔 2.6ms）。
+         *   收到 1.125 倍 ⇒ 只要 ci 略一上涨就冻结 ⇒ 窗口罩住交棒那一刻。 */
+        adc_zc_wave_arm(commutation_interval + (commutation_interval >> 3));
         /* ★★ 交棒时必须把闭环的时间基准初始化正确 ★★
          *   闭环的 waitTime 只在 PeriodElapsedCallback() 里算，而开环斜坡期间它
          *   根本没跑过 ⇒ 交棒瞬间 waitTime / lastzctime / thiszctime 全是陈旧值
@@ -2548,6 +2564,7 @@ static void olStepTick(void)
     } else {
         ol_run_ticks = 0; /* 不在驱动 ⇒ 运行计时清零 */
         if (running && input < 47) { /* 油门回 0 ⇒ 停机，并复位起步序列 */
+            ol_stop_site = 4;            /* 停机站点：油门回 0 */
             allOff();
             running = 0;
             ol_state = 0;
@@ -2608,6 +2625,7 @@ void tenKhzRoutine()
         if (++ol_bench_oc_count > RM2027_BENCH_OC_TICKS) {
             allOff();
             running = 0;
+            ol_stop_site = 3;                /* 停机站点：台架过流 */
             ol_startup_arm = 0;
             ol_bench_oc_count = 0;
             ol_bench_oc_trips++;
@@ -2807,7 +2825,7 @@ void tenKhzRoutine()
               }
               if((brake_countdown == 0) && (zero_throttle_brake_active == 1)){
                 zero_crosses = 0;                          // after countdown forces the brake on stop behavior 
-                running = 0;                               // stops tracking rpm
+                running = 0; ol_stop_site = 6;   /* 停机站点：零油门刹车 */
               }
               zero_throttle_brake_active = 1;
               }
@@ -3690,6 +3708,7 @@ if(zero_crosses < 5){
               allOff();
               maskPhaseInterrupts();
               running = 0;
+                ol_stop_site = 7;            /* 停机站点：低压截止 */
               zero_input_count = 0;
               armed = 0;
              }
