@@ -498,9 +498,9 @@ volatile uint8_t  ccm_step[CCM_N];
  *   帧格式（18 字节，小端，与 PC 端 evt-dump.py 一致）：
  *     AA 55 | seq u16 | ts u32 | delta i16 | step u8 | wait u16 | duty u16 | cur i16 | chk u8
  *   带宽：每次换相 18 字节、约 1000 次/秒 => 约 18KB/s，1Mbaud 下很轻松。 */
-#define EVT_FRAME   18
+#define EVT_FRAME   20           /* ★ 2026-10-11 18->20：帧头 2->4 字节 + CRC8 */
 #define EVT_BUF_N   1024
-#define EVT_BATCH   180          /* 攒 10 个事件发一次 */
+#define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
 volatile uint16_t evt_head;
 volatile uint16_t evt_tail;
@@ -1826,13 +1826,30 @@ void getBemfState()
 /* ---- 串口换相事件流 ---- */
 static void evt_send(uint8_t *p, uint16_t len)
 {
-    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
+    /* ★ 不再切"发/收方向"：原版每发一次就切一次（半双工），切向瞬间是
+     *   丢字节的嫌疑之一。我们只发不收，直接常驻发送方向。 */
     LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
     LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_3, (uint32_t)p);
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, len);
     LL_USART_EnableDMAReq_TX(USART1);
     LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_3);
-    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_RX);
+}
+
+/* CRC8（多项式 0x07，初值 0）—— 比异或强得多，错位几乎必被检出 */
+static uint8_t evt_crc8(const uint8_t *p, uint8_t n)
+{
+    uint8_t crc = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (uint8_t b = 0; b < 8u; b++) {
+            if (crc & 0x80u) {
+                crc = (uint8_t)((crc << 1) ^ 0x07u);
+            } else {
+                crc = (uint8_t)(crc << 1);
+            }
+        }
+    }
+    return crc;
 }
 
 /* 在换相那一刻打包一个事件（中断上下文：只写内存，不发送）*/
@@ -1848,18 +1865,16 @@ static void evt_push(void)
     uint16_t wt   = waitTime;
     uint16_t dt   = duty_cycle;
     int16_t  cr   = (int16_t)actual_current;
-    p[0] = 0xAA; p[1] = 0x55;
-    p[2] = (uint8_t)(seq & 0xFF);  p[3] = (uint8_t)(seq >> 8);
-    p[4] = (uint8_t)(ts & 0xFF);   p[5] = (uint8_t)((ts >> 8) & 0xFF);
-    p[6] = (uint8_t)((ts >> 16) & 0xFF); p[7] = (uint8_t)((ts >> 24) & 0xFF);
-    p[8] = (uint8_t)(dl & 0xFF);   p[9] = (uint8_t)((dl >> 8) & 0xFF);
-    p[10] = st;
-    p[11] = (uint8_t)(wt & 0xFF);  p[12] = (uint8_t)(wt >> 8);
-    p[13] = (uint8_t)(dt & 0xFF);  p[14] = (uint8_t)(dt >> 8);
-    p[15] = (uint8_t)(cr & 0xFF);  p[16] = (uint8_t)((cr >> 8) & 0xFF);
-    uint8_t chk = 0;
-    for (uint8_t i = 0; i < 17u; i++) { chk ^= p[i]; }
-    p[17] = chk;
+    p[0] = 0xA5; p[1] = 0x5A; p[2] = 0xA5; p[3] = 0x5A;   /* 4 字节独特帧头 */
+    p[4] = (uint8_t)(seq & 0xFF);  p[5] = (uint8_t)(seq >> 8);
+    p[6] = (uint8_t)(ts & 0xFF);   p[7] = (uint8_t)((ts >> 8) & 0xFF);
+    p[8] = (uint8_t)((ts >> 16) & 0xFF); p[9] = (uint8_t)((ts >> 24) & 0xFF);
+    p[10] = (uint8_t)(dl & 0xFF);  p[11] = (uint8_t)((dl >> 8) & 0xFF);
+    p[12] = st;
+    p[13] = (uint8_t)(wt & 0xFF);  p[14] = (uint8_t)(wt >> 8);
+    p[15] = (uint8_t)(dt & 0xFF);  p[16] = (uint8_t)(dt >> 8);
+    p[17] = (uint8_t)(cr & 0xFF);  p[18] = (uint8_t)((cr >> 8) & 0xFF);
+    p[19] = evt_crc8(p, 19);
     evt_head = nxt;
     evt_total++;
 }
