@@ -41,6 +41,32 @@ static int16_t zc_at(uint8_t back)
     return zc_buf[i];
 }
 
+/* ★★ 2026-10-11 诊断：记录【被拒收现场】★★
+ *   实测：闭环期 77% 的换相步 thiszctime=0 ⇒ 过零被拒收（认到 2496 次、
+ *   拒收 6523 次）。要修判据就必须先看"被拒时的波形到底长什么样"：
+ *     · 若拒收点集中在 CNT 很小处（换相刚过）⇒ 那是换相跳变，判据没错；
+ *     · 若拒收点散布在真过零附近、且样本是"基本单调但不严格"⇒ 就是过零
+ *       附近的噪声破坏了严格单调 ⇒ 该给单调判据加容差。
+ *   存最近 RJ_N 次拒收：每次 8 个样本（b=0 最新，单位 ADC 码）+ 原因码 + CNT。 */
+#define ADC_ZC_RJ_N 32
+volatile int16_t  adc_zc_rj_snap[ADC_ZC_RJ_N][8] = {{0}};
+volatile uint8_t  adc_zc_rj_code[ADC_ZC_RJ_N] = {0};
+volatile uint16_t adc_zc_rj_cnt[ADC_ZC_RJ_N] = {0};
+volatile uint16_t adc_zc_rj_idx   = 0;
+volatile uint32_t adc_zc_rj_total = 0;
+
+static void zc_snap_reject(uint8_t code, uint16_t cnt)
+{
+    uint16_t i = adc_zc_rj_idx;
+    for (uint8_t b = 0; b < 8u; b++) {
+        adc_zc_rj_snap[i][b] = zc_at(b);
+    }
+    adc_zc_rj_code[i]  = code;
+    adc_zc_rj_cnt[i]   = cnt;
+    adc_zc_rj_idx   = (uint16_t)((i + 1u) & (ADC_ZC_RJ_N - 1u));
+    adc_zc_rj_total++;
+}
+
 uint8_t adc_zc_push(int16_t e, uint16_t t_cnt)
 {
     /* ---- 入队 ---- */
@@ -74,6 +100,7 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt)
     }
     if (dd > (int16_t)ADC_ZC_SLOPE_CAP) {
         adc_zc_n_reject++;
+        zc_snap_reject(3u, t_cnt);
         return 0;
     }
 #endif
@@ -87,10 +114,12 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt)
         int16_t newer = zc_at((uint8_t)(b - 1u));
         if (rise && !(older < newer)) {
             adc_zc_n_reject++;
+            zc_snap_reject(1u, t_cnt);
             return 0;
         }
         if (fall && !(older > newer)) {
             adc_zc_n_reject++;
+            zc_snap_reject(2u, t_cnt);
             return 0;
         }
     }
