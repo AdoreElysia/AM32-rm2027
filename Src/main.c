@@ -1051,6 +1051,29 @@ static void olStartupTick(void)
             if (ol_freq_q < ol_freq_tgt_q) {
                 ol_freq_q += ((uint32_t)ol_freq_slope * 65536UL) / ol_freq_q;
                 if (ol_freq_q <= 0UL) { ol_freq_q = 1UL; }   /* 防 0 起步卡死 */
+
+                /* ★★★ 2026-10-11 新增 V/f：占空比跟着频率一起升 ★★★
+                 *   业界做法（乐鑫 esp_sensorless_bldc_control 的强拖参数有【两套】：
+                 *   频率 RAMP_TIM_* 与占空比 RAMP_DUTY_*）——他们让占空比随频率一起升。
+                 *   我们原来全程恒定 OL_INPUT_*（400）⇒ 低速段电压远超反电势
+                 *   （电流白烧、发热），高速段又正好相反。
+                 *   ★ 对【低惯量 + 齿槽明显】的电机，这条尤其要紧：
+                 *     低速段需要足够电压"冲过齿槽坡"（本分支注释：约 900RPM 以上动量才够），
+                 *     过了门槛再把这部分电压收回来，电流才不会白烧。
+                 *   实现：把 ol_input_cur 从 OL_INPUT_START（斜坡起点，高）
+                 *   线性插到 OL_INPUT_RUN（斜坡终点，低），按频率比例。
+                 *   ⇒ f = f0 时 = START；f = f_tgt 时 = RUN。 */
+                {
+                    uint32_t f0 = (20000UL * 256UL) / (uint32_t)OL_STEP_DIV_START;
+                    uint32_t ft = ol_freq_tgt_q;
+                    if (ft > f0 && OL_INPUT_START > OL_INPUT_RUN) {
+                        uint32_t num = (ol_freq_q > f0) ? (ol_freq_q - f0) : 0u;
+                        uint32_t den = ft - f0;
+                        if (num > den) { num = den; }
+                        ol_input_cur = (uint16_t)((uint32_t)OL_INPUT_START
+                            - ((uint32_t)(OL_INPUT_START - OL_INPUT_RUN) * num) / den);
+                    }
+                }
                 if (ol_freq_q >= ol_freq_tgt_q) {
                     ol_freq_q = ol_freq_tgt_q;
                     ol_step_div_cur = OL_STEP_DIV;
