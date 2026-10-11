@@ -351,9 +351,15 @@ void DMA1_Channel2_3_IRQHandler(void)
                      *   而闭环走的是 olStartupTick() ⇒ 那个点【从来不执行】，
                      *   结果捕获一次没触发（实测 state=0）。
                      *   ⇒ 直接在中断里看全局量（input / running），与调用点无关。 */
-                    extern uint16_t input;                 /* common.h */
-                    extern uint8_t  running;
-                    if (zcw_state == 0u && (input < 48u || running == 0u)) {
+                    /* ★★ 2026-10-11：触发条件改成【交棒那一刻】★★
+                     *   被拒现场显示：闭环期 "悬空相 − V0" 只有 ±10 码（噪声级），
+                     *   而开环期同一路是 ±1200 码 ⇒ 闭环时信号几乎消失，判据认到的
+                     *   是噪声穿零 ⇒ 换相被噪声驱动 ⇒ 抖。
+                     *   要看清它从哪一刻、以什么方式消失，必须在【交棒刚过】就抓
+                     *   波形；原来等收油门才触发，采到的只是收油门后的滑行段。 */
+                    extern volatile uint8_t ol_startup_arm;   /* 定义处是 volatile */
+                    extern uint8_t running;
+                    if (zcw_state == 0u && ol_startup_arm == 0u && running) {
                         adc_zc_wave_trigger();
                     }
                 }
