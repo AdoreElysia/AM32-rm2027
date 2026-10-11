@@ -1098,6 +1098,15 @@ static void olStartupTick(void)
                 if (ol_freq_q >= ol_freq_tgt_q) {
                     ol_freq_q = ol_freq_tgt_q;
                     ol_step_div_cur = OL_STEP_DIV;
+                    /* ★★★ 2026-10-11 武装点从"交棒处"提前到"斜坡跑完处" ★★★
+                     *   教训：原来在交棒处武装 ⇒ 环刚开始滚动就被触发了
+                     *   （实测 trig_idx=4）⇒ 窗口里"触发前 10.7ms"是上一轮的旧数据。
+                     *   这里提前约 1 秒武装（斜坡完 ⇒ 热身 1s ⇒ 交棒）⇒ 滚动环填满，
+                     *   触发点落在"转速一开始掉"那一刻 ⇒ 窗口 = 开环尾段 + 开始变慢过程。
+                     *   阈值取"目标步长 x 1.125"：开环时步长恒 = OL_STEP_DIV x 100，
+                     *   一旦闭环接管后转速掉，步长就会超过它 ⇒ 正好是"开始变慢"的时刻。 */
+                    adc_zc_wave_arm((uint32_t)OL_STEP_DIV * 100u
+                                    + ((uint32_t)OL_STEP_DIV * 100u >> 3));
                 } else {
                     uint32_t d = (20000UL * 256UL) / ol_freq_q;
                     if (d > 0xFFFFu) {
@@ -1233,7 +1242,6 @@ static void olStartupTick(void)
          *   ⇒ 触发时塌陷【已经完成】⇒ 捕获窗口抓不到"交棒 + 停"的过程
          *   （窗口里已经是稳定慢态：delta 变号间隔 2.6ms）。
          *   收到 1.125 倍 ⇒ 只要 ci 略一上涨就冻结 ⇒ 窗口罩住交棒那一刻。 */
-        adc_zc_wave_arm(commutation_interval + (commutation_interval >> 3));
         /* ★★ 交棒时必须把闭环的时间基准初始化正确 ★★
          *   闭环的 waitTime 只在 PeriodElapsedCallback() 里算，而开环斜坡期间它
          *   根本没跑过 ⇒ 交棒瞬间 waitTime / lastzctime / thiszctime 全是陈旧值
