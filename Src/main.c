@@ -3877,7 +3877,20 @@ if(zero_crosses < 5){
             /* ★ 起步链（olStartupTick）期间把这条 22.5ms 超时兜底让开：
              *   起步链本身在按固定时基换相，兜底再来"硬踹"会打乱它的节奏；
              *   而兜底原本要解决的就是"没人换相"，起步链在跑时这个问题不存在。 */
-            if (!RM2027_OL_ARM_ONLY && !OL_STARTUP_ACTIVE() && INTERVAL_TIMER_COUNT > 45000) {
+            /* ★★ 2026-10-11 关键：兜底阈值从【固定 22.5ms】改成【1.5 倍当前步长】★★
+             *   实测（交棒前后的原始 delta 波形，zcw 捕获）：闭环正常时是 1ms/步
+             *   （和开环一样快），但每走 4~8ms 就【卡住约 18ms】——step 冻结、
+             *   delta 平在 +50 不振荡（转子几乎没转）⇒ 这段没有穿零、判据无过零可认
+             *   ⇒ 只能等满 45000 拍（22.5ms）被硬踹出来。平均下来约 3ms/步，
+             *   听到的就是"抖 + 慢"。
+             *   而开环那边的同一机制早就改成"随斜坡变化的期望间隔"了
+             *   （见本文件 2539-2542 的注释），只有闭环这边还留着固定的 45000。
+             *   ⇒ 对齐成 1.5xci：认不到过零时最多等到 1.5 步就强制换一次，
+             *     卡顿从 18ms 缩到约 3.75ms；认到过零时照旧用真过零定相位。
+             *   注意：这里必须仍走 commutate() 而不是 zcfoundroutine()
+             *   （后者会把这个"超时时刻"当成过零时刻写进 thiszctime ⇒ 污染 ci）。 */
+            if (!RM2027_OL_ARM_ONLY && !OL_STARTUP_ACTIVE() &&
+                INTERVAL_TIMER_COUNT > (commutation_interval + (commutation_interval >> 1))) {
               zero_throttle_brake_active = 0;   // reset zero throttle brake on back emf timeout (rotation stop)
               if(running){
                 bemf_timeout_happened++;
