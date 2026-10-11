@@ -2224,6 +2224,17 @@ void setInput()
                     2047, 160, 2047);
             }
         } else {
+            /* ★★★ 2026-10-11 关键修复：速度环接管之前，input_override 必须【跟随油门】★★★
+             *   打开速度环后 input 来自 input_override（速度环的累加变量），而它原来
+             *   只在交棒处被初始化 ⇒ 形成死锁：
+             *     电机不转 ⇒ 到不了交棒 ⇒ input_override 停在 0
+             *     ⇒ input=0（被夹到 48）⇒ 占空比≈1 ⇒ 电机更不转。
+             *   实测铁证：duty=1、steps=0、卡在 div=5000 的对齐段、cur≈0。
+             *   ⇒ 只要速度环还没接管（开环起步段 or 没在跑），就让 input_override
+             *     等于当前油门（单位 x10000）⇒ 开环照常能转，等到交棒后 PID 再接管。 */
+            if (ol_startup_arm || !running) {
+                input_override = (int32_t)adjusted_input * 10000;
+            }
             if (use_speed_control_loop) {
                 if (drive_by_rpm) {
                     target_e_com_time = 60000000 / map(adjusted_input, 47, 2047, MINIMUM_RPM_SPEED_CONTROL, MAXIMUM_RPM_SPEED_CONTROL) / (eepromBuffer.motor_poles / 2);
