@@ -476,6 +476,15 @@ uint16_t commutation_intervals[6] = { 0 };
 
 #define CCM_N 1024
 volatile uint16_t adc_frame_cnt;      /* 24kHz ADC 帧计数（ISR 自增）*/
+
+/* ★★ 2026-10-11 过零时刻前移量（运行时可用 SWD 改，便于扫参数）★★
+ *   用户要求"接着把偏置拉大" —— 不重编译也能扫：
+ *       mwh <本变量地址> <拍数>        （1 帧 = 83.3 拍，0 = 不前移）
+ *   含义：把上报的过零时刻往前挪 ⇒ 缩短"过零→换相"的等待 ⇒ 换相提前。
+ *   ⚠ 风险（本分支实测）：超前角过大转矩变差 —— 提前约 12 度时曾实测转速
+ *     从 2222 塌到 390。扫的时候要盯"转速是否反而下降"。
+ *   默认 84（= 1 帧，即之前那一版）。 */
+volatile uint16_t bemf_zc_lead_ticks = 84;
 static   uint16_t ccm_last_frame;     /* 上一次换相时的帧计数 */
 volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔：真实换相间隔（帧，41.67us/帧）*/
 volatile uint8_t  ccm_step[CCM_N];

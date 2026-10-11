@@ -504,6 +504,7 @@ void DMA1_Channel2_3_IRQHandler(void)
                  * INTERVAL_TIMER_COUNT —— 后者是"此刻"，而此刻就是过零时刻
                  * （同一帧内），但那样写容易在后续改动里又被拉长成"接受时刻"。 */
                 extern volatile uint16_t bemf_zc_time;   /* 定义在 Src/main.c */
+                extern volatile uint16_t bemf_zc_lead_ticks;  /* 前移量（运行时可变）*/
                 bemf_irq_armed = 0;
                 /* ★★ 2026-10-09 关键修复⑥：别让"丢锁很久"的间隔回绕成小数值 ★★
                  *   INTERVAL_TIMER 是 2MHz 的 32 位计数器（可数 2147s），
@@ -525,7 +526,9 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *   ⇒ 往前挪一帧，换相点回到更准的位置（相位约改 2~3 度电角度）。
                  *   注：这是固定偏移，对 ci 无影响（两次过零都同样挪、差值不变），
                  *   修的是 waitTime 的起算点 —— 也就是换相相位。 */
-                if (zc_cnt >= 84u) { zc_cnt -= 84u; }
+                /* 前移量由 bemf_zc_lead_ticks 决定（见 Src/main.c 的定义处）。
+                 * 把上报的过零时刻往前挪 ⇒ 缩短"过零→换相"的等待 ⇒ 换相提前。 */
+                if (zc_cnt >= bemf_zc_lead_ticks) { zc_cnt -= bemf_zc_lead_ticks; }
                 bemf_zc_time = (zc_cnt > 0xFFFFu) ? (uint16_t)0xFFFFu : (uint16_t)zc_cnt;
 
                 /* ★★ 2026-10-10 实验埋点（用户要求："开环跑，但用闭环的数据"）★★
