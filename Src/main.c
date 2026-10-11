@@ -478,6 +478,20 @@ uint16_t commutation_intervals[6] = { 0 };
 volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔（循环覆盖）*/
 volatile uint8_t  ccm_step[CCM_N];
 volatile uint16_t ccm_head;           /* 下一个写入位置 */
+
+/* ★★ 2026-10-11 诊断"卡顿"：每次【超时硬踹】时记下当时的占空比/电流/等了多久 ★★
+ *   用户假说：低惯量转子对换相节奏不均极敏感，某个力矩缺口落在齿槽坡上就把
+ *   转子抓住（图上卡 18ms、delta 平坦 = 转子几乎没转）。
+ *   要区分两种可能、而且修法完全相反：
+ *     · 电流大  ⇒ 线圈在使劲而转子不动 = 真堵转 ⇒ 低惯量/齿槽假说成立；
+ *     · 电流小  ⇒ 驱动其实被切掉了 = 换相逻辑问题 ⇒ 与惯量无关。
+ *   记录点：闭环超时兜底分支（强制换相那一处）之前。 */
+#define TM_N 64
+volatile uint16_t tm_duty[TM_N];   /* 卡住时的 duty_cycle（0..2000）*/
+volatile uint16_t tm_cur[TM_N];    /* 卡住时的 actual_current */
+volatile uint16_t tm_cnt[TM_N];    /* 卡住时 INTERVAL_TIMER_COUNT（等了多久）*/
+volatile uint8_t  tm_idx;
+volatile uint32_t tm_total;
 volatile uint32_t ccm_total;          /* 累计笔数（>1024 说明已绕过一圈）*/
 
 /* 粗时间线：每 64 笔记一次 ⇒ 128 笔覆盖 128x64 次换相。
@@ -3932,6 +3946,14 @@ if(zero_crosses < 5){
                  *   bemf_timeout_happened 以 ~20 次/秒 稳定上涨；而 lastzctime 与
                  *   thiszctime 的配对（如 45005/18643）证明过零本身是认到了的
                  *   （interruptRoutine 确实被调用）⇒ 卡的就是这里的时间污染。 */
+                /* 诊断：超时硬踹现场（见 tm_* 变量定义处）*/
+                if (tm_idx < TM_N) {
+                    tm_duty[tm_idx] = duty_cycle;
+                    tm_cur[tm_idx]  = (uint16_t)actual_current;
+                    tm_cnt[tm_idx]  = (uint16_t)INTERVAL_TIMER_COUNT;
+                    tm_idx++;
+                }
+                tm_total++;
                 commutate();
                 SET_INTERVAL_TIMER_COUNT(0);
 #endif
