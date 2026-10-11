@@ -475,7 +475,9 @@ uint16_t commutation_intervals[6] = { 0 };
 #endif
 
 #define CCM_N 1024
-volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔（循环覆盖）*/
+volatile uint16_t adc_frame_cnt;      /* 24kHz ADC 帧计数（ISR 自增）*/
+static   uint16_t ccm_last_frame;     /* 上一次换相时的帧计数 */
+volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔：真实换相间隔（帧，41.67us/帧）*/
 volatile uint8_t  ccm_step[CCM_N];
 volatile uint16_t ccm_head;           /* 下一个写入位置 */
 
@@ -1799,8 +1801,15 @@ void getBemfState()
  *   所以这里记【未钳制的原始实测步长】，粗时间线里同时记平滑值作对比。 */
 static void ccm_record(uint32_t raw_step)
 {
+    (void)raw_step;
     uint16_t _ci = ccm_head;
-    ccm_ci[_ci]   = (uint16_t)((raw_step > 0xFFFFu) ? 0xFFFFu : raw_step);
+    /* ★ 真实换相间隔 = 相邻两次换相之间过了多少个 ADC 帧（41.67us/帧）。
+     *   这个量只依赖 ISR 里的帧计数，不依赖过零检测认没认到 ⇒ 可信。 */
+    {
+        uint16_t f = adc_frame_cnt;
+        ccm_ci[_ci] = (uint16_t)(f - ccm_last_frame);
+        ccm_last_frame = f;
+    }
     ccm_step[_ci] = (uint8_t)step;
     ccm_head = (uint16_t)((_ci + 1u) & (CCM_N - 1u));
     ccm_total++;

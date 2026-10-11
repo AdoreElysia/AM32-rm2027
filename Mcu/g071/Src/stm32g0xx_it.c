@@ -340,6 +340,14 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */
                 /* 多窗口捕获：每样本只留 delta + step + 判据结论（4 字节）*/
                 adc_zc_wave_push(dzc, (uint8_t)step, zc);
+                /* ★★ 2026-10-11 可靠时间戳：每帧 +1（24kHz，2.7 秒回绕一次）★★
+                 *   原来用 thiszctime 量"换相间隔"已被证明不可信（它说 78.5% 的步
+                 *   没有过零，而同轮只有 5 次卡顿，自相矛盾）。这个计数只在 ADC
+                 *   中断里自增，与任何"认到/没认到过零"的逻辑无关 ⇒ 是纯粹的时间轴。 */
+                {
+                    extern volatile uint16_t adc_frame_cnt;
+                    adc_frame_cnt++;
+                }
                 if (zc) {
                     edge_rise = 1;   /* 方向不参与判据（本板 rising 的极性约定无可靠对照）*/
                 }
