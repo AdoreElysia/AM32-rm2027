@@ -826,7 +826,7 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
  *   ★ 去掉的只是"看不看过零计数"这一步；斜坡、对齐、交棒时的相位/周期初始化
  *     全部照旧 ⇒ 交棒后的行为与之前几轮可比。 */
 #ifndef OL_SKIP_VERIFY
-#define OL_SKIP_VERIFY      1
+#define OL_SKIP_VERIFY      0
 #endif
 #if OL_SKIP_VERIFY
 /* ★ 交棒条件改成"斜坡跑到底 + 恒速热身满"（ol_soak_ticks 由上面那段自增，
@@ -3227,7 +3227,7 @@ int main(void)
      *   改成 700：输入 600 ⇒ 占空比约 553（≈ 原来 351 的 1.6 倍），
      *   目的是让低频段（反电势≈0）有足够电压把转子带起来。
      *   安全网仍在：过流 OL_TRIP_CURRENT=8A、总时长 8.0s。 */
-    startup_max_duty_cycle = 700;
+    startup_max_duty_cycle = 400;      /* 回归档值（曾为试高占空比临时放到 700）*/
     tim1_arr = TIMER1_MAX_ARR;
 #if RM2027_OL_ARM_ONLY
     old_routine = 1;                         /* 开环独占版：换相由 olStepTick 独占 */
