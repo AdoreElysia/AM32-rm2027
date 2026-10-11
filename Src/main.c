@@ -464,10 +464,19 @@ uint16_t commutation_intervals[6] = { 0 };
  *   1024 笔 x 2.64ms 约覆盖 2.7 秒；把 ccm_ci 逐笔累加就是真实时间轴。
  *   只写 RAM，不改变任何控制行为；ccm_idx 不清零 ⇒ 跨越"过流停机→重启"也能连起来看。 */
 #define CCM_N 1024
-volatile uint16_t ccm_ci[CCM_N];
-volatile uint16_t ccm_wait[CCM_N];
+volatile uint16_t ccm_ci[CCM_N];      /* 最近 1024 笔（循环覆盖）*/
 volatile uint8_t  ccm_step[CCM_N];
-volatile uint16_t ccm_idx;
+volatile uint16_t ccm_head;           /* 下一个写入位置 */
+volatile uint32_t ccm_total;          /* 累计笔数（>1024 说明已绕过一圈）*/
+
+/* 粗时间线：每 64 笔记一次 ⇒ 128 笔覆盖 128x64 次换相。
+ * 闭环约 1.3ms/步 ⇒ 约 10 秒，足够覆盖一整轮台架运行（含过流停机重启）。
+ * 细记录只看得到"最后 1.3 秒"，这张粗表才看得到"整轮"有没有变慢。 */
+#define CCM_SLOW_N   128
+#define CCM_SLOW_DIV 64
+volatile uint16_t ccm_slow_ci[CCM_SLOW_N];
+volatile uint16_t ccm_slow_head;
+volatile uint32_t ccm_slow_total;
 volatile uint32_t average_interval = 0;
 uint32_t last_average_interval;
 int e_com_time;
@@ -1781,12 +1790,17 @@ void commutate()
     zcfound = 0;
     /* 实验埋点：记一笔换相历史（说明见变量定义处）。放在这里是因为此刻
      * step 已更新、changeCompInput() 已切好下一相的采样通道。 */
-    if (ccm_idx < CCM_N) {
-        uint16_t _ci = ccm_idx;
+    {
+        uint16_t _ci = ccm_head;
         ccm_ci[_ci]   = (uint16_t)commutation_interval;
-        ccm_wait[_ci] = waitTime;
         ccm_step[_ci] = (uint8_t)step;
-        ccm_idx = (uint16_t)(_ci + 1u);
+        ccm_head = (uint16_t)((_ci + 1u) & (CCM_N - 1u));
+        ccm_total++;
+        if ((ccm_total & (CCM_SLOW_DIV - 1u)) == 0u) {
+            ccm_slow_ci[ccm_slow_head] = (uint16_t)commutation_interval;
+            ccm_slow_head = (uint16_t)((ccm_slow_head + 1u) & (CCM_SLOW_N - 1u));
+            ccm_slow_total++;
+        }
     }
     /* ★★★ 2026-10-10 改存【本步实测步长】，不再存滤波后的 ci ★★★
      *   原来存的是 commutation_interval（滤波输出）⇒ 6 个槽其实是【同一个值】，
