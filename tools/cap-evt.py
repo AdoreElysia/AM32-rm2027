@@ -83,7 +83,6 @@ def resets(v):
 def parse(buf):
     """返回 (有效事件, 窗口列表, 剔除的假帧数)。窗口列表元素 = (win_seq, win_ts, delta[], step[])"""
     rows, wins, i = [], [], 0
-    import struct as _st
     while i < len(buf) - 21:
         j = buf.find(b'\xA5\x5A\xA5\x5A', i)
         if j < 0:
@@ -180,7 +179,7 @@ with open(csvp, 'w', newline='') as f:
     w = csv.writer(f); w.writerow(['seq', 'ts_frame', 'delta', 'step', 'wait', 'duty', 'cur', 'stage'])
     w.writerows(rows)
 rate = f'{len(buf)/SECS/1000:.1f} KB/s' if SECS else '—'
-print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {wins}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
+print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {len(wins)}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
 print(f'CSV → {csvp}  ({os.path.getsize(csvp)} 字节)')
 if wins:
     npzp = csvp.replace('.csv', '_win.npz')
