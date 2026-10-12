@@ -2933,6 +2933,13 @@ static void olStepTick(void)
             ol_stop_reason = 0;
             ol_cool_ticks = 0;
             cl_done_latch = 0;   /* ★ 收油/上锁 ⇒ 解除"闭环跑完"的锁存，下次给油可再跑 */
+            /* ★★ 2026-10-12 必须同时清这个，否则"启动就停、电机一步都不转" ★★
+             *   cl_run_armed 之前只在自动停机里被清 ⇒ 一旦成功交棒过一次，
+             *   收油停机后它仍是 1、cl_run_start 还是上一轮的旧帧号 ⇒
+             *   下次刚把 running 置 1，到点检查一算 (adc_frame_total - cl_run_start)
+             *   远超 6 秒 ⇒ 立刻 allOff() ⇒ 无限"启动即停"，电机完全转不起来
+             *   （实测：newinput=400、armed=1，但 running 恒为 0）。 */
+            cl_run_armed = 0;
         }
         /* ★ "到时间上限"停机的自动重跑：冷却 OL_COOL_LIMIT 拍后解除锁存。
          *   这样"跑 N 秒 → 停 M 秒 → 又跑 N 秒"，既不会一直转、也不会被永久锁死。
