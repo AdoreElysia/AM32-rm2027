@@ -509,9 +509,13 @@ volatile uint8_t  ccm_step[CCM_N];
  *   帧格式（18 字节，小端，与 PC 端 evt-dump.py 一致）：
  *     AA 55 | seq u16 | ts u32 | delta i16 | step u8 | wait u16 | duty u16 | cur i16 | chk u8
  *   带宽：每次换相 18 字节、约 1000 次/秒 => 约 18KB/s，1Mbaud 下很轻松。 */
-#define EVT_FRAME   21           /* ★ 2026-10-12 20->21：末尾加 1 字节"阶段标志"
-                                  *   0=闭环、1=开环(还在起步链)。出图时能把开环段
-                                  *   与闭环段分开上色，直接对比"开环稳 vs 闭环抖" */
+#define EVT_FRAME   29           /* ★ 2026-10-12 21->29：加 4 个"捏占空比的手"+阶段
+                                  *   [19..20] input_override/10000（速度环输出）
+                                  *   [21..22] startup_max_duty_cycle（AM32 起步天花板）
+                                  *   [23..24] use_current_limit_adjust（电流环夹子）
+                                  *   [25..26] commutation_interval（ci，拍）
+                                  *   [27] 位0=阶段(1开环/0闭环) 位1=电流环使能
+                                  *   [28] crc8(前 28 字节) */
 #define EVT_BUF_N   1024
 #define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
@@ -1924,11 +1928,12 @@ static uint8_t evt_crc8(const uint8_t *p, uint8_t n)
  *   每窗一包：A5 5A A5 5A | win_seq u16 | ts u32 | n u16 | n*(delta i16 + step u8)
  *   （靠 4 字节独特帧头 + 长度字段同步；ts = 本窗首帧的 24kHz 总帧号）*/
 #define WIN_N        512
-#define WIN_TOTAL    (12 + WIN_N * 10)    /* 头 12 字节 + 每帧 10 字节(VA/VB/VC/V0+step+1保留) */
+#define WIN_TOTAL    (12 + WIN_N * 12)    /* 头 12 字节 + 每帧 12 字节(VA/VB/VC/V0/电流 + step + 保留) */
 volatile int16_t  win_buf[WIN_N];       /* ★ 现在语义 = VA（四路电压版）*/
 volatile int16_t  win_vb[WIN_N];
 volatile int16_t  win_vc[WIN_N];
 volatile int16_t  win_v0[WIN_N];
+volatile int16_t  win_cur[WIN_N];      /* ★ 每帧电流（ADC 原始码）*/
 volatile uint8_t  win_step[WIN_N];
 volatile uint16_t win_n;
 volatile uint8_t  win_state;     /* 0=采集中 1=待发送 2=发送中 */
@@ -1939,7 +1944,7 @@ volatile uint8_t  win_tx[200];
 static uint8_t    win_pkt[WIN_TOTAL];    /* ★ 整包组好后一次性交给 DMA（见 win_pump）*/
 
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
-void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, uint8_t st)
+void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_t st)
 {
     if (win_state != 0u) { return; }        /* 发送中/待发送 ⇒ 本窗不再采 */
     /* ★★ 2026-10-12 补：每个窗口记下【本窗首帧的绝对 24kHz 帧号】★★
@@ -1954,6 +1959,7 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, uint8_t st)
     win_vb[i]   = vb;
     win_vc[i]   = vc;
     win_v0[i]   = v0;
+    win_cur[i]  = cu;
     win_step[i] = st;
     i++;
     if (i >= WIN_N) {
@@ -1983,7 +1989,7 @@ void win_pump(void)
     win_pkt[9] = (uint8_t)((win_ts >> 24) & 0xFF);
     win_pkt[10] = (uint8_t)(WIN_N & 0xFF);   win_pkt[11] = (uint8_t)(WIN_N >> 8);
     for (uint16_t f = 0; f < WIN_N; f++) {
-        uint16_t k = (uint16_t)(12u + f * 10u);
+        uint16_t k = (uint16_t)(12u + f * 12u);
         win_pkt[k + 0] = (uint8_t)( win_buf[f]       & 0xFF);  /* VA */
         win_pkt[k + 1] = (uint8_t)((win_buf[f] >> 8) & 0xFF);
         win_pkt[k + 2] = (uint8_t)( win_vb[f]        & 0xFF);  /* VB */
@@ -1992,8 +1998,10 @@ void win_pump(void)
         win_pkt[k + 5] = (uint8_t)((win_vc[f]  >> 8) & 0xFF);
         win_pkt[k + 6] = (uint8_t)( win_v0[f]        & 0xFF);  /* V0 */
         win_pkt[k + 7] = (uint8_t)((win_v0[f]  >> 8) & 0xFF);
-        win_pkt[k + 8] = win_step[f];
-        win_pkt[k + 9] = 0u;                                   /* 保留 */
+        win_pkt[k + 8] = (uint8_t)( win_cur[f]       & 0xFF);  /* ★ 电流 */
+        win_pkt[k + 9] = (uint8_t)((win_cur[f] >> 8) & 0xFF);
+        win_pkt[k +10] = win_step[f];
+        win_pkt[k +11] = 0u;                                   /* 保留 */
     }
 
     win_seq++;
@@ -2026,8 +2034,22 @@ static void evt_push(void)
     p[13] = (uint8_t)(wt & 0xFF);  p[14] = (uint8_t)(wt >> 8);
     p[15] = (uint8_t)(dt & 0xFF);  p[16] = (uint8_t)(dt >> 8);
     p[17] = (uint8_t)(cr & 0xFF);  p[18] = (uint8_t)((cr >> 8) & 0xFF);
-    p[19] = (uint8_t)(ol_startup_arm ? 1u : 0u);   /* ★ 阶段标志：1=开环 0=闭环 */
-    p[20] = evt_crc8(p, 20);
+    {
+        extern int32_t  input_override;
+        extern uint16_t startup_max_duty_cycle;
+        extern int16_t  use_current_limit_adjust;
+        extern char     use_current_limit;
+        uint16_t iov = (uint16_t)(input_override / 10000);
+        p[19] = (uint8_t)(iov & 0xFF);   p[20] = (uint8_t)(iov >> 8);
+        p[21] = (uint8_t)(startup_max_duty_cycle & 0xFF);
+        p[22] = (uint8_t)(startup_max_duty_cycle >> 8);
+        p[23] = (uint8_t)((uint16_t)use_current_limit_adjust & 0xFF);
+        p[24] = (uint8_t)(((uint16_t)use_current_limit_adjust >> 8) & 0xFF);
+        p[25] = (uint8_t)(commutation_interval & 0xFF);
+        p[26] = (uint8_t)((commutation_interval >> 8) & 0xFF);
+        p[27] = (uint8_t)((ol_startup_arm ? 1u : 0u) | (use_current_limit ? 2u : 0u));
+        p[28] = evt_crc8(p, 28);
+    }
     evt_head = nxt;
     evt_total++;
 }

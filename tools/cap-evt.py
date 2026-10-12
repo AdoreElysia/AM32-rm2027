@@ -39,7 +39,7 @@ else:
 
 def valid(r):
     """剔除"窗口包被误读成事件帧"的假帧（判据抄 evt-plot.py）"""
-    _seq, _ts, dl, st, _w, du, cur, _g = r
+    _seq, _ts, dl, st, _w, du, cur = r[:7]
     return (1 <= st <= 6) and (0 <= du <= 2000) and (abs(dl) < 3000) and (0 <= cur < 400)
 
 
@@ -83,24 +83,27 @@ def resets(v):
 def parse(buf):
     """返回 (有效事件, 窗口列表, 剔除的假帧数)。窗口列表元素 = (win_seq, win_ts, delta[], step[])"""
     rows, wins, i = [], [], 0
-    while i < len(buf) - 21:
+    while i < len(buf) - 29:            # ★ 事件帧 21 -> 29（加了 4 个环变量）
         j = buf.find(b'\xA5\x5A\xA5\x5A', i)
         if j < 0:
             break
-        if j + 21 > len(buf):
+        if j + 29 > len(buf):
             break
-        if crc8(buf[j:j + 20]) == buf[j + 20]:
-            rows.append(struct.unpack_from('<HIhBHHh', buf, j + 4) + (buf[j + 19],))
-            i = j + 21
-        elif (j + 12 + 512 * 10 <= len(buf)
+        if crc8(buf[j:j + 28]) == buf[j + 28]:
+            s7 = struct.unpack_from('<HIhBHHh', buf, j + 4)
+            iov, smax = struct.unpack_from('<HH', buf, j + 19)
+            uca, cci = struct.unpack_from('<hH', buf, j + 23)
+            rows.append(s7 + (buf[j + 27] & 1, iov, smax, uca, cci))
+            i = j + 29
+        elif (j + 12 + 512 * 12 <= len(buf)
               and struct.unpack_from('<H', buf, j + 10)[0] == 512):
-            # ★ 2026-10-12 四路电压版：每帧 10 字节 = VA VB VC V0 (各 i16) + step + 保留
+            # ★ 2026-10-12 四路电压+电流版：每帧 12 字节 = VA VB VC V0 电流(各 i16) + step + 保留
             wseq, wts = struct.unpack_from('<HI', buf, j + 4)
-            pay = np.frombuffer(buf[j + 12:j + 12 + 512 * 10], dtype=np.uint8).reshape(-1, 10)
+            pay = np.frombuffer(buf[j + 12:j + 12 + 512 * 12], dtype=np.uint8).reshape(-1, 12)
             def _i16(c):
                 return pay[:, c].astype(np.int16) | (pay[:, c + 1].astype(np.int16) << 8)
-            wins.append((wseq, wts, _i16(0), _i16(2), _i16(4), _i16(6), pay[:, 8].copy()))
-            i = j + 12 + 512 * 10
+            wins.append((wseq, wts, _i16(0), _i16(2), _i16(4), _i16(6), _i16(8), pay[:, 10].copy()))
+            i = j + 12 + 512 * 12
         else:
             i = j + 1
     n_raw = len(rows)
@@ -183,7 +186,7 @@ rows, wins, nfake = parse(buf)
 stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 csvp = os.path.join(OUTD, f'evt_run_{stamp}.csv')
 with open(csvp, 'w', newline='') as f:
-    w = csv.writer(f); w.writerow(['seq', 'ts_frame', 'delta', 'step', 'wait', 'duty', 'cur', 'stage'])
+    w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci'])
     w.writerows(rows)
 rate = f'{len(buf)/SECS/1000:.1f} KB/s' if SECS else '—'
 print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {len(wins)}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
@@ -194,8 +197,8 @@ if wins:
              ts=np.array([w[1] for w in wins]),
              va=np.array([w[2] for w in wins]), vb=np.array([w[3] for w in wins]),
              vc=np.array([w[4] for w in wins]), v0=np.array([w[5] for w in wins]),
-             step=np.array([w[6] for w in wins]))
-    print(f'  （四路电压版：VA/VB/VC/V0 各 512 点）')
+             cur=np.array([w[6] for w in wins]), step=np.array([w[7] for w in wins]))
+    print(f'  （四路电压+电流版：VA/VB/VC/V0/电流 各 512 点）')
     print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
 if not rows:
     print('❌ 一个事件都没收到 —— 检查 12V(母线电压) / F1 油门'); sys.exit(1)
