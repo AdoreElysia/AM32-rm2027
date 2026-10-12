@@ -1848,6 +1848,23 @@ void getBemfState()
 }
 
 /* ---- 串口换相事件流 ---- */
+/* ★★ 2026-10-12 串口发送【仲裁】★★
+ *   只有一条 DMA（DMA1_CH3），而"换相事件流"和"窗口式全速采样"两条流都在用它。
+ *   原来两边各有一个私有 busy 标志、互相不知情 ⇒ 一个会在另一个传输到一半时
+ *   DisableChannel 再改地址 ⇒ 整包被腰斩 ⇒ 实测：8 秒里 3031 次错位帧、只有 14 个整窗。
+ *   改成一个共享的 tx_busy：谁抢到谁发，另一个等下一轮主循环。
+ *   （仲裁只保证"不互相踩"，两条流仍然共享 1 Mbaud 带宽 ⇒ 覆盖率会下降。） */
+volatile uint8_t tx_busy = 0;
+
+/* 返回 1 = 串口空闲、可以发。忙标志在 DMA 通道被硬件关掉（传完）后自动清。 */
+static uint8_t tx_ready(void)
+{
+    if (tx_busy && !LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) {
+        tx_busy = 0;
+    }
+    return (uint8_t)(!tx_busy);
+}
+
 static void evt_send(uint8_t *p, uint16_t len)
 {
     /* ★ 不再切"发/收方向"：原版每发一次就切一次（半双工），切向瞬间是
@@ -1857,6 +1874,7 @@ static void evt_send(uint8_t *p, uint16_t len)
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, len);
     LL_USART_EnableDMAReq_TX(USART1);
     LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_3);
+    tx_busy = 1;                      /* ★ 占用串口（见上面的仲裁说明）*/
 }
 
 /* CRC8（多项式 0x07，初值 0）—— 比异或强得多，错位几乎必被检出 */
@@ -1894,11 +1912,19 @@ volatile uint32_t win_seq;
 volatile uint32_t win_ts;
 volatile uint32_t win_sent;      /* 已发出的窗口数 —— 没增长就说明卡住了 */
 volatile uint8_t  win_tx[200];
+static uint8_t    win_pkt[WIN_TOTAL];    /* ★ 整包组好后一次性交给 DMA（见 win_pump）*/
 
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
 void win_push(int16_t d, uint8_t st)
 {
     if (win_state != 0u) { return; }        /* 发送中/待发送 ⇒ 本窗不再采 */
+    /* ★★ 2026-10-12 补：每个窗口记下【本窗首帧的绝对 24kHz 帧号】★★
+     *   原来 win_ts 只被声明、从来没有赋值 ⇒ 每个窗口包的 ts 恒为 0
+     *   ⇒ 窗口之间是有间隔的，没有绝对帧号就没法把多窗拼回真实时间轴
+     *   （也就回答不了"这是交棒后第几毫秒"）。
+     *   注：adc_frame_total 在本函数返回后才 ++（见 stm32g0xx_it.c），
+     *   所以取到的是"上一帧"的编号 —— 差 1 帧 = 41.67µs，拼时间轴无影响。 */
+    if (win_n == 0u) { win_ts = adc_frame_total; }
     uint16_t i = win_n;
     win_buf[i]  = d;
     win_step[i] = st;
@@ -1911,49 +1937,36 @@ void win_push(int16_t d, uint8_t st)
     }
 }
 
-/* 主循环调用：把采满的窗口整包发出去（分批，每批 200 字节）*/
+/* 主循环调用：把采满的窗口【整包一次 DMA 发出去】。
+ * ★★ 2026-10-12 改：原来是"每轮主循环发 200 字节"⇒ 发送速率被主循环的轮转速度
+ *   卡住：实测窗口间隔 173ms（理论 36.8ms）、覆盖率只有 12%（理论 58%）。
+ *   现在先在内存里组好整包再一次性交给 DMA ⇒ 发送时间只由波特率决定
+ *   （1548 B @1Mbaud = 15.5ms），与主循环快慢无关。RAM 代价 1548 B。 */
 void win_pump(void)
 {
-    static uint8_t  busy = 0;
-    static uint16_t pos  = 0;
-    if (busy) {
-        if (LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) { return; }
-        busy = 0;
+    if (!tx_ready()) { return; }            /* 串口忙（可能事件流在用）⇒ 等下一轮 */
+    if (win_state != 1u) { return; }        /* 只有"采满待发"才动 */
+
+    /* 组包（此时 ISR 已停写：win_state != 0 时 win_push 直接返回）*/
+    win_pkt[0] = 0xA5; win_pkt[1] = 0x5A; win_pkt[2] = 0xA5; win_pkt[3] = 0x5A;
+    win_pkt[4] = (uint8_t)(win_seq & 0xFF);  win_pkt[5] = (uint8_t)(win_seq >> 8);
+    win_pkt[6] = (uint8_t)(win_ts & 0xFF);
+    win_pkt[7] = (uint8_t)((win_ts >> 8) & 0xFF);
+    win_pkt[8] = (uint8_t)((win_ts >> 16) & 0xFF);
+    win_pkt[9] = (uint8_t)((win_ts >> 24) & 0xFF);
+    win_pkt[10] = (uint8_t)(WIN_N & 0xFF);   win_pkt[11] = (uint8_t)(WIN_N >> 8);
+    for (uint16_t f = 0; f < WIN_N; f++) {
+        uint16_t k = (uint16_t)(12u + f * 3u);
+        win_pkt[k]     = (uint8_t)( win_buf[f]       & 0xFF);
+        win_pkt[k + 1] = (uint8_t)((win_buf[f] >> 8) & 0xFF);
+        win_pkt[k + 2] = win_step[f];
     }
-    if (win_state == 1u) {
-        win_state = 2u;
-        pos = 0;
-    }
-    if (win_state != 2u) { return; }
-    if (pos >= WIN_TOTAL) {                 /* 发完 ⇒ 立刻开新一轮采集 */
-        win_seq++;
-        win_sent++;
-        win_n = 0;
-        win_state = 0u;
-        return;
-    }
-    uint16_t batch = (uint16_t)(WIN_TOTAL - pos);
-    if (batch > 200u) { batch = 200u; }
-    for (uint16_t i = 0; i < batch; i++) {
-        uint16_t k = (uint16_t)(pos + i);
-        uint8_t  v;
-        if (k < 4u)       { v = (uint8_t)((k == 0u) ? 0xA5 : ((k == 1u) ? 0x5A : ((k == 2u) ? 0xA5 : 0x5A))); }
-        else if (k < 6u)  { v = (uint8_t)((win_seq >> ((k - 4u) * 8)) & 0xFF); }
-        else if (k < 10u) { v = (uint8_t)((win_ts  >> ((k - 6u) * 8)) & 0xFF); }
-        else if (k < 12u) { v = (uint8_t)((WIN_N   >> ((k - 10u) * 8)) & 0xFF); }
-        else {
-            uint16_t d = (uint16_t)(k - 12u);
-            uint16_t f = (uint16_t)(d / 3u);
-            uint16_t r = (uint16_t)(d % 3u);
-            if (r == 0u)      { v = (uint8_t)( win_buf[f]       & 0xFF); }
-            else if (r == 1u) { v = (uint8_t)((win_buf[f] >> 8) & 0xFF); }
-            else              { v = win_step[f]; }
-        }
-        win_tx[i] = v;
-    }
-    evt_send((uint8_t *)win_tx, batch);
-    pos = (uint16_t)(pos + batch);
-    busy = 1;
+
+    win_seq++;
+    win_sent++;
+    win_n = 0;
+    win_state = 0u;                         /* 立刻开新一轮采集（DMA 在后台自己发）*/
+    evt_send((uint8_t *)win_pkt, WIN_TOTAL);
 }
 
 /* 在换相那一刻打包一个事件（中断上下文：只写内存，不发送）*/
@@ -1988,9 +2001,8 @@ static void evt_push(void)
 /* 主循环调用：攒够一批就用 DMA 发（不在中断里做）*/
 void evt_pump(void)
 {
-    static uint8_t busy = 0;
-    if (busy && !LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) { busy = 0; }
-    if (busy) { return; }
+    /* ★ 与窗口流共用一条 DMA ⇒ 串口忙就等下一轮（原来是私有 busy，见 evt_send 上方说明）*/
+    if (!tx_ready()) { return; }
     uint16_t avail = (uint16_t)((evt_head - evt_tail) & (EVT_BUF_N - 1u));
     if (avail < EVT_BATCH) { return; }
     for (uint16_t i = 0; i < EVT_BATCH; i++) {
@@ -1998,7 +2010,6 @@ void evt_pump(void)
     }
     evt_tail = (uint16_t)((evt_tail + EVT_BATCH) & (EVT_BUF_N - 1u));
     evt_send((uint8_t *)evt_tx, EVT_BATCH);
-    busy = 1;
 }
 
 /* ccm_record：换相历史记录（诊断'闭环抖且慢'）
