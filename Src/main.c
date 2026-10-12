@@ -826,7 +826,32 @@ volatile uint8_t  bemf_zc_step = 0;
  *     ⇒ 相位偏 ⇒ 转矩掉 ⇒ 变慢。本表把闭环的相位"对齐到开环那套好的相位"。
  *   ⚠ 用比例（×ci）而不是绝对拍：步长随转速变，绝对拍不随动。
  *   ⚠ 方向风险：用户扫 advance 曾得"越提前越慢"，与本表方向相反 —— 先跑一次定方向。 */
-static const uint16_t wt_num[6] = { 314u, 359u, 269u, 359u, 47u, 423u };  /* ÷1000 */
+/* ⚠ 本分支用 RM2027_CL_WT_MODE=1（数值偏移），下面这张比例表仅留作对照/回退，
+ *   所以标 unused（-Werror=unused-const-variable 会拦）。 */
+static const uint16_t wt_num[6] __attribute__((unused)) = { 314u, 359u, 269u, 359u, 47u, 423u };  /* ÷1000 */
+
+/* ★★★ 2026-10-12 test-cl-补偿方式-数值偏移：每步【绝对数值偏移】表（替代上面的比例表）★★★
+ *   用户思路："开环稳定的数据点，每一步采取平均值，算一遍数值偏移"。
+ *
+ *   为什么比例表(wt_num)在原理上就不对：
+ *     表 A 假设"过零被判晚的时间 ∝ 步长(ci)"。实测不成立 —— 由开环段量出的
+ *       L_s = (p_s − 0.5) × w_s        （p_s = 过零落在本步内的位置，w_s = 本步时长）
+ *     即"过零被判晚了多少绝对时间"，【与转速几乎无关】（单位：拍 = 0.5µs）：
+ *         w≈1830 拍（1780 转/分）: 340 215 350 232 816 127
+ *         w≈2790 拍（1194 转/分）: 312 250 354 167 917  83     ← 差 ≤1 个采样格(83 拍)
+ *     ⇒ 正确模型是   waitTime = ci/2 − L_s    （L_s 固定）
+ *       而不是        waitTime = ratio_s × ci
+ *     两者【只在标定转速上等价】—— 而 wt_num 恰是在 w≈1856 拍的开环上标定的
+ *     ⇒ 一离开那个转速，比例表的相位就系统性偏掉。这就是"数值偏移"要换掉它的理由。
+ *
+ *   本表来源（可复算：tools/win-steps.py）：
+ *     两跑 evt_run_20261012_220140 / _220636 里【开环段、本步时长 1500~2200 拍】的全部
+ *     完整换相步，按步号取 L_s 的【平均值】。样本 176~331 段/步，标准差 57~94 拍
+ *     （≈ 一个采样格 83 拍）⇒ 各步的 L 是稳定可用的常数。
+ *   ⚠ 边界：转速很高时 ci/2 可能小于 L_s（step5 的 816 最危险，ci<1632 拍即 2200 转/分
+ *     以上会夹到 0）⇒ 那时等价于"过零即换相"。本表只用于台架这个转速区间。 */
+static const uint16_t wt_off[6] = { 340u, 215u, 350u, 232u, 816u, 127u };
+
 /* ★★ 2026-10-12 试过"迭代到六步均匀"，失败并撤回 ★★
  *   想法：先按 ratio_s <- ratio_s × (T̄/T_s) 迭代一轮（T=实测六步时长），指望六步时长拉齐。
  *   实测（同一台架、同样 6 秒）：
@@ -2379,7 +2404,15 @@ void PeriodElapsedCallback()
      *        这与实测"步 5 最长(1.54ms)、步 6 最短(0.50ms)"的宽度畸变方向一致。 */
     {
         uint8_t _s = (step >= 1 && step <= 6) ? (uint8_t)(step - 1u) : 0u;
+#if RM2027_CL_WT_MODE == 1
+        /* ★ 绝对数值偏移：waitTime = ci/2 − L_s（L_s = wt_off[_s]，见 wt_off 的说明）。
+         *   夹到 0：转速很高时 ci/2 可能小于 L_s（step5 的 816 最危险）。 */
+        int32_t _wt = (int32_t)(commutation_interval >> 1) - (int32_t)wt_off[_s];
+        if (_wt < 0) { _wt = 0; }
+        waitTime = (uint16_t)_wt;
+#else
         waitTime = (uint16_t)(((uint32_t)commutation_interval * (uint32_t)wt_num[_s]) / 1000u);
+#endif
     }
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt

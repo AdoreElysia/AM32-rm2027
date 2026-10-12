@@ -2649,6 +2649,15 @@
 #define RM2027_CL_ANCHOR_DUTY   300
 #endif
 
+/* ★★ 2026-10-12 每步 waitTime 的补偿方式（分支 test-cl-补偿方式-*）★★
+ *   0 = 分步【比例】表（wt_num，表A）：waitTime = ratio_s × ci
+ *   1 = 分步【绝对数值偏移】表（wt_off）：waitTime = ci/2 − L_s      ← 本分支默认
+ *   依据见 Src/main.c 里 wt_off 的说明：L_s = (p_s−0.5)×w_s 实测与转速无关，
+ *   所以"数值偏移"才是对的缩放律；比例表只在标定转速上碰巧等价。 */
+#ifndef RM2027_CL_WT_MODE
+#define RM2027_CL_WT_MODE       1
+#endif
+
 /* ★ 闭环必须的开关：过零检测从"轮询"切到"中断"的时机
  *   上游默认（不定义时）是：低转速用轮询（zcfoundroutine 忙等）、转速上来后切中断模式。
  *   本板没有比较器、中断源是 ADC-DMA 完成中断（见 stm32g0xx_it.c）⇒ 期望行为是
