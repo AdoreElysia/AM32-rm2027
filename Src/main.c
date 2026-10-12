@@ -509,13 +509,17 @@ volatile uint8_t  ccm_step[CCM_N];
  *   帧格式（18 字节，小端，与 PC 端 evt-dump.py 一致）：
  *     AA 55 | seq u16 | ts u32 | delta i16 | step u8 | wait u16 | duty u16 | cur i16 | chk u8
  *   带宽：每次换相 18 字节、约 1000 次/秒 => 约 18KB/s，1Mbaud 下很轻松。 */
-#define EVT_FRAME   29           /* ★ 2026-10-12 21->29：加 4 个"捏占空比的手"+阶段
+#define EVT_FRAME   37           /* ★ 2026-10-12 29->37：再加 4 个"滤波原料"
                                   *   [19..20] input_override/10000（速度环输出）
                                   *   [21..22] startup_max_duty_cycle（AM32 起步天花板）
                                   *   [23..24] use_current_limit_adjust（电流环夹子）
                                   *   [25..26] commutation_interval（ci，拍）
                                   *   [27] 位0=阶段(1开环/0闭环) 位1=电流环使能
-                                  *   [28] crc8(前 28 字节) */
+                                  *   [28..29] thiszctime（本次过零量到的间隔）
+                                  *   [30..31] lastzctime
+                                  *   [32..33] average_interval(低16位)
+                                  *   [34..35] advance（相位前移量）
+                                  *   [36] crc8(前 36 字节) */
 #define EVT_BUF_N   1024
 #define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
@@ -2048,7 +2052,13 @@ static void evt_push(void)
         p[25] = (uint8_t)(commutation_interval & 0xFF);
         p[26] = (uint8_t)((commutation_interval >> 8) & 0xFF);
         p[27] = (uint8_t)((ol_startup_arm ? 1u : 0u) | (use_current_limit ? 2u : 0u));
-        p[28] = evt_crc8(p, 28);
+        /* ★ 2026-10-12 加"ci 的滤波原料"：thiszctime 是 6 步平均的输入，
+         *   逐事件记下来就能重建那 6 个槽 ⇒ 判断 ci 是被谁推大的。*/
+        p[28] = (uint8_t)(thiszctime & 0xFF);   p[29] = (uint8_t)(thiszctime >> 8);
+        p[30] = (uint8_t)(lastzctime & 0xFF);   p[31] = (uint8_t)(lastzctime >> 8);
+        p[32] = (uint8_t)(average_interval & 0xFF); p[33] = (uint8_t)((average_interval >> 8) & 0xFF);
+        p[34] = (uint8_t)(advance & 0xFF);      p[35] = (uint8_t)(advance >> 8);
+        p[36] = evt_crc8(p, 36);
     }
     evt_head = nxt;
     evt_total++;
