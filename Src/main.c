@@ -941,131 +941,41 @@ static void wt_iter_feed(uint8_t s_end, uint32_t w_meas)
 }
 #endif
 
-/* ★★★ 2026-10-12 test-cl-补偿方式-电压域竖直偏移【两段式：先增益、后偏置】★★★
- *   用户定的方案（原话）："先改增益后偏移 / 之后靠次大减去次小，（合理范围内的增益）
- *   增益差值右移三位叠加 / 然后增益改完了改电压偏移大小 右移五位平均"。
+/* ★★★ 2026-10-12 test-cl-补偿方式-电压域竖直偏移【静态两参数表·无迭代】★★★
+ *   用户要求："仅仅靠开环稳定数据算一板 / 不考虑迭代 / 再测量一个参数来一遍"。
+ *   ⇒ 只用【开环斜坡稳定段】实测的两张表，硬编码；片上【不做任何迭代/自适应】。
  *
- *   物理模型：悬空相的采样链 = 增益 g × 真值 + 偏置 b。所以：
- *     ① 幅值不对（增益错）⇒ 六步的波形"高矮"不一致 ⇒ 固定 12 码滞回对每步的延迟不同；
- *     ② 竖直中心不对（偏置）⇒ 跨零点整体平移 ⇒ 认到的过零时刻系统性偏掉。
- *   两段分开修，且【先增益后偏置】：增益不动中心，但偏置会随增益的缩放一起动
- *   ⇒ 只有先把增益定下来，偏置才有唯一解。
+ *   物理模型：悬空相采样链 = 增益 g × 真值 + 偏置 b。两个参数分开补：
+ *     · 增益不对 ⇒ 六步波形"高矮"不一致 ⇒ 固定 12 码滞回对每步的延迟不同
+ *                  （实测滞回延迟 61~167 拍，差 2.7 倍）；
+ *     · 中心不对 ⇒ 跨零点整体平移 ⇒ 认到的过零时刻系统性偏掉。
  *
- *   幅值/中心的估计量 = 【次大 − 次小】与【(次大 + 次小)/2】（用户点子）：
- *     取"第二大的"而不是"最大的"，对换相振铃那种单帧尖峰天然免疫。
+ *   估计量（与固件同口径、且对换相振铃的单帧尖峰免疫）：
+ *       幅值 = 次大 − 次小       竖直中心 = (次大 + 次小) / 2
+ *
+ *   表来源：开环斜坡【稳定段】（步长 1700~2100 拍，即交棒前那一段），n = 80~90 段/步。
+ *     步幅值(码) 195 88 136 197 110 133 ⇒ 参考 = 六步中位 134
+ *     ★ 增益表 (Q8, 256=×1)：177 389 253 175 314 259  → ×0.69 1.52 0.99 0.68 1.23 1.01
+ *     ★ 偏置表 (ADC 码)      ： 41 -30  36 -14  80  -2
+ *   （A 相两步都要放大 —— 因为 A 相采样链增益只有 C 相的一半，见下面说明。）
  *
  *   施加方式（判据吃的 delta）：
- *       d_judge = ((d_raw − zo[s]) × zg[s]) >> 8        zg 是 Q8 定点：256 = ×1.0
- *     偏置先减（去掉 b），再乘增益（补 g）—— 与物理模型同序。
- *     只在闭环段施加：斜坡段反电势只有几码，减 30~67 码会把符号整段翻过去。
+ *       d_judge = ((d_raw − zo[s]) × zg[s]) >> 8
+ *     偏置先减（去 b）、再乘增益（补 g）—— 与物理模型同序。只在闭环段施加。
  *
- *   更新律：
- *     · 增益（前 GAIN_ROUNDS 轮，之后继续但很慢）：每 32 步取平均幅值 a_s；
- *       参考 a_ref = 六步幅值的【中位】（共模天然免疫：改一步的增益只动它自己的幅值）；
- *       zg[s] += (((a_ref − a_s) × 256) / a_ref) >> 3        ← "增益差值右移三位"
- *       钳位 zg ∈ [128, 512]（×0.5 ~ ×2.0，"合理范围内的增益"）
- *     · 偏置（增益跑够 GAIN_ROUNDS 轮之后才开）：每 32 步取平均中心 c_s；
- *       死区 |c_s| < 8 码不动（否则积分器在噪声上随机游走 —— 上一版就是这么撞轨的）；
- *       zo[s] += (c_s × 256) / zg[s]      ← 把"增益后的中心"换算回"增益前的偏置"
- *       钳位 zo ∈ [−90, 90] 码
- *
- *   初值：zo = 开环高速段实测表；zg = 256（不放大不缩小），让增益自己去收敛。
- *
- *   ⚠ 幅值参考值取中位而不是最大：取最大会让六步都被拉向最强的那一步（A 相要放大 2 倍），
- *     噪声也跟着放大；取中位则是"弱步抬、强步压"，总能量不涨。 */
+ *   ⚠ 只做静态表、不做迭代的代价：转速一变，幅值会跟着变（幅值 ∝ 转速），
+ *     而增益是固定倍数 ⇒ 归一关系只在标定转速附近成立。这是明知的选择。
+ *   ⚠ 已知未覆盖的第三个参数：交越【斜率】（实测 6.0~16.5 码/采样，2.7 倍散布）。
+ *     增益归一后滞回延迟从 61~167 拍收窄到 77~136 拍，step5 仍偏大（136 拍）
+ *     —— 因为它的斜率仍最低。要真正拉齐得补第三个参数（斜率/时间）。 */
 #if RM2027_CL_VOFF
-#define GAIN_ITER_N 32       /* 一轮 = 该步出现 32 次 */
-#define GAIN_QF     8        /* Q8 定点：256 = ×1.0 */
-#define GAIN_ROUNDS 8        /* 前 8 轮只调增益，之后才动偏置（先增益后偏置）*/
-#define VOFF_DEAD   8        /* 偏置死区（ADC 码）：|残余| < 此值不动 */
+volatile int16_t zo[6] = { 41, -30, 36, -14, 80, -2 };        /* 偏置（ADC 码，开环实测）*/
+volatile int16_t zg[6] = { 177, 389, 253, 175, 314, 259 };    /* 增益（Q8，256=×1，开环实测）*/
 
-volatile int16_t zo[6] = { 30, -20, 29, 0, 67, 14 };          /* 电压偏置（ADC 码）*/
-volatile int16_t zg[6] = { 256, 256, 256, 256, 256, 256 };    /* 增益（Q8，256 = ×1）*/
-volatile int16_t amp_last[6];      /* 最近一轮各步的平均幅值（诊断）*/
-volatile int16_t cen_last[6];      /* 最近一轮各步的平均中心（诊断）*/
-volatile uint8_t gain_rounds = 0;  /* 增益已完成几轮 */
-volatile uint8_t off_rounds = 0;   /* 偏置已完成几轮 */
-volatile int16_t gz_log[192];      /* 每轮六步的(增益改动, 偏置改动)打包记录：gain*1000+off */
-volatile uint8_t gz_log_i = 0;
-
-static int32_t amp_acc[6], cen_acc[6];
-static uint8_t rnd_cnt[6];
-static int16_t mx1, mx2, mn1, mn2;   /* 本步内 最大/次大/最小/次小 */
-static uint8_t vst_last = 0;
-
-static void voff_settle(uint8_t i)
-{
-    int32_t a = amp_acc[i] / GAIN_ITER_N;     /* 该步这一轮的平均幅值 */
-    int32_t c = cen_acc[i] / GAIN_ITER_N;     /* 该步这一轮的平均中心 */
-    amp_last[i] = (int16_t)a;
-    cen_last[i] = (int16_t)c;
-    /* 参考幅值 = 六步幅值中位（避免把六步都拽向最强步）*/
-    int16_t t[6];
-    for (uint8_t k = 0; k < 6u; k++) { t[k] = amp_last[k]; }
-    for (uint8_t k = 0; k < 6u; k++) {
-        for (uint8_t j = (uint8_t)(k + 1u); j < 6u; j++) {
-            if (t[j] < t[k]) { int16_t x = t[k]; t[k] = t[j]; t[j] = x; }
-        }
-    }
-    int32_t aref = ((int32_t)t[2] + (int32_t)t[3]) / 2;
-    int32_t gd = 0, od = 0;
-    /* ---- ① 增益：增益差值右移三位 ---- */
-    if (aref > 16) {
-        gd = (((aref - a) * 256) / aref) >> 3;
-        if (gd > 64) { gd = 64; }
-        if (gd < -64) { gd = -64; }
-        int32_t g = (int32_t)zg[i] + gd;
-        if (g > 512) { g = 512; }
-        if (g < 128) { g = 128; }
-        zg[i] = (int16_t)g;
-    }
-    /* ---- ② 偏置：增益跑够 GAIN_ROUNDS 轮之后才开；>>5 平均 + 死区 ---- */
-    if (gain_rounds >= GAIN_ROUNDS) {
-        if (c > VOFF_DEAD || c < -VOFF_DEAD) {
-            od = (c * 256) / (int32_t)zg[i];      /* 换算成"增益前"的偏置量 */
-            if (od > 16) { od = 16; }
-            if (od < -16) { od = -16; }
-            int32_t z = (int32_t)zo[i] + od;
-            if (z > 90) { z = 90; }
-            if (z < -90) { z = -90; }
-            zo[i] = (int16_t)z;
-        }
-        if (off_rounds < 250u) { off_rounds++; }
-    } else if (gain_rounds < 250u) {
-        gain_rounds++;
-    }
-    if (gz_log_i < 191u) {
-        gz_log[gz_log_i++] = (int16_t)(gd * 10 + (od / 2));   /* 打包：主要看增益那一项 */
-    }
-}
-
-/* 每帧由 ADC 中断调用（参数是【已补偿】的 delta）*/
+/* 保留函数名与调用点：本版【不做迭代】，所以这里是空的（迭代版在 git 历史里）。 */
 void voff_frame(int16_t d_comp, uint8_t zc_ok, uint8_t st)
 {
-    (void)zc_ok;
-    /* 本步内的 最大/次大/最小/次小（次大/次小 = 用户要的"次大减次小"）*/
-    if (d_comp > mx1) { mx2 = mx1; mx1 = d_comp; }
-    else if (d_comp > mx2) { mx2 = d_comp; }
-    if (d_comp < mn1) { mn2 = mn1; mn1 = d_comp; }
-    else if (d_comp < mn2) { mn2 = d_comp; }
-    if (st < 1u || st > 6u) { return; }
-    if (vst_last == 0u) { vst_last = st; return; }
-    if (st == vst_last) { return; }              /* 同一步：继续攒 */
-    {   /* ---- 结算刚结束的那一步 ---- */
-        uint8_t i = (uint8_t)(vst_last - 1u);
-        int16_t a = (int16_t)(mx2 - mn2);                                /* 幅值 */
-        int16_t c = (int16_t)(((int32_t)mx2 + (int32_t)mn2) / 2);        /* 竖直中心 */
-        if (a > 0 && c > -3000 && c < 3000) {
-            amp_acc[i] += a;
-            cen_acc[i] += c;
-            if (++rnd_cnt[i] >= GAIN_ITER_N) {
-                voff_settle(i);
-                amp_acc[i] = 0; cen_acc[i] = 0; rnd_cnt[i] = 0;
-            }
-        }
-    }
-    mx1 = mx2 = -32768; mn1 = mn2 = 32767;       /* 重置，开始攒下一点 */
-    vst_last = st;
+    (void)d_comp; (void)zc_ok; (void)st;
 }
 #endif
 
@@ -1083,6 +993,8 @@ void voff_frame(int16_t d_comp, uint8_t zc_ok, uint8_t st)
  *   用途：一眼看出反电势真实幅值 ⇒ 直接决定施密特滞回 BEMF_HYST_LSB 该取多少。
  *   实测它和"接受时 delta 只有 ±5~±11"配合，才能判定"信号在阈值上蹭"这件事。 */
 volatile int16_t  bemf_dmax = 0;
+/* ★ ci 合理性闸被触发的次数（诊断：这一跑靠不靠它兜住）*/
+volatile uint16_t ci_clamp_rejects = 0;
 
 #define OL_TRACE_LEN 32
 volatile uint16_t OL_TRACE_CNT[OL_TRACE_LEN];  /* 认到过零时"距上次过零"的拍数（TIM2, 0.5µs） */
@@ -2469,11 +2381,20 @@ void commutate()
          *     也能在几十步内到位。而单次扰动最多只能把平均推 17%（2 倍÷6 步）。
          *   ★ 注意这里钳的是【存进环里的值】，不是 ci 本身 —— 不改变任何滤波/限速
          *     逻辑，只把明显不该信的样本挡在外面。 */
-        uint32_t lo = commutation_interval >> 2;
-        uint32_t hi = commutation_interval << 1;
+        /* ★★★ 2026-10-12 ci 合理性闸：±25%（原来是 ci/4 ~ 2ci，太松）★★★
+         *   实测（test-cl-补偿方式-电压域竖直偏移 那两跑）：闭环一旦开始认到多余的
+         *   跨零，本步间隔就被记小；而六步环允许到 ci/4 ⇒ ci 被拉小 ⇒ waitTime=比例×ci
+         *   变小 ⇒ 换相提前 ⇒ 下一次间隔更短 …… 一路往下冲（实测 ci 从 0.68ms 掉到
+         *   0.19ms，而转子真实一步 ≈5.3ms）⇒ 固件在按 25 倍于转子的速率换相 ⇒
+         *   转子跟不上 ⇒ 卡一下冲一下、超时兜底 235 次、电机不转只嗡。
+         *   ⇒ 把每格只接受【当前 ci 的 ±25%】的样本，越界的丢弃并计数。
+         *     这样"认到多余跨零"就再也拉不动 ci ⇒ 这条正反馈被拆掉。
+         *   ⚠ 起步/斜坡段 ci 每步变化约 6% ⇒ ±25% 不影响正常跟踪。 */
+        uint32_t lo = commutation_interval - (commutation_interval >> 2);
+        uint32_t hi = commutation_interval + (commutation_interval >> 2);
         if (lo < 64u) { lo = 64u; }
-        if (meas_step < lo) { meas_step = lo; }
-        if (meas_step > hi) { meas_step = hi; }
+        if (meas_step < lo) { ci_clamp_rejects++; meas_step = lo; }
+        if (meas_step > hi) { ci_clamp_rejects++; meas_step = hi; }
         commutation_intervals[step - 1] =
             (uint16_t)((meas_step > 0xFFFFu) ? 0xFFFFu : meas_step);
 #if RM2027_CL_WT_MODE == 2
