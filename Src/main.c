@@ -694,6 +694,10 @@ uint16_t ol_trip_count = 0;                 /* 观测：过流连续超限计数
 uint32_t ol_trips = 0;                      /* 观测：累计过流跳闸次数 */
 uint32_t ol_iphase_last = 0;                /* 观测：最近反推出来的相电流（厘安）*/
 uint32_t ol_run_ticks = 0;                  /* 本次已驱动的拍数 */
+/* ★ 2026-10-12 闭环自动停机（宏 RM2027_CL_RUN_MS）：交棒时刻的绝对帧号 + 计时中标志 */
+volatile uint32_t cl_run_start = 0;         /* 交棒那一刻的 24kHz 绝对帧号 */
+volatile uint8_t  cl_run_armed = 0;         /* 1 = 已交棒，自动停机计时中 */
+volatile uint32_t cl_runs_stopped = 0;      /* 观测：因闭环到点而停机的次数 */
 uint32_t ol_timeouts = 0;                   /* 观测：到时间上限自动停机的次数 */
 volatile uint8_t ol_led_off_req = 0;        /* 请求切"待命红"（WS2812 阻塞操作，交主循环执行）*/
 volatile uint8_t ol_led_on_req = 0;         /* 请求切"运行绿"：每次起步点一次（见 olStepTick）——
@@ -1338,6 +1342,9 @@ static void olStartupTick(void)
      *   ⇒ 加 ol_startup_arm 作锁存（本块自己会清它）⇒ 保证只执行一次。 */
     if (ol_startup_arm && !OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
+        /* ★ 闭环自动停机的计时起点：以"交棒这一刻"为 0（见主循环里的到点检查）*/
+        cl_run_start = adc_frame_total;
+        cl_run_armed = 1;
         old_routine = 0;
         /* ★★★ 2026-10-11 交棒时给速度环一个干净的起点 ★★★
          *   input_override 是速度环的工作变量（单位 = 油门 x10000），而它全流程
@@ -1867,6 +1874,17 @@ static uint8_t tx_ready(void)
 
 static void evt_send(uint8_t *p, uint16_t len)
 {
+    /* ★★ 2026-10-12 关键修复：发之前必须确保 TE=1（发送器使能）★★
+     *   现象（真板实测）：固件报"发了 14592 个事件 + 871 个窗口"，线上却只收到
+     *   19.5% 的事件帧、15.6% 的窗口包 —— 也就是绝大多数包【根本没出去】。
+     *   根因：main.c 里发 KISS 遥测时调 send_telem_DMA()，而它结尾是
+     *        LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_RX);
+     *   而 LL 的实现是 MODIFY_REG(CR1, RE|TE, dir) ⇒ **这一句把 TE 清掉了**。
+     *   TE=0 时 TXE 恒为 1 ⇒ DMA 几微秒内就"传完"，字节一个都没移位出去。
+     *   实锤：SWD 读 USART1->CR1 = 0x00000005（UE=1, RE=1, **TE=0**）。
+     *   ⇒ 每次发之前显式把方向钉回 TX。本板半双工、只发不收，可常驻发送方向。
+     *   （当年 adc_capture_drain() 就踩过同一个坑，注释还留着。） */
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
     /* ★ 不再切"发/收方向"：原版每发一次就切一次（半双工），切向瞬间是
      *   丢字节的嫌疑之一。我们只发不收，直接常驻发送方向。 */
     LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
@@ -3051,6 +3069,25 @@ void tenKhzRoutine()
         olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
         { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
         { extern void win_pump(void); win_pump(); }    /* ★ 窗口式全速采样 */
+        /* ★★ 2026-10-12 固件级闭环自动停机（RM2027_CL_RUN_MS）★★
+         *   为什么放主循环：交棒后 olStartupTick() 直接 return（ol_startup_arm=0），
+         *   所以闭环段没有任何到点检查 ⇒ 这里用"绝对帧号差"当计时器（与 ADC 同步，
+         *   不受主循环快慢影响）。到点无条件收油 ⇒ 脚本挂了/电脑断了也不会一直转。
+         *   ol_stop_reason 用 1（与开环"到时间上限"同类：非锁存，冷却后可再跑）。*/
+        if (RM2027_CL_RUN_MS > 0 && cl_run_armed && running
+            && (uint32_t)(adc_frame_total - cl_run_start) >= (uint32_t)RM2027_CL_RUN_MS * 24u) {
+            allOff();
+            running = 0;
+            ol_state = 0;
+            ol_input_cur = 0;
+            ol_step_div_cur = OL_STEP_DIV;
+            ol_run_ticks = 0;
+            ol_timeouts++;
+            ol_stop_reason = 1;
+            ol_led_off_req = 1;
+            cl_run_armed = 0;
+            cl_runs_stopped++;
+        }
 #endif
         if (one_khz_loop_counter > PID_LOOP_DIVIDER) { // 1khz PID loop
             PROCESS_ADC_FLAG = 1; // set flag to do new adc read at lower priority
