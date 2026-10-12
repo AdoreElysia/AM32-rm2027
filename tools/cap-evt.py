@@ -163,6 +163,8 @@ if PLOT_ONLY:
 oc(['-c', 'mww 0x40021060 0x01000000'])          # 清 RCC 复位标志
 print('跑前 RCC_CSR :', resets(rd32(0x40021060)))
 s = serial.Serial(PORT, BAUD, timeout=0.2); s.reset_input_buffer()
+# ★ 先收油 1 秒再给油：电调的解锁/唤醒需要一段"零油门"，否则可能不启动（实测踩过）
+print('← 先收油 1 秒（唤醒/解锁）'); f1(1); time.sleep(1.0)
 print(f'→ 给油，采 {SECS:.0f} 秒 ...'); f1(0)
 buf = bytearray(); t0 = time.time()
 while time.time() - t0 < SECS:
