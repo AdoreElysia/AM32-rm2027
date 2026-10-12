@@ -87,10 +87,13 @@ def parse(buf):
         j = buf.find(b'\xA5\x5A\xA5\x5A', i)
         if j < 0:
             break
+        if j + 21 > len(buf):
+            break
         if crc8(buf[j:j + 20]) == buf[j + 20]:
             rows.append(struct.unpack_from('<HIhBHHh', buf, j + 4) + (buf[j + 19],))
             i = j + 21
-        elif j + 12 <= len(buf) and struct.unpack_from('<H', buf, j + 10)[0] == 512:
+        elif (j + 12 + 512 * 3 <= len(buf)
+              and struct.unpack_from('<H', buf, j + 10)[0] == 512):
             wseq, wts = struct.unpack_from('<HI', buf, j + 4)
             pay = np.frombuffer(buf[j + 12:j + 12 + 512 * 3], dtype=np.uint8).reshape(-1, 3)
             d = (pay[:, 0].astype(np.int16) | (pay[:, 1].astype(np.int16) << 8))
