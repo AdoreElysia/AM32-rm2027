@@ -2,37 +2,37 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "① 固件：选分支 → 编译 → 固化 → 烧录 → 校验",
+      "label": "① 完整实验：选分支 → 编译 → 固化 → 烧录 → 跑一段 → 收数据",
       "type": "shell",
-      "command": "bash ${workspaceFolder}/tools/fw-burn.sh",
+      "command": "bash ${workspaceFolder}/AM32-rm2027/tools/fw-burn.sh",
       "problemMatcher": [],
       "group": { "kind": "build", "isDefault": true },
-      "presentation": { "reveal": "always", "panel": "shared", "clear": true, "echo": true }
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     },
     {
-      "label": "② 只编译（不烧录，看有没有错）",
+      "label": "② 只编译（看有没有错，不烧录）",
       "type": "shell",
       "command": "make RM2027_ESC_G071 ARM_SDK_PREFIX=/usr/bin/arm-none-eabi-",
-      "options": { "cwd": "${workspaceFolder}" },
+      "options": { "cwd": "${workspaceFolder}/AM32-rm2027" },
       "problemMatcher": ["$gcc"],
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     },
     {
-      "label": "③ 列出固件归档 + 孤儿检查",
+      "label": "③ 固件归档列表 + 清孤儿",
       "type": "shell",
-      "command": "ls -lt ${workspaceFolder}/firmware/*.bin 2>/dev/null | head -20; echo '--- 孤儿固件（分支已不存在）---'; for f in ${workspaceFolder}/firmware/*.bin; do [ -e \"$f\" ] || continue; bn=$(basename \"$f\" | cut -d_ -f1); git -C ${workspaceFolder} branch --format='%(refname:short)' | grep -qx \"$bn\" || echo \"  孤儿: $(basename $f)\"; done",
+      "command": "cd ${workspaceFolder}/AM32-rm2027 && ls -lt firmware/*.bin 2>/dev/null; echo '--- 清理孤儿（分支已不存在）---'; for f in firmware/*.bin; do [ -e \"$f\" ] || continue; bn=$(basename \"$f\" .bin); git branch --format='%(refname:short)' | grep -qx \"$bn\" || { echo \"  🗑 删除 $bn.bin\"; rm -f \"$f\"; }; done",
       "problemMatcher": [],
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     },
     {
-      "label": "④ F1 给油（hold_zero=0，电机开始转）",
+      "label": "④ F1 给油（电机会转！）",
       "type": "shell",
-      "command": "echo '⚠ 即将给油，电机会转！'; timeout 25 openocd -f interface/jlink.cfg -c 'transport select swd' -f target/stm32f1x.cfg -c 'adapter speed 500' -c 'init' -c 'halt' -c 'mwb 0x20000274 0' -c 'resume' -c 'shutdown' 2>&1 | tail -1",
+      "command": "echo '⚠ 即将给油，电机会转'; timeout 25 openocd -f interface/jlink.cfg -c 'transport select swd' -f target/stm32f1x.cfg -c 'adapter speed 500' -c 'init' -c 'halt' -c 'mwb 0x20000274 0' -c 'resume' -c 'shutdown' 2>&1 | tail -1",
       "problemMatcher": [],
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
-      "label": "⑤ F1 收油（hold_zero=1，电机停）",
+      "label": "⑤ F1 收油（电机停）",
       "type": "shell",
       "command": "timeout 25 openocd -f interface/jlink.cfg -c 'transport select swd' -f target/stm32f1x.cfg -c 'adapter speed 500' -c 'init' -c 'halt' -c 'mwb 0x20000274 1' -c 'resume' -c 'shutdown' 2>&1 | tail -1; echo '已收油'",
       "problemMatcher": [],
