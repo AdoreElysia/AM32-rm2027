@@ -2658,6 +2658,14 @@
 #define RM2027_CL_WT_MODE       2
 #endif
 
+/* ★★ 2026-10-12 电压域竖直偏移补偿（分支 test-cl-补偿方式-电压域竖直偏移）★★
+ *   1 = 开：判据用的 delta 先减掉"这一步的竖直偏移"（开环实测表 + 片上慢迭代）。
+ *   0 = 关：判据用原始 delta。
+ *   详细依据见 Src/main.c 的 zc_voff / voff_frame 说明。 */
+#ifndef RM2027_CL_VOFF
+#define RM2027_CL_VOFF          1
+#endif
+
 /* ★ 闭环必须的开关：过零检测从"轮询"切到"中断"的时机
  *   上游默认（不定义时）是：低转速用轮询（zcfoundroutine 忙等）、转速上来后切中断模式。
  *   本板没有比较器、中断源是 ADC-DMA 完成中断（见 stm32g0xx_it.c）⇒ 期望行为是

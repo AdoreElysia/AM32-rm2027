@@ -941,6 +941,91 @@ static void wt_iter_feed(uint8_t s_end, uint32_t w_meas)
 }
 #endif
 
+/* ★★★ 2026-10-12 test-cl-补偿方式-电压域竖直偏移（用户方向，RM2027_CL_VOFF）★★★
+ *   "电压域！开环测竖直偏移，闭环后迭代。"
+ *
+ *   什么是"竖直偏移"：判据用的那条 delta =（悬空相 − V0）曲线，它的【竖直中心】
+ *       off_s = (delta 在本步内的极大 + 极小) / 2      （单位：ADC 码）
+ *   若 off_s ≠ 0，说明这条线被整体抬/压过，它跨零的位置不是真正的反电势零点
+ *   ⇒ 认到的过零时刻系统性地偏掉，时间偏差 = off_s ÷ 过零处的斜率。
+ *
+ *   为什么这个量该在【电压域】修，而不是在 waitTime 上修时间（对比 数值偏移 版）：
+ *     · 固定【码数】的偏置 ⇒ 交越挪 off/k 个采样；而斜率 k ∝ 转速、步长 ∝ 1/转速
+ *       ⇒ 挪的【相位比例】不随转速变 ⇒ 结构上不会"越慢越偏"的正反馈塌陷。
+ *     · 它修的是【测量】：换相点该在过零后 30° 的前提，是"过零"先认对。
+ *
+ *   表来源（开环斜坡高速段，步长 1700~2100 拍；开环换相由外部固定时基给，
+ *   分段是外生的 ⇒ 测量干净；闭环段同类测量作对照，相差 ≤20 码）：
+ *     step   1(C)  2(A)  3(B)  4(C)  5(A)  6(B)
+ *     off    +30   -20   +29     0    +67   +14     (ADC 码；σ = 1.3~8.2)
+ *     幅值   121    56     85   116     62    83
+ *   ⇒ 两条硬事实：
+ *     ① 三相反电势幅值根本不对称：A(56~62) ≈ C(116~121) 的一半，B 居中
+ *        ⇒ A 相采样链（分压/滤波/走线）增益偏低。（之前"三相基本平衡"的结论
+ *          是量错了口径：量的是 max|delta|，那个数把竖直偏移也算进去了，已撤回。）
+ *     ② step5(浮A) 的 off = +67 码 ≥ 它的幅值 62 码 ⇒ "零线"落在波形范围之外，
+ *        再叠上 12 码滞回 ⇒ 这一步的过零经常认不到（实测漏认率 5~11%，其余步 ≈1%）。
+ *   换算成时间（off ÷ 交越斜率；斜率实测 6.0~16.5 码/采样）：
+ *     -161 / +199 / -202 / 0 / -933 / -94 拍 —— 正是我们一直在纠的六步相位差的量级。
+ *
+ *   ⚠ 只在【闭环段】施加：起步/斜坡段反电势只有几码，减掉 30~67 码偏移会把
+ *     delta 的符号整体翻过去 ⇒ 假过零 ⇒ 破坏交棒条件。 */
+#if RM2027_CL_VOFF
+#define VOFF_N      6        /* 过零后等 6 帧（250µs）再取对称两点 —— 已越过换相振铃 */
+#define VOFF_ITER_N 32       /* 同上：移 5 位 = 一轮 32 步的平均 */
+static const int16_t zc_voff_tab[6] __attribute__((unused)) = { 30, -20, 29, 0, 67, 14 };  /* 开环实测表（留档）*/
+volatile int16_t zc_voff[6] = { 30, -20, 29, 0, 67, 14 };           /* 运行时值 = 表 + 迭代 */
+volatile int16_t voff_log[192];      /* 每轮实际叠加量（证据）*/
+volatile uint8_t voff_log_i = 0;
+volatile uint8_t voff_updates = 0;   /* 累计更新次数（每步各算一次）*/
+volatile int16_t voff_latest[6];     /* 最近一次测到的 off（诊断）*/
+volatile int16_t voff_acc_s[6];      /* 累加（供 dump）*/
+volatile uint8_t voff_cnt_s[6];
+static int32_t voff_acc[6];
+static uint8_t voff_cnt[6];
+static int16_t voff_dl[64];          /* delta 延迟线（存 raw，未补偿）*/
+static uint8_t voff_dli = 0;
+static uint8_t voff_pend = 0, voff_pos = 0, voff_step = 0;
+
+/* 每帧由 ADC 中断调用（算完 delta、做完过零判定之后）。
+ *   dzc_raw = 本帧【未补偿】的 delta（延迟线必须存 raw，否则自我循环）
+ *   zc_ok   = 本帧过零是否被接受；  st = 本帧所处的换相步 */
+void voff_frame(int16_t dzc_raw, uint8_t zc_ok, uint8_t st)
+{
+    voff_dl[voff_dli & 63u] = dzc_raw;
+    if (zc_ok && st >= 1u && st <= 6u) {
+        voff_pend = VOFF_N;              /* 记住过零那一帧，等 N 帧好取到 k+N */
+        voff_pos  = voff_dli;
+        voff_step = st;
+    }
+    voff_dli++;
+    if (voff_pend > 0u && --voff_pend == 0u) {
+        /* 对称取 k−N / k+N 两点，其中点就是这条线在过零处的竖直中心 */
+        int16_t a = voff_dl[(uint8_t)(voff_pos - VOFF_N) & 63u];
+        int16_t b = voff_dl[(uint8_t)(voff_pos + VOFF_N) & 63u];
+        int16_t off = (int16_t)(((int32_t)a + (int32_t)b) / 2);
+        uint8_t i = (uint8_t)(voff_step - 1u);
+        voff_latest[i] = off;
+        voff_acc[i] += off;
+        voff_acc_s[i] = (int16_t)voff_acc[i];
+        voff_cnt_s[i] = voff_cnt[i];
+        if (++voff_cnt[i] >= VOFF_ITER_N) {
+            int16_t d = (int16_t)(voff_acc[i] >> 5);   /* 移 5 位 = 这一轮的平均 */
+            if (d > 8) { d = 8; }                      /* 单轮最多动 8 码（保守）*/
+            if (d < -8) { d = -8; }
+            int32_t v = (int32_t)zc_voff[i] + d;
+            if (v > 120) { v = 120; }                  /* 总量钳 ±120 码 */
+            if (v < -120) { v = -120; }
+            zc_voff[i] = (int16_t)v;
+            if (voff_log_i < 191u) { voff_log[voff_log_i++] = d; }
+            voff_acc[i] = 0;
+            voff_cnt[i] = 0;
+            if (voff_updates < 250u) { voff_updates++; }
+        }
+    }
+}
+#endif
+
 /* ★★ 2026-10-12 试过"迭代到六步均匀"，失败并撤回 ★★
  *   想法：先按 ratio_s <- ratio_s × (T̄/T_s) 迭代一轮（T=实测六步时长），指望六步时长拉齐。
  *   实测（同一台架、同样 6 秒）：
