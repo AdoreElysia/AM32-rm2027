@@ -81,8 +81,9 @@ def resets(v):
 
 
 def parse(buf):
-    """返回 (有效事件, 窗口包数, 剔除的假帧数)"""
-    rows, wins, i = [], 0, 0
+    """返回 (有效事件, 窗口列表, 剔除的假帧数)。窗口列表元素 = (win_seq, win_ts, delta[], step[])"""
+    rows, wins, i = [], [], 0
+    import struct as _st
     while i < len(buf) - 21:
         j = buf.find(b'\xA5\x5A\xA5\x5A', i)
         if j < 0:
@@ -91,7 +92,11 @@ def parse(buf):
             rows.append(struct.unpack_from('<HIhBHHh', buf, j + 4) + (buf[j + 19],))
             i = j + 21
         elif j + 12 <= len(buf) and struct.unpack_from('<H', buf, j + 10)[0] == 512:
-            wins += 1; i = j + 12 + 512 * 3
+            wseq, wts = struct.unpack_from('<HI', buf, j + 4)
+            pay = np.frombuffer(buf[j + 12:j + 12 + 512 * 3], dtype=np.uint8).reshape(-1, 3)
+            d = (pay[:, 0].astype(np.int16) | (pay[:, 1].astype(np.int16) << 8))
+            wins.append((wseq, wts, d, pay[:, 2].copy()))
+            i = j + 12 + 512 * 3
         else:
             i = j + 1
     n_raw = len(rows)
@@ -177,6 +182,12 @@ with open(csvp, 'w', newline='') as f:
 rate = f'{len(buf)/SECS/1000:.1f} KB/s' if SECS else '—'
 print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {wins}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
 print(f'CSV → {csvp}  ({os.path.getsize(csvp)} 字节)')
+if wins:
+    npzp = csvp.replace('.csv', '_win.npz')
+    np.savez(npzp, seq=np.array([w[0] for w in wins]),
+             ts=np.array([w[1] for w in wins]),
+             d=np.array([w[2] for w in wins]), step=np.array([w[3] for w in wins]))
+    print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
 if not rows:
     print('❌ 一个事件都没收到 —— 检查 12V(母线电压) / F1 油门'); sys.exit(1)
 make_plot(rows, SECS, csvp.rsplit('.', 1)[0] + '.png')
