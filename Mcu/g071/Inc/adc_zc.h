@@ -101,7 +101,7 @@ uint8_t adc_zc_push(int16_t e, uint16_t t_cnt);
 #define ZCW_N    256       /* 每窗口点数：256 x 41.67µs = 10.7ms */
 #endif
 #ifndef ZCW_WIN
-#define ZCW_WIN  2         /* ★ 2026-10-11 改成 2 窗（21.3ms）：RAM 只剩 456 字节，
+#define ZCW_WIN  1         /* ★ 2->1：腾 RAM */         /* ★ 2026-10-11 改成 2 窗（21.3ms）：RAM 只剩 456 字节，
                             *   腾 2KB 给"串口换相事件流"的缓冲。仍覆盖交棒前后。 */
 #endif
 

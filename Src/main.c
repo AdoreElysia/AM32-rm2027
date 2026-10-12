@@ -474,7 +474,7 @@ uint16_t commutation_intervals[6] = { 0 };
 #define RM2027_CL_INPUT_CAP 450
 #endif
 
-#define CCM_N 1024
+#define CCM_N 256          /* ★ 1024->256：腾 RAM 给窗口式采样 */
 volatile uint16_t adc_frame_cnt;      /* 24kHz ADC 帧计数（ISR 自增）*/
 
 /* ★★ 2026-10-11 过零时刻前移量（运行时可用 SWD 改，便于扫参数）★★
@@ -540,7 +540,7 @@ volatile uint32_t ccm_total;          /* 累计笔数（>1024 说明已绕过一
 /* 粗时间线：每 64 笔记一次 ⇒ 128 笔覆盖 128x64 次换相。
  * 闭环约 1.3ms/步 ⇒ 约 10 秒，足够覆盖一整轮台架运行（含过流停机重启）。
  * 细记录只看得到"最后 1.3 秒"，这张粗表才看得到"整轮"有没有变慢。 */
-#define CCM_SLOW_N   128
+#define CCM_SLOW_N   32   /* ★ 128->32：同上 */
 #define CCM_SLOW_DIV 64
 volatile uint16_t ccm_slow_ci[CCM_SLOW_N];
 volatile uint16_t ccm_slow_duty[CCM_SLOW_N];  /* 该点占空比（0..2000，2000 = 100%）*/
@@ -1863,6 +1863,86 @@ static uint8_t evt_crc8(const uint8_t *p, uint8_t n)
     return crc;
 }
 
+/* ★★★ 2026-10-11 串口【窗口式全速采样】（串口测试分支固化）★★★
+ *   用户定的方案："先把数据放到内存里，然后串口慢慢发，发完了再来一次新的
+ *   全速采样覆盖" —— 采集与发送在时间上错开，采到的数据永不被自己的传输干扰。
+ *   · 窗口内：24kHz 全速采 512 帧（21.3ms），存 delta(i16) + step(u8)
+ *   · 窗口间：整窗用 DMA 发出去（4 + 2 + 4 + 2 + 512*3 = 1548 字节，1Mbaud ~15.5ms）
+ *   ⇒ 时间覆盖率 ≈ 21.3/(21.3+15.5) ≈ 58%
+ *   每窗一包：A5 5A A5 5A | win_seq u16 | ts u32 | n u16 | n*(delta i16 + step u8)
+ *   （靠 4 字节独特帧头 + 长度字段同步；ts = 本窗首帧的 24kHz 总帧号）*/
+#define WIN_N        512
+#define WIN_TOTAL    (12 + WIN_N * 3)     /* 头 12 字节 + 载荷 */
+volatile int16_t  win_buf[WIN_N];
+volatile uint8_t  win_step[WIN_N];
+volatile uint16_t win_n;
+volatile uint8_t  win_state;     /* 0=采集中 1=待发送 2=发送中 */
+volatile uint32_t win_seq;
+volatile uint32_t win_ts;
+volatile uint32_t win_sent;      /* 已发出的窗口数 —— 没增长就说明卡住了 */
+volatile uint8_t  win_tx[200];
+
+/* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
+void win_push(int16_t d, uint8_t st)
+{
+    if (win_state != 0u) { return; }        /* 发送中/待发送 ⇒ 本窗不再采 */
+    uint16_t i = win_n;
+    win_buf[i]  = d;
+    win_step[i] = st;
+    i++;
+    if (i >= WIN_N) {
+        win_n = WIN_N;
+        win_state = 1u;                     /* 采满 ⇒ 交给主循环发 */
+    } else {
+        win_n = i;
+    }
+}
+
+/* 主循环调用：把采满的窗口整包发出去（分批，每批 200 字节）*/
+void win_pump(void)
+{
+    static uint8_t  busy = 0;
+    static uint16_t pos  = 0;
+    if (busy) {
+        if (LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) { return; }
+        busy = 0;
+    }
+    if (win_state == 1u) {
+        win_state = 2u;
+        pos = 0;
+    }
+    if (win_state != 2u) { return; }
+    if (pos >= WIN_TOTAL) {                 /* 发完 ⇒ 立刻开新一轮采集 */
+        win_seq++;
+        win_sent++;
+        win_n = 0;
+        win_state = 0u;
+        return;
+    }
+    uint16_t batch = (uint16_t)(WIN_TOTAL - pos);
+    if (batch > 200u) { batch = 200u; }
+    for (uint16_t i = 0; i < batch; i++) {
+        uint16_t k = (uint16_t)(pos + i);
+        uint8_t  v;
+        if (k < 4u)       { v = (uint8_t)((k == 0u) ? 0xA5 : ((k == 1u) ? 0x5A : ((k == 2u) ? 0xA5 : 0x5A))); }
+        else if (k < 6u)  { v = (uint8_t)((win_seq >> ((k - 4u) * 8)) & 0xFF); }
+        else if (k < 10u) { v = (uint8_t)((win_ts  >> ((k - 6u) * 8)) & 0xFF); }
+        else if (k < 12u) { v = (uint8_t)((WIN_N   >> ((k - 10u) * 8)) & 0xFF); }
+        else {
+            uint16_t d = (uint16_t)(k - 12u);
+            uint16_t f = (uint16_t)(d / 3u);
+            uint16_t r = (uint16_t)(d % 3u);
+            if (r == 0u)      { v = (uint8_t)( win_buf[f]       & 0xFF); }
+            else if (r == 1u) { v = (uint8_t)((win_buf[f] >> 8) & 0xFF); }
+            else              { v = win_step[f]; }
+        }
+        win_tx[i] = v;
+    }
+    evt_send((uint8_t *)win_tx, batch);
+    pos = (uint16_t)(pos + batch);
+    busy = 1;
+}
+
 /* 在换相那一刻打包一个事件（中断上下文：只写内存，不发送）*/
 static void evt_push(void)
 {
@@ -2941,6 +3021,7 @@ void tenKhzRoutine()
 #else
         olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
         { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
+        { extern void win_pump(void); win_pump(); }    /* ★ 窗口式全速采样 */
 #endif
         if (one_khz_loop_counter > PID_LOOP_DIVIDER) { // 1khz PID loop
             PROCESS_ADC_FLAG = 1; // set flag to do new adc read at lower priority
