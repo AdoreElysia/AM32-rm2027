@@ -10,14 +10,11 @@
 #   分支不再手选：一律用【当前所在分支】，固件名就是分支名（和 fw-burn.sh 同一套约定）。
 #
 # ★ 额外拓展任务菜单（选项 2 会进来）：
-#   [1] 串口：换相事件流（长趋势，时间覆盖 100%）
-#   [2] 串口：窗口式全速采样（逐帧波形，窗口内有间隔）
-#   [3] 跑前：清捕获状态 + 设窗口触发点（SWD）
-#   [4] 跑后：dump 窗口波形 + 画图（SWD，电机须停）
-#   [5] 电调 RAM 写读验证（首次烧 36K 固件前必跑一次）
-#   [6] 电调 状态快照（SWD，电机须停）
-#   [7] F1 给油（电机会转！）   [8] F1 收油
-#   [9] 一条龙：跑前arm → 给油 → 采 N 秒 → 收油 → dump
+#   [1] 跑前：清捕获状态 + 设窗口触发点（SWD）
+#   [2] 串口：窗口式全速采样（逐帧波形）
+#   [3] 跑后：dump 窗口波形 + 画图（SWD，电机须停）
+#   [4] F1 给油（电机会转！）   [5] F1 收油
+#   [6] 一条龙：arm → 给油 → 采 N 秒 → 收油 → dump
 #   [0] 返回 / 退出
 #
 # 无交互用法（供 tasks.json / 脚本调用）： esc-lab.sh 1 | esc-lab.sh 2
@@ -123,27 +120,21 @@ extra_menu() {
     while :; do
         echo
         hr; echo "  额外拓展任务（采集 / 调试）"; hr
-        echo "  [1] 串口：换相事件流（长趋势，覆盖 100%）"
+        echo "  [1] 跑前：清捕获状态 + 设窗口触发点（SWD）"
         echo "  [2] 串口：窗口式全速采样（逐帧波形）"
-        echo "  [3] 跑前：清捕获状态 + 设窗口触发点（SWD）"
-        echo "  [4] 跑后：dump 窗口波形 + 画图（SWD）"
-        echo "  [5] 电调 RAM 写读验证（首次烧 36K 固件前必跑）"
-        echo "  [6] 电调 状态快照（SWD）"
-        echo "  [7] F1 给油（电机会转！）"
-        echo "  [8] F1 收油"
-        echo "  [9] 一条龙：arm → 给油 → 采 N 秒 → 收油 → dump"
+        echo "  [3] 跑后：dump 窗口波形 + 画图（SWD）"
+        echo "  [4] F1 给油（电机会转！）"
+        echo "  [5] F1 收油"
+        echo "  [6] 一条龙：arm → 给油 → 采 N 秒 → 收油 → dump"
         echo "  [0] 返回"
         read -rp "选择: " c
         case "${c:-x}" in
-          1) read -rp "秒数 [8]: " s; python3 "$WORK/evt-dump.py" "$SERIAL" "${s:-8}" ;;
+          1) read -rp "触发点帧数 [36000=交棒后1500ms]: " f; "$ESC_DBG" arm "${f:-36000}" ;;
           2) read -rp "秒数 [8]: " s; python3 "$WORK/win-dump.py" "$SERIAL" "${s:-8}" ;;
-          3) read -rp "触发点帧数 [36000=交棒后1500ms]: " f; "$ESC_DBG" arm "${f:-36000}" ;;
-          4) python3 "$WORK/zcw-dump.py" | tail -4 ;;
-          5) "$ESC_DBG" ramcheck ;;
-          6) "$ESC_DBG" snap ;;
-          7) echo "⚠ 即将给油，电机会转"; f1_throttle 0; echo "已给油" ;;
-          8) f1_throttle 1; echo "已收油" ;;
-          9) read -rp "采多少秒 [8]: " s; read -rp "触发点帧数 [36000]: " f; one_shot "${s:-8}" "${f:-36000}" ;;
+          3) python3 "$WORK/zcw-dump.py" | tail -4 ;;
+          4) echo "⚠ 即将给油，电机会转"; f1_throttle 0; echo "已给油" ;;
+          5) f1_throttle 1; echo "已收油" ;;
+          6) read -rp "采多少秒 [8]: " s; read -rp "触发点帧数 [36000]: " f; one_shot "${s:-8}" "${f:-36000}" ;;
           0) return ;;
           *) echo "无效" ;;
         esac

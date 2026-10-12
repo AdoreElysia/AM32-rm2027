@@ -2,8 +2,8 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "🚀 电调实验（唯一入口：编译→固件改名→烧录→采集 都在这个菜单里）",
-      "detail": "菜单选项：1=编译当前分支→改名→烧录；2=1+额外拓展任务（串口采集/SWD dump/RAM验证/给油收油）。全部动作见 tools/esc-lab.sh。",
+      "label": "ESC-Lab：电调实验唯一入口（编译 → 改名 → 烧录 → 采集）",
+      "detail": "菜单：1=编译当前分支→固件改名→烧录；2=1+额外拓展任务（窗口采样/跑前arm/跑后dump/给油收油/一条龙）。全部动作见 tools/esc-lab.sh",
       "type": "shell",
       "command": "bash /home/lpl/桌面/RM2027/AM32-rm2027/tools/esc-lab.sh",
       "problemMatcher": [],
