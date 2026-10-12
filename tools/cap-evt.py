@@ -204,3 +204,42 @@ if wins:
 if not rows:
     print('❌ 一个事件都没收到 —— 检查 12V(母线电压) / F1 油门'); sys.exit(1)
 make_plot(rows, SECS, csvp.rsplit('.', 1)[0] + '.png')
+
+# ---- ★ 跑完立刻 dump【换相埋点 OL_CM_*】（RAM 易失，必须趁有电）----
+#   代码自己的注释：它"直接回答换相落在反电势周期的哪个位置"——闭环相位的唯一直接证据。
+try:
+    import subprocess as _sp
+    _nm = _sp.run(['/usr/bin/arm-none-eabi-nm','-S','obj/AM32_RM2027_ESC_G071_2.21.elf'],
+                  capture_output=True,text=True).stdout
+    _sym = {}
+    for _l in _nm.splitlines():
+        _f=_l.split()
+        if len(_f)==4: _sym[_f[3]]=int(_f[0],16)
+    def _rd(name, words):
+        _o=_sp.run(['openocd','-f','interface/stlink.cfg','-f','target/stm32g0x.cfg',
+            '-c','adapter speed 1800','-c','init','-c','halt','-c','mww 0x40003000 0xAAAA',
+            '-c',f'mdw {_sym[name]:#x} {words}','-c','mww 0x40003000 0xAAAA','-c','resume','-c','shutdown'],
+            capture_output=True,text=True)
+        _v=[]
+        for _l in _o.stdout.splitlines():
+            _m=re.match(r'^0x[0-9a-fA-F]+:\s*(.*)$',_l)
+            if _m: _v += [int(x,16) for x in _m.group(1).split()]
+        return _v
+    _D=_rd('OL_CM_D',32); _T=_rd('OL_CM_T',16); _W=_rd('OL_CM_W',16); _S=_rd('OL_CM_S',8)
+    _n=_rd('ol_cm_n',1); _i=_rd('ol_cm_idx',1)
+    def _i16(x): return x-0x10000 if x & 0x8000 else x
+    _ds=[_i16(x) for x in _D]
+    _ss=[(_S[k//4]>>((k%4)*8))&0xFF for k in range(32)]
+    print(f'\n★ 换相埋点（最近 32 次换相；累计 {_n[0] if _n else "?"} 次）')
+    print(f'{"idx":>4}{"step":>5}{"delta(悬空相-V0)":>17}{"CNT":>7}{"waitTime":>9}')
+    for k in range(min(32,len(_ds))):
+        print(f'{k:4d}{_ss[k]:5d}{_ds[k]:17d}{_T[k] if k<len(_T) else 0:7d}{_W[k] if k<len(_W) else 0:9d}')
+    _abs=[abs(x) for x in _ds if x!=0]
+    if _abs:
+        print(f'  ⇒ |delta| 中位 {np.median(_abs):.0f} 码  最小 {min(_abs)}  最大 {max(_abs)}')
+        print(f'  ⇒ 判读：Phase 对 ⇒ 换相时 delta 应在"刚离零点、往平台走"（约幅值 1/2~1）')
+        print(f'          Phase 错（在过零点上换相）⇒ delta ≈ 0')
+    np.savez(csvp.replace('.csv','_cm.npz'), D=np.array(_ds), T=np.array(_T), W=np.array(_W), S=np.array(_ss))
+    print(f'  埋点已存 → {csvp.replace(".csv","_cm.npz")}')
+except Exception as _e:
+    print(f'（换相埋点 dump 失败：{_e}）')
