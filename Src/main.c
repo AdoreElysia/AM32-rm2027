@@ -509,7 +509,7 @@ volatile uint8_t  ccm_step[CCM_N];
  *   帧格式（18 字节，小端，与 PC 端 evt-dump.py 一致）：
  *     AA 55 | seq u16 | ts u32 | delta i16 | step u8 | wait u16 | duty u16 | cur i16 | chk u8
  *   带宽：每次换相 18 字节、约 1000 次/秒 => 约 18KB/s，1Mbaud 下很轻松。 */
-#define EVT_FRAME   37           /* ★ 2026-10-12 29->37：再加 4 个"滤波原料"
+#define EVT_FRAME   49           /* ★ 2026-10-12 37->49：再加 6 个"影响输出"的量
                                   *   [19..20] input_override/10000（速度环输出）
                                   *   [21..22] startup_max_duty_cycle（AM32 起步天花板）
                                   *   [23..24] use_current_limit_adjust（电流环夹子）
@@ -519,7 +519,13 @@ volatile uint8_t  ccm_step[CCM_N];
                                   *   [30..31] lastzctime
                                   *   [32..33] average_interval(低16位)
                                   *   [34..35] advance（相位前移量）
-                                  *   [36] crc8(前 36 字节) */
+                                  *   [36..37] duty_cycle_setpoint（夹完之后最终设定值）
+                                  *   [38..39] duty_cycle_maximum（第三个夹子）
+                                  *   [40..41] bemf_timeout_happened（超时兜底计数）
+                                  *   [42..43] adc_zc_n_reject（过零被拒计数,低16）
+                                  *   [44..45] input（速度环输入）
+                                  *   [46..47] stall_protection_adjust(低16)
+                                  *   [48] crc8(前 48 字节) */
 #define EVT_BUF_N   1024
 #define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
@@ -1945,6 +1951,8 @@ volatile uint32_t win_seq;
 volatile uint32_t win_ts;
 volatile uint32_t win_sent;      /* 已发出的窗口数 —— 没增长就说明卡住了 */
 volatile uint8_t  win_tx[200];
+volatile uint8_t  win_enable = 1;   /* ★ 运行时开关：0 = 停发窗口流，把 1Mbaud 全给事件流
+                                     *   （跑"全变量"那轮用它；SWD 写 0/1 即可，不用重编译）*/
 static uint8_t    win_pkt[WIN_TOTAL];    /* ★ 整包组好后一次性交给 DMA（见 win_pump）*/
 
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
@@ -1981,6 +1989,10 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
  *   （1548 B @1Mbaud = 15.5ms），与主循环快慢无关。RAM 代价 1548 B。 */
 void win_pump(void)
 {
+    if (!win_enable) {                      /* ★ 关掉窗口流：丢这一窗、继续采，但不发 */
+        if (win_state == 1u) { win_state = 0u; win_n = 0u; }
+        return;
+    }
     if (!tx_ready()) { return; }            /* 串口忙（可能事件流在用）⇒ 等下一轮 */
     if (win_state != 1u) { return; }        /* 只有"采满待发"才动 */
 
@@ -2058,7 +2070,20 @@ static void evt_push(void)
         p[30] = (uint8_t)(lastzctime & 0xFF);   p[31] = (uint8_t)(lastzctime >> 8);
         p[32] = (uint8_t)(average_interval & 0xFF); p[33] = (uint8_t)((average_interval >> 8) & 0xFF);
         p[34] = (uint8_t)(advance & 0xFF);      p[35] = (uint8_t)(advance >> 8);
-        p[36] = evt_crc8(p, 36);
+        {
+            extern uint16_t duty_cycle_setpoint, duty_cycle_maximum, input;
+            extern uint8_t  bemf_timeout_happened;
+            extern volatile uint32_t adc_zc_n_reject;
+            extern int32_t  stall_protection_adjust;
+            p[36]=(uint8_t)(duty_cycle_setpoint&0xFF); p[37]=(uint8_t)(duty_cycle_setpoint>>8);
+            p[38]=(uint8_t)(duty_cycle_maximum&0xFF);  p[39]=(uint8_t)(duty_cycle_maximum>>8);
+            p[40]=(uint8_t)bemf_timeout_happened;      p[41]=0u;
+            p[42]=(uint8_t)(adc_zc_n_reject&0xFF);     p[43]=(uint8_t)((adc_zc_n_reject>>8)&0xFF);
+            p[44]=(uint8_t)(input&0xFF);               p[45]=(uint8_t)(input>>8);
+            p[46]=(uint8_t)((uint16_t)stall_protection_adjust&0xFF);
+            p[47]=(uint8_t)(((uint16_t)stall_protection_adjust>>8)&0xFF);
+            p[48] = evt_crc8(p, 48);
+        }
     }
     evt_head = nxt;
     evt_total++;

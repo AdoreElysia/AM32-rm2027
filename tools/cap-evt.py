@@ -83,19 +83,23 @@ def resets(v):
 def parse(buf):
     """返回 (有效事件, 窗口列表, 剔除的假帧数)。窗口列表元素 = (win_seq, win_ts, delta[], step[])"""
     rows, wins, i = [], [], 0
-    while i < len(buf) - 37:            # ★ 事件帧 29 -> 37（再加 4 个滤波原料）
+    while i < len(buf) - 49:            # ★ 事件帧 37 -> 49（再加 6 个"影响输出"的量）
         j = buf.find(b'\xA5\x5A\xA5\x5A', i)
         if j < 0:
             break
-        if j + 37 > len(buf):
+        if j + 49 > len(buf):
             break
-        if crc8(buf[j:j + 36]) == buf[j + 36]:
+        if crc8(buf[j:j + 48]) == buf[j + 48]:
             s7 = struct.unpack_from('<HIhBHHh', buf, j + 4)
             iov, smax = struct.unpack_from('<HH', buf, j + 19)
             uca, cci = struct.unpack_from('<hH', buf, j + 23)
             tzc, lzc, avgi, adv = struct.unpack_from('<HHHH', buf, j + 28)
-            rows.append(s7 + (buf[j + 27] & 1, iov, smax, uca, cci, tzc, lzc, avgi, adv))
-            i = j + 37
+            dsp, dmax = struct.unpack_from('<HH', buf, j + 36)
+            tmo, rej = struct.unpack_from('<HH', buf, j + 40)
+            inp, spa = struct.unpack_from('<HH', buf, j + 44)
+            rows.append(s7 + (buf[j + 27] & 1, iov, smax, uca, cci, tzc, lzc, avgi, adv,
+                              dsp, dmax, tmo, rej, inp, spa))
+            i = j + 49
         elif (j + 12 + 512 * 12 <= len(buf)
               and struct.unpack_from('<H', buf, j + 10)[0] == 512):
             # ★ 2026-10-12 四路电压+电流版：每帧 12 字节 = VA VB VC V0 电流(各 i16) + step + 保留
@@ -187,7 +191,7 @@ rows, wins, nfake = parse(buf)
 stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 csvp = os.path.join(OUTD, f'evt_run_{stamp}.csv')
 with open(csvp, 'w', newline='') as f:
-    w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci','thiszctime','lastzctime','average_interval','advance'])
+    w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci','thiszctime','lastzctime','average_interval','advance','duty_setpoint','duty_max','bemf_timeout','zc_reject','input','stall_adj'])
     w.writerows(rows)
 rate = f'{len(buf)/SECS/1000:.1f} KB/s' if SECS else '—'
 print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {len(wins)}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
