@@ -340,9 +340,10 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */
                 /* 多窗口捕获：每样本只留 delta + step + 判据结论（4 字节）*/
                 adc_zc_wave_push(dzc, (uint8_t)step, zc);
-                { extern void win_push(int16_t va,int16_t vb,int16_t vc,int16_t v0,uint8_t st);
+                { extern void win_push(int16_t va,int16_t vb,int16_t vc,int16_t v0,int16_t cu,uint8_t st);
                   extern volatile uint16_t bemf_adc_va, bemf_adc_vb, bemf_adc_vc, bemf_adc_v0;
-                  win_push((int16_t)bemf_adc_va,(int16_t)bemf_adc_vb,(int16_t)bemf_adc_vc,(int16_t)bemf_adc_v0,(uint8_t)step); }
+                  extern uint16_t ADC_raw_current;
+                  win_push((int16_t)bemf_adc_va,(int16_t)bemf_adc_vb,(int16_t)bemf_adc_vc,(int16_t)bemf_adc_v0,(int16_t)ADC_raw_current,(uint8_t)step); }
                 /* ★ 2026-10-12 四路电压版：窗口里存 VA/VB/VC/V0 原始电压 */
                 /* ★★ 2026-10-11 可靠时间戳：每帧 +1（24kHz，2.7 秒回绕一次）★★
                  *   原来用 thiszctime 量"换相间隔"已被证明不可信（它说 78.5% 的步
