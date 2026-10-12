@@ -850,7 +850,66 @@ static const uint16_t wt_num[6] __attribute__((unused)) = { 314u, 359u, 269u, 35
  *     （≈ 一个采样格 83 拍）⇒ 各步的 L 是稳定可用的常数。
  *   ⚠ 边界：转速很高时 ci/2 可能小于 L_s（step5 的 816 最危险，ci<1632 拍即 2200 转/分
  *     以上会夹到 0）⇒ 那时等价于"过零即换相"。本表只用于台架这个转速区间。 */
-static const uint16_t wt_off[6] = { 340u, 215u, 350u, 232u, 816u, 127u };
+static const uint16_t wt_off[6] __attribute__((unused)) = { 340u, 215u, 350u, 232u, 816u, 127u };
+
+/* ★★★ 2026-10-12 test-cl-补偿方式-迭代竖直偏移：片上【迭代】每步竖直偏移 ★★★
+ *   用户思路："每一次采样后一步的结果求和，直接移 5 位叠加到下一次的竖直偏移"。
+ *
+ *   基线选谁（这一步不能选错）：
+ *     基线 =【比例表】(wt_num)，即相位恒定；迭代量 wt_dyn 只是叠加在上面的小修正。
+ *     为什么不拿"纯偏移表"当基线：本迭代是【逐步(相对)】修正，只能消"六步之间不均匀"，
+ *     对"六步一起变慢"的【共模】误差无能为力。而 test-cl-补偿方式-数值偏移 那一跑
+ *     的塌陷正是共模的（六步一起滑到 3.06ms、454 转/分）⇒ 拿它当基线迭代也没救。
+ *
+ *   更新律（每个换相点跑一次，见 wt_iter_feed()）：
+ *     err = w_s(本步实测步长) − ci(六步平均)
+ *     wt_acc[s] += err;  n_s++
+ *     n_s == 32 时： wt_dyn[s] += wt_acc[s] >> 5     ← "移 5 位" = 这一轮 32 步的平均误差
+ *                    （单轮改动再钳 ±200 拍、总量钳 ±800 拍，防止单次扰动带飞）
+ *
+ *   符号推导（不能猜！用户扫 advance 曾得"越提前越慢"）：
+ *     err>0 ⇒ 这一步太长 ⇒ 要让【过零 s 之后等得更短】⇒ waitTime ↓
+ *     而 waitTime = ratio×ci − wt_dyn ⇒ wt_dyn ↑
+ *     ⇒ wt_dyn 与 err 同号叠加，是负反馈，稳定。
+ *   索引：w_s 是"刚结束的那一步"，而消费 waitTime 的是"该步之后的那个过零"，
+ *     两者都用 下标 s-1（与 wt_num 索引同源，见 PeriodElapsedCallback 的说明）。
+ *
+ *   收敛时间估算：一轮 = 该步出现 32 次 = 32 个电周期 = 32×6/… 步。
+ *     1300 转/分 = 21.7 转/秒 ⇒ 32 转 ≈ 1.5s ⇒ 6 秒的一跑约有 4 轮。
+ *   ⇒ 一轮的量级就够看清趋势；要收敛到位得跑更久（发热限制下不划算）⇒
+ *     更实际的工作流是：短跑几轮 → SWD dump wt_dyn → 把收敛值硬编码进表。 */
+#if RM2027_CL_WT_MODE == 2
+#define WT_ITER_N   32              /* 移 5 位 = ÷32 */
+volatile int16_t wt_dyn[6] = { 0, 0, 0, 0, 0, 0 };   /* 动态竖直偏移（拍）；供 SWD dump */
+volatile uint8_t wt_cnt[6] = { 0, 0, 0, 0, 0, 0 };   /* 本圈已攒了多少步 */
+volatile uint8_t wt_rounds[6] = { 0, 0, 0, 0, 0, 0 };/* 各步已完成几轮 */
+volatile int16_t wt_log_d[192];                      /* 每轮实际叠加量（≤32 轮×6 步），证据 */
+volatile uint8_t wt_log_i = 0;
+static int32_t wt_acc[6] = { 0, 0, 0, 0, 0, 0 };     /* 一圈内的误差累加（int32：32×5000 也装得下）*/
+
+static void wt_iter_feed(uint8_t s_end, uint32_t w_meas)
+{
+    if (s_end < 1u || s_end > 6u) { return; }
+    int32_t err = (int32_t)w_meas - (int32_t)commutation_interval;
+    int32_t a = wt_acc[s_end - 1u] + err;
+    if (a > 200000) { a = 200000; }
+    if (a < -200000) { a = -200000; }
+    wt_acc[s_end - 1u] = a;
+    if (++wt_cnt[s_end - 1u] >= WT_ITER_N) {
+        int32_t d = a >> 5;                       /* 移 5 位 = 这一圈的平均误差 */
+        if (d > 200) { d = 200; }
+        if (d < -200) { d = -200; }
+        int32_t v = (int32_t)wt_dyn[s_end - 1u] + d;
+        if (v > 800) { v = 800; }
+        if (v < -800) { v = -800; }
+        wt_dyn[s_end - 1u] = (int16_t)v;
+        if (wt_rounds[s_end - 1u] < 250u) { wt_rounds[s_end - 1u]++; }
+        if (wt_log_i < 191u) { wt_log_d[wt_log_i++] = (int16_t)d; }
+        wt_acc[s_end - 1u] = 0;
+        wt_cnt[s_end - 1u] = 0;
+    }
+}
+#endif
 
 /* ★★ 2026-10-12 试过"迭代到六步均匀"，失败并撤回 ★★
  *   想法：先按 ratio_s <- ratio_s × (T̄/T_s) 迭代一轮（T=实测六步时长），指望六步时长拉齐。
@@ -2188,6 +2247,10 @@ static void ccm_record(uint32_t raw_step)
 
 void commutate()
 {
+#if RM2027_CL_WT_MODE == 2
+    /* ★ 本步 = 即将结束的那一步（step 马上要 ++/--）——迭代要把误差记到它头上 */
+    uint8_t s_end = (uint8_t)step;
+#endif
     if (forward == 1) {
         step++;
         if (step > 6) {
@@ -2255,6 +2318,11 @@ void commutate()
         if (meas_step > hi) { meas_step = hi; }
         commutation_intervals[step - 1] =
             (uint16_t)((meas_step > 0xFFFFu) ? 0xFFFFu : meas_step);
+#if RM2027_CL_WT_MODE == 2
+        /* ★ 迭代：把"本步实测步长 − 六步平均"喂给该步的竖直偏移（见 wt_iter_feed 说明）。
+         *   用【已钳过离群值】的 meas_step（钳的是 [ci/4, 2ci]），单次扰动不会带飞迭代。 */
+        wt_iter_feed(s_end, meas_step);
+#endif
     }
 
     /* ★★★ 2026-10-09 决定性埋点：记录【换相那一刻】的 "悬空相 − V0" ★★★
@@ -2404,7 +2472,18 @@ void PeriodElapsedCallback()
      *        这与实测"步 5 最长(1.54ms)、步 6 最短(0.50ms)"的宽度畸变方向一致。 */
     {
         uint8_t _s = (step >= 1 && step <= 6) ? (uint8_t)(step - 1u) : 0u;
-#if RM2027_CL_WT_MODE == 1
+#if RM2027_CL_WT_MODE == 2
+        /* ★ 比例表基线 + 迭代竖直偏移（见 wt_dyn/wt_iter_feed 的说明）。
+         *   基线保证相位不随 ci 漂（免疫"正反馈塌陷"）；wt_dyn 只做逐步均衡。
+         *   夹到 ≥16 拍：保证 waitTime 永远是正的、"过零即换相"这种极端不出现。 */
+        {
+            extern volatile int16_t wt_dyn[6];
+            int32_t _wt = (int32_t)(((uint32_t)commutation_interval * (uint32_t)wt_num[_s]) / 1000u)
+                        - (int32_t)wt_dyn[_s];
+            if (_wt < 16) { _wt = 16; }
+            waitTime = (uint16_t)_wt;
+        }
+#elif RM2027_CL_WT_MODE == 1
         /* ★ 绝对数值偏移：waitTime = ci/2 − L_s（L_s = wt_off[_s]，见 wt_off 的说明）。
          *   夹到 0：转速很高时 ci/2 可能小于 L_s（step5 的 816 最危险）。 */
         int32_t _wt = (int32_t)(commutation_interval >> 1) - (int32_t)wt_off[_s];

@@ -2655,7 +2655,7 @@
  *   依据见 Src/main.c 里 wt_off 的说明：L_s = (p_s−0.5)×w_s 实测与转速无关，
  *   所以"数值偏移"才是对的缩放律；比例表只在标定转速上碰巧等价。 */
 #ifndef RM2027_CL_WT_MODE
-#define RM2027_CL_WT_MODE       1
+#define RM2027_CL_WT_MODE       2
 #endif
 
 /* ★ 闭环必须的开关：过零检测从"轮询"切到"中断"的时机
