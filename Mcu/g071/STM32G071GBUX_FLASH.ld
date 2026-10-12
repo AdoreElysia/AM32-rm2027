@@ -39,7 +39,19 @@ _Min_Stack_Size = 0x400 ;	/* required amount of stack */
 
 MEMORY
 {
-  RAM          (xrw) : ORIGIN = 0x20000000, LENGTH = 16K
+  /* ★ 2026-10-12：16K -> 36K。本文件头（CubeIDE 自动生成）就写着
+   *   "STM32G071GBUx Device ... 128Kbytes FLASH / 36Kbytes RAM"，
+   *   而这里的 MEMORY 块被写成了 16K —— 那是抄了 16K 器件的模板，不是本芯片的限制。
+   *   依据（都是针对同一颗 128K/36K 芯片）：
+   *     · ST 官网 STM32G071GB：36 Kbytes SRAM / 128 Kbytes Flash
+   *     · ST 官方 CubeG0 生成脚本 STM32G071RBTX_FLASH.ld：
+   *         RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 36K   ← SRAM 从 0x20000000 起【连续】36K
+   *   即 SRAM 覆盖 0x20000000~0x20008FFF。放开后 _estack 从 0x20004000 移到 0x20009000。
+   *   ⚠ 开工前用 SWD 做一次写读验证（见 tools/esc-dbg.sh ramcheck）：
+   *       往 0x20008800 写魔数再读回，一致才算落地。
+   *   注：仓库里的 CMSIS 头 stm32g071xx.h 写 SRAM_SIZE_MAX=0x8000(32K)，
+   *   那是 G0 系列通用的保守值，不如 ST 针对本型号生成的脚本具体。 */
+  RAM          (xrw) : ORIGIN = 0x20000000, LENGTH = 36K
   FLASH_VECTAB  (rx)  : ORIGIN = 0x08001000, LENGTH = 192
   FLASH         (rx)  : ORIGIN = ORIGIN(FLASH_VECTAB) + LENGTH(FLASH_VECTAB), LENGTH = 62K - 32 - LENGTH(FLASH_VECTAB)
   EEPROM        (rx)  : ORIGIN = 0x0800F800, LENGTH = 2K

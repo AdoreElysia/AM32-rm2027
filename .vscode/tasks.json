@@ -93,6 +93,50 @@
         "reveal": "always",
         "panel": "dedicated"
       }
+    },
+    {
+      "label": "⑨ 跑前：清捕获状态 + 设窗口触发点",
+      "detail": "SWD 只在这一刻碰电调。地址从 ELF 现取（tools/esc-dbg.sh），不硬编码。",
+      "type": "shell",
+      "command": "bash /home/lpl/桌面/RM2027/AM32-rm2027/tools/esc-dbg.sh arm ${input:trigFrames}",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "⑩ 跑后：dump 窗口波形 + 画图",
+      "detail": "电机必须已停。SWD 读冻结缓冲，出 /home/lpl/桌面/RM2027/cl_wave.png",
+      "type": "shell",
+      "command": "python3 /home/lpl/桌面/RM2027/rm2027-drone/work/zcw-dump.py",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "⑪ 电调 RAM 写读验证（改链接脚本后跑一次）",
+      "detail": "往 16K 之外写魔数读回，确认 36K RAM 真实存在。电机须停。",
+      "type": "shell",
+      "command": "bash /home/lpl/桌面/RM2027/AM32-rm2027/tools/esc-dbg.sh ramcheck",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "trigFrames",
+      "type": "promptString",
+      "description": "窗口采样触发点：交棒后多少帧（1 帧 = 41.67µs；1500ms = 36000，5000ms = 120000）",
+      "default": "36000"
     }
   ]
 }
