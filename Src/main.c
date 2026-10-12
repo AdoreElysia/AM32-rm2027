@@ -882,32 +882,62 @@ static const uint16_t wt_off[6] __attribute__((unused)) = { 340u, 215u, 350u, 23
 #define WT_ITER_N   32              /* 移 5 位 = ÷32 */
 volatile int16_t wt_dyn[6] = { 0, 0, 0, 0, 0, 0 };   /* 动态竖直偏移（拍）；供 SWD dump */
 volatile uint8_t wt_cnt[6] = { 0, 0, 0, 0, 0, 0 };   /* 本圈已攒了多少步 */
-volatile uint8_t wt_rounds[6] = { 0, 0, 0, 0, 0, 0 };/* 各步已完成几轮 */
-volatile int16_t wt_log_d[192];                      /* 每轮实际叠加量（≤32 轮×6 步），证据 */
+volatile uint8_t wt_rounds = 0;                      /* 已完成几轮（六步齐更的轮数）*/
+volatile int16_t wt_log_d[192];                      /* 每轮六步实际叠加量（去共模后），证据 */
 volatile uint8_t wt_log_i = 0;
 static int32_t wt_acc[6] = { 0, 0, 0, 0, 0, 0 };     /* 一圈内的误差累加（int32：32×5000 也装得下）*/
 
+/* ★★★ 2026-10-12 第二版：去共模 + 只在闭环迭代（第一版顶死在钳位的教训）★★★
+ *   第一版实测（6 秒一跑）：19 轮、每轮都撞 ±200 单轮钳位、wt_dyn 撞满 ±800
+ *   （[−800, 0, +799, −27, +800, −800]），日志前 66 条（= 前 11 轮）六步【全是 −200】。
+ *   RAM 证据：ol_cm_n=3735 次换相 ⇒ 每步 622 次 ⇒ 正好 19.4 轮（与 wt_rounds 自洽）。
+ *   两条病根：
+ *   ① 误差信号含【共模】：err = meas_step − ci，而
+ *        meas_step = (lastzctime + thiszctime) >> 1   ← 最近【两】个过零间隔的均值
+ *        ci        = 六步环的滤波均值（还被 ±1/64 限速）
+ *      转速一变两者就有滞后差 ⇒ 六步【同向】偏。"逐步均衡"本不该拥有移动整体相位的
+ *      权限，共模一进反馈就是"相位动 → 转速动 → 共模更大"的正反馈 ⇒ 撞钳位。
+ *   ② 开环斜坡段也在喂：斜坡每步缩 1/16（6%），滞后差最大 ⇒ 前 11 轮全 −200 就是在
+ *      斜坡上攒出来的。
+ *   ⇒ 本版两条修：
+ *     (a) 只在该步【六步都攒满 32 次】时统一更新，且先减去六步平均（d_s -= mean(d)）
+ *         ⇒ 迭代在数学上【永不动整体相位】，整体相位归比例表基线负责；
+ *     (b) ol_startup_arm=1（开环起步/斜坡）期间不喂。
+ *   符号仍按第一版推导：err>0（本步偏长）⇒ wt_dyn↑ ⇒ waitTime=ratio×ci−wt_dyn ↓ ⇒ 步变短。 */
 static void wt_iter_feed(uint8_t s_end, uint32_t w_meas)
 {
+    extern volatile uint8_t ol_startup_arm;
+    if (ol_startup_arm) { return; }               /* (b) 开环段不迭代 */
     if (s_end < 1u || s_end > 6u) { return; }
     int32_t err = (int32_t)w_meas - (int32_t)commutation_interval;
     int32_t a = wt_acc[s_end - 1u] + err;
     if (a > 200000) { a = 200000; }
     if (a < -200000) { a = -200000; }
     wt_acc[s_end - 1u] = a;
-    if (++wt_cnt[s_end - 1u] >= WT_ITER_N) {
-        int32_t d = a >> 5;                       /* 移 5 位 = 这一圈的平均误差 */
-        if (d > 200) { d = 200; }
-        if (d < -200) { d = -200; }
-        int32_t v = (int32_t)wt_dyn[s_end - 1u] + d;
-        if (v > 800) { v = 800; }
-        if (v < -800) { v = -800; }
-        wt_dyn[s_end - 1u] = (int16_t)v;
-        if (wt_rounds[s_end - 1u] < 250u) { wt_rounds[s_end - 1u]++; }
-        if (wt_log_i < 191u) { wt_log_d[wt_log_i++] = (int16_t)d; }
-        wt_acc[s_end - 1u] = 0;
-        wt_cnt[s_end - 1u] = 0;
+    if (++wt_cnt[s_end - 1u] < WT_ITER_N) { return; }
+    for (uint8_t i = 0; i < 6u; i++) {            /* (a) 六步都攒满才动手 */
+        if (wt_cnt[i] < WT_ITER_N) { return; }
     }
+    int32_t d[6];
+    int32_t sum = 0;
+    for (uint8_t i = 0; i < 6u; i++) {
+        d[i] = wt_acc[i] >> 5;                   /* 移 5 位 = 该步这一圈的平均误差 */
+        sum += d[i];
+    }
+    int32_t dbar = sum / 6;
+    for (uint8_t i = 0; i < 6u; i++) {
+        int32_t dd = d[i] - dbar;                /* ★ 去共模：整体相位不归迭代管 */
+        if (dd > 200) { dd = 200; }
+        if (dd < -200) { dd = -200; }
+        int32_t v = (int32_t)wt_dyn[i] + dd;
+        if (v > 400) { v = 400; }
+        if (v < -400) { v = -400; }
+        wt_dyn[i] = (int16_t)v;
+        if (wt_log_i < 191u) { wt_log_d[wt_log_i++] = (int16_t)dd; }
+        wt_acc[i] = 0;
+        wt_cnt[i] = 0;
+    }
+    if (wt_rounds < 250u) { wt_rounds++; }
 }
 #endif
 
