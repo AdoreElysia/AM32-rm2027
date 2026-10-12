@@ -509,7 +509,9 @@ volatile uint8_t  ccm_step[CCM_N];
  *   帧格式（18 字节，小端，与 PC 端 evt-dump.py 一致）：
  *     AA 55 | seq u16 | ts u32 | delta i16 | step u8 | wait u16 | duty u16 | cur i16 | chk u8
  *   带宽：每次换相 18 字节、约 1000 次/秒 => 约 18KB/s，1Mbaud 下很轻松。 */
-#define EVT_FRAME   20           /* ★ 2026-10-11 18->20：帧头 2->4 字节 + CRC8 */
+#define EVT_FRAME   21           /* ★ 2026-10-12 20->21：末尾加 1 字节"阶段标志"
+                                  *   0=闭环、1=开环(还在起步链)。出图时能把开环段
+                                  *   与闭环段分开上色，直接对比"开环稳 vs 闭环抖" */
 #define EVT_BUF_N   1024
 #define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
@@ -519,6 +521,13 @@ volatile uint32_t evt_total;     /* 打包过的事件数 */
 volatile uint32_t evt_drop;      /* 缓冲满而丢弃的 */
 volatile uint8_t  evt_tx[EVT_BATCH];
 volatile uint32_t adc_frame_total;   /* 24kHz 总帧数（u32，不会回绕）*/
+
+/* ★ 2026-10-12 延时交棒计时：给编译期宏 RM2027_OL_RUN_MS 用
+ *   ms10k_cnt 由 10kHz 中断自增（1 拍 = 0.1ms）；
+ *   ol_hold_ms = 斜坡跑完那一刻的读数；两者之差就是"已纯开环跑了多少 0.1ms" */
+volatile uint32_t ms10k_cnt = 0;
+volatile uint32_t ol_hold_ms = 0;
+volatile uint32_t ol_openloop_ms = 0;   /* 观测：本次纯开环已跑毫秒数 */   /* 24kHz 总帧数（u32，不会回绕）*/
 
 volatile uint16_t ccm_head;           /* 下一个写入位置 */
 
@@ -951,7 +960,10 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
  *   既看得见开环、交棒又是确定的。
  *   ★ 附带好处：热身跑满之后 ol_meas_ci 是从【整段恒速】量出来的 ⇒ 交棒时给闭环的
  *     周期初值更可信（之前验证窗和热身混在一起，样本未必够）。 */
-#define OL_VERIFY_PASS      (ol_soak_ticks >= OL_SOAK_TICKS)
+#define OL_HOLD_DONE()  ((RM2027_NEVER_HANDOVER) ? 0 : \
+                         ((ms10k_cnt - ol_hold_ms) >= (uint32_t)RM2027_OL_RUN_MS * 10u))
+
+#define OL_VERIFY_PASS      (ol_soak_ticks >= OL_SOAK_TICKS && OL_HOLD_DONE())
 #else
 #define OL_VERIFY_PASS      (ol_verify_ok >= OL_VERIFY_OK_NEED)
 #endif
@@ -1208,6 +1220,7 @@ static void olStartupTick(void)
                      *   一旦闭环接管后转速掉，步长就会超过它 ⇒ 正好是"开始变慢"的时刻。 */
                     /* ★ 本轮实验：改用"油门切 0（开始滑行）"触发，所以 ci 阈值给成
                      *   永不触发（0xFFFFFFFF）—— 但要保留这次 arm（它负责清环形缓冲）。*/
+                    ol_hold_ms = ms10k_cnt;   /* ★ 纯开环计时从这里开始 */
                     adc_zc_wave_arm(0xFFFFFFFFu);
                 } else {
                     uint32_t d = (20000UL * 256UL) / ol_freq_q;
@@ -1946,6 +1959,7 @@ void win_pump(void)
 /* 在换相那一刻打包一个事件（中断上下文：只写内存，不发送）*/
 static void evt_push(void)
 {
+    extern volatile uint8_t ol_startup_arm;   /* 定义在别处 */
     uint16_t nxt = (uint16_t)((evt_head + EVT_FRAME) & (EVT_BUF_N - 1u));
     if (nxt == evt_tail) { evt_drop++; return; }
     uint8_t *p = (uint8_t *)&evt_buf[evt_head];
@@ -1965,7 +1979,8 @@ static void evt_push(void)
     p[13] = (uint8_t)(wt & 0xFF);  p[14] = (uint8_t)(wt >> 8);
     p[15] = (uint8_t)(dt & 0xFF);  p[16] = (uint8_t)(dt >> 8);
     p[17] = (uint8_t)(cr & 0xFF);  p[18] = (uint8_t)((cr >> 8) & 0xFF);
-    p[19] = evt_crc8(p, 19);
+    p[19] = (uint8_t)(ol_startup_arm ? 1u : 0u);   /* ★ 阶段标志：1=开环 0=闭环 */
+    p[20] = evt_crc8(p, 20);
     evt_head = nxt;
     evt_total++;
 }
@@ -2904,7 +2919,10 @@ static void olStepTick(void)
 #endif
 
 void tenKhzRoutine()
-{ // 20khz as of 2.00 to be renamed
+{
+    ms10k_cnt++;   /* ★ 0.1ms 计数：给"纯开环先跑多久"计时 */
+    ol_openloop_ms = (ms10k_cnt - ol_hold_ms) / 10u;
+ // 20khz as of 2.00 to be renamed
     duty_cycle = duty_cycle_setpoint;
     tenkhzcounter++;
     ledcounter++;
