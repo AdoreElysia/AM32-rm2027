@@ -2357,11 +2357,28 @@ void PeriodElapsedCallback()
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
     /* ★ 2026-10-12 每步 waitTime：改为查表（比例 × ci），不再一律 ci/2。
-     *   索引用【这个过零发生在哪一步】（bemf_zc_step，由 ADC 中断在认到过零时记录）——
-     *   因为"过零 → 下一次换相"的延迟属于"过零所在的那一步"。
-     *   （advance 已并入表里，这里不再减；auto_advance 逻辑保留但不参与。） */
+     *   （advance 已并入表里，这里不再减；auto_advance 逻辑保留但不参与。）
+     *
+     * ★★★ 2026-10-12 索引错位修正：bemf_zc_step - 1 → step - 1 ★★★
+     *   原来用 bemf_zc_step-1。但本段代码跑在 commutate()【之后】，此刻
+     *   bemf_zc_step 记的是【刚才那次】过零所在的步（= 上一个步）；
+     *   而这里算出的 waitTime 是被【接下来那次】过零消费的（interruptRoutine()
+     *   用 SET_AND_ENABLE_COM_INT(waitTime+1) 武装 COM 定时器）——
+     *   接下来那次过零发生在【刚进入的 step】里。⇒ 索引用 step-1 才对，
+     *   用 bemf_zc_step-1 会把整张表错位一整步。
+     *
+     *   实测证据（OL_CM_W 埋点，RM2027_CL_ANCHOR_DUTY=300 那一跑，最近 32 次换相）：
+     *     按 OL_CM_S 归并 waitTime 得 114/1035/766/878/660/872 拍；
+     *     用表 A 比例去除，六个值反推出的 ci 分别是 2426/2447/2439/2445/2454/2429
+     *     ⇒ 六个独立值收敛到同一个 ci ≈ 2440 拍 = 1.22ms。
+     *   而这个收敛【只在把 label 与表项错开一位时才成立】：
+     *     label 1→wt_num[4]  2→wt_num[5]  3→wt_num[0]  4→wt_num[1]  5→wt_num[2]  6→wt_num[3]
+     *   即实际生效的是 wt_num[s-3]（label s 的换相所消费的那次过零在步 s-2 里…
+     *   再往上追一层就是本行），表本意是 wt_num[s-1]。错位一整步。
+     *   后果：step5 本该用 0.047 却拿到 0.359（晚 0.31×ci ≈ 19° 电角度）；
+     *        这与实测"步 5 最长(1.54ms)、步 6 最短(0.50ms)"的宽度畸变方向一致。 */
     {
-        uint8_t _s = (bemf_zc_step >= 1u && bemf_zc_step <= 6u) ? (uint8_t)(bemf_zc_step - 1u) : 0u;
+        uint8_t _s = (step >= 1 && step <= 6) ? (uint8_t)(step - 1u) : 0u;
         waitTime = (uint16_t)(((uint32_t)commutation_interval * (uint32_t)wt_num[_s]) / 1000u);
     }
     if (!old_routine) {
