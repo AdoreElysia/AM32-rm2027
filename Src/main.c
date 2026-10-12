@@ -698,6 +698,9 @@ uint32_t ol_run_ticks = 0;                  /* 本次已驱动的拍数 */
 volatile uint32_t cl_run_start = 0;         /* 交棒那一刻的 24kHz 绝对帧号 */
 volatile uint8_t  cl_run_armed = 0;         /* 1 = 已交棒，自动停机计时中 */
 volatile uint32_t cl_runs_stopped = 0;      /* 观测：因闭环到点而停机的次数 */
+volatile uint8_t  cl_done_latch = 0;        /* ★ 1 = 闭环跑完已停机，必须先【收油】才能再跑
+                                             *   （否则主循环的启动逻辑只看 running==0，
+                                             *    油门还挂着就会立刻重启 ⇒ 无限循环重跑）*/
 uint32_t ol_timeouts = 0;                   /* 观测：到时间上限自动停机的次数 */
 volatile uint8_t ol_led_off_req = 0;        /* 请求切"待命红"（WS2812 阻塞操作，交主循环执行）*/
 volatile uint8_t ol_led_on_req = 0;         /* 请求切"运行绿"：每次起步点一次（见 olStepTick）——
@@ -2632,7 +2635,10 @@ void setInput()
 #ifndef BRUSHED_MODE
 if (!stepper_sine && armed) {
         if (input >= 47 + (80 * eepromBuffer.use_sine_start)) {
-            if (running == 0) {
+            /* ★ 2026-10-12：加 !cl_done_latch —— 闭环自动停机后必须【先收油】才能再跑。
+             *   原来只判断 running==0，而油门还挂着 ⇒ 停了立刻又启动 ⇒
+             *   实测 cl_runs_stopped 一路涨（"跑完 6 秒 → 停 → 又跑 6 秒"无限循环）。*/
+            if (running == 0 && !cl_done_latch) {
                 allOff();
 #if RM2027_OL_ARM_ONLY
                 if (!old_routine) {   /* 开环：换相由 olStepTick() 独占，不必走 startMotor() */
@@ -2926,6 +2932,7 @@ static void olStepTick(void)
             ol_trip_count = 0;
             ol_stop_reason = 0;
             ol_cool_ticks = 0;
+            cl_done_latch = 0;   /* ★ 收油/上锁 ⇒ 解除"闭环跑完"的锁存，下次给油可再跑 */
         }
         /* ★ "到时间上限"停机的自动重跑：冷却 OL_COOL_LIMIT 拍后解除锁存。
          *   这样"跑 N 秒 → 停 M 秒 → 又跑 N 秒"，既不会一直转、也不会被永久锁死。
@@ -3087,6 +3094,7 @@ void tenKhzRoutine()
             ol_led_off_req = 1;
             cl_run_armed = 0;
             cl_runs_stopped++;
+            cl_done_latch = 1;      /* ★ 锁存：必须收油后才能再跑（见启动逻辑处的判断）*/
         }
 #endif
         if (one_khz_loop_counter > PID_LOOP_DIVIDER) { // 1khz PID loop
