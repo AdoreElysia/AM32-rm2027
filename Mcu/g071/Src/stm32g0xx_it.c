@@ -341,25 +341,25 @@ void DMA1_Channel2_3_IRQHandler(void)
                  *   会把符号整体翻过去 ⇒ 假过零 ⇒ 破坏交棒条件。 */
                 int16_t dzc_judge = dzc;
 #if RM2027_CL_VOFF
+                /* ★ 两段式电压域补偿：d_judge = ((d_raw − zo) × zg) >> 8
+                 *   偏置先减（去 b）、再乘增益（补 g）——与物理模型同序。
+                 *   只在闭环段施加（斜坡段反电势几码，减 30~67 码会翻符号）。 */
                 {
-                    extern volatile int16_t zc_voff[6];
+                    extern volatile int16_t zo[6], zg[6];
                     extern volatile uint8_t ol_startup_arm;
                     if (!ol_startup_arm && step >= 1 && step <= 6) {
-                        dzc_judge = (int16_t)(dzc - zc_voff[(uint8_t)(step - 1)]);
+                        uint8_t _i = (uint8_t)(step - 1);
+                        dzc_judge = (int16_t)((((int32_t)dzc - (int32_t)zo[_i])
+                                               * (int32_t)zg[_i]) >> 8);
                     }
                 }
 #endif
                 uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
 #if RM2027_CL_VOFF
-                /* ★ 传【补偿后】的 dzc_judge：误差必须是"残余"，环才闭合（见 voff_frame 说明）。
-                 *   传 raw 会让积分器无界上卷（第一版就是这么坏的）。 */
-                { extern void voff_frame(int16_t dzc_comp, uint8_t zc_ok, uint8_t st);
+                /* ★ 传【补偿后】的 dzc_judge：误差必须是"残余"，环才闭合（见 voff_frame 说明）*/
+                { extern void voff_frame(int16_t d_comp, uint8_t zc_ok, uint8_t st);
                   voff_frame(dzc_judge, zc, (uint8_t)step); }
 #endif
-                /* 顺手把这一帧写进闭环波形环形缓冲（交棒时冻结，供 SWD dump 画图）
-                 * ★ vph / v0 / step 分开记 —— 这样才分得清交棒时的偏置跳变
-                 *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */
-                /* 多窗口捕获：每样本只留 delta + step + 判据结论（4 字节）*/
                 adc_zc_wave_push(dzc, (uint8_t)step, zc);
                 { extern void win_push(int16_t va,int16_t vb,int16_t vc,int16_t v0,int16_t cu,uint8_t st);
                   extern volatile uint16_t bemf_adc_va, bemf_adc_vb, bemf_adc_vc, bemf_adc_v0;

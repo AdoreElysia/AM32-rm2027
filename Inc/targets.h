@@ -2663,7 +2663,7 @@
  *   0 = 关：判据用原始 delta。
  *   详细依据见 Src/main.c 的 zc_voff / voff_frame 说明。 */
 #ifndef RM2027_CL_VOFF
-#define RM2027_CL_VOFF          1
+#define RM2027_CL_VOFF          2
 #endif
 
 /* ★ 闭环必须的开关：过零检测从"轮询"切到"中断"的时机
