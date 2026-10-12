@@ -990,9 +990,17 @@ static uint8_t voff_pend = 0, voff_pos = 0, voff_step = 0;
 /* 每帧由 ADC 中断调用（算完 delta、做完过零判定之后）。
  *   dzc_raw = 本帧【未补偿】的 delta（延迟线必须存 raw，否则自我循环）
  *   zc_ok   = 本帧过零是否被接受；  st = 本帧所处的换相步 */
-void voff_frame(int16_t dzc_raw, uint8_t zc_ok, uint8_t st)
+void voff_frame(int16_t dzc_comp, uint8_t zc_ok, uint8_t st)
 {
-    voff_dl[voff_dli & 63u] = dzc_raw;
+    /* ★★★ 2026-10-12 修正（第一版补过头、转子原地嗡的根因）★★★
+     *   延迟线必须存【补偿后】的值，不能存 raw！
+     *   第一版存 raw ⇒ 测出来的"偏移"是原始信号的偏移，与被施加的 zc_voff 【无关】
+     *   ⇒ 误差信号恒为 +30~67 码、永不归零 ⇒ 积分器每轮往上加 ⇒ 六步全部顶到 ±120
+     *   钳位（实测 zc_voff = [+118,-66,+114,-103,+120,-45]）⇒ 补过头 ⇒ 过零点被
+     *   推进换相振铃区 ⇒ 一步里认出 ~3 次过零（六步环整齐 540 拍 = 真实步长的 1/3）
+     *   ⇒ ci 从 1500 缩到 682 ⇒ waitTime 只剩 0.12ms ⇒ 相位全乱、没有转矩 ⇒ 转子
+     *   原地嗡、根本不转。存【补偿后】的值，误差才是"残余"，环才闭合、才会收敛。 */
+    voff_dl[voff_dli & 63u] = dzc_comp;
     if (zc_ok && st >= 1u && st <= 6u) {
         voff_pend = VOFF_N;              /* 记住过零那一帧，等 N 帧好取到 k+N */
         voff_pos  = voff_dli;
@@ -1011,11 +1019,13 @@ void voff_frame(int16_t dzc_raw, uint8_t zc_ok, uint8_t st)
         voff_cnt_s[i] = voff_cnt[i];
         if (++voff_cnt[i] >= VOFF_ITER_N) {
             int16_t d = (int16_t)(voff_acc[i] >> 5);   /* 移 5 位 = 这一轮的平均 */
-            if (d > 8) { d = 8; }                      /* 单轮最多动 8 码（保守）*/
-            if (d < -8) { d = -8; }
+            if (d > 4) { d = 4; }                      /* 单轮最多动 4 码（第一版 8 太野）*/
+            if (d < -4) { d = -4; }
             int32_t v = (int32_t)zc_voff[i] + d;
-            if (v > 120) { v = 120; }                  /* 总量钳 ±120 码 */
-            if (v < -120) { v = -120; }
+            /* ★ 总量钳 ±60 码：必须显著小于最小幅值（实测 56 码），
+             *   否则补偿会把信号极性整段翻过去 ⇒ 一步多次跨零 ⇒ ci 被拉小 ⇒ 相位乱掉。*/
+            if (v > 60) { v = 60; }
+            if (v < -60) { v = -60; }
             zc_voff[i] = (int16_t)v;
             if (voff_log_i < 191u) { voff_log[voff_log_i++] = d; }
             voff_acc[i] = 0;

@@ -336,7 +336,7 @@ void DMA1_Channel2_3_IRQHandler(void)
                 int16_t dzc = adc_bemf_get_delta();
                 /* ★★ 2026-10-12 电压域竖直偏移补偿（见 Src/main.c 的 zc_voff 说明）★★
                  *   判据吃的 delta 先减掉"这一步的竖直偏移"⇒ 跨零点回到真正的
-                 *   反电势零点上。延迟线里仍存【未补偿】的 raw（否则自我循环）。
+                 *   反电势零点上。（迭代的延迟线存的是补偿【后】的值，见下面的调用。）
                  *   只在闭环段生效：起步/斜坡段反电势只有几个码，减掉 30 码偏移
                  *   会把符号整体翻过去 ⇒ 假过零 ⇒ 破坏交棒条件。 */
                 int16_t dzc_judge = dzc;
@@ -351,8 +351,10 @@ void DMA1_Channel2_3_IRQHandler(void)
 #endif
                 uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
 #if RM2027_CL_VOFF
-                { extern void voff_frame(int16_t dzc_raw, uint8_t zc_ok, uint8_t st);
-                  voff_frame(dzc, zc, (uint8_t)step); }
+                /* ★ 传【补偿后】的 dzc_judge：误差必须是"残余"，环才闭合（见 voff_frame 说明）。
+                 *   传 raw 会让积分器无界上卷（第一版就是这么坏的）。 */
+                { extern void voff_frame(int16_t dzc_comp, uint8_t zc_ok, uint8_t st);
+                  voff_frame(dzc_judge, zc, (uint8_t)step); }
 #endif
                 /* 顺手把这一帧写进闭环波形环形缓冲（交棒时冻结，供 SWD dump 画图）
                  * ★ vph / v0 / step 分开记 —— 这样才分得清交棒时的偏置跳变
