@@ -4,6 +4,15 @@
         "version": "2.0.0",
         "tasks": [
             {
+                "label": "ESC-Lab：电调实验唯一入口（编译 → 改名 → 烧录 → 采集）",
+                "detail": "★ 日常就按这个。菜单：1=编译当前分支→固件改名→烧录；2=1+额外拓展任务（窗口采样/跑前arm/跑后dump/给油收油/一条龙）",
+                "type": "shell",
+                "command": "bash /home/lpl/桌面/RM2027/AM32-rm2027/tools/esc-lab.sh",
+                "problemMatcher": [],
+                "group": { "kind": "build", "isDefault": true },
+                "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+            },
+            {
                 "label": "AM32 SITL: Build",
                 "type": "process",
                 "command": "bash",
@@ -13,7 +22,7 @@
                     "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder:AM32}/env_setup_scripts/sitl_windows.ps1", "-Action", "Build"]
                 },
                 "options": { "cwd": "${workspaceFolder:AM32}" },
-                "group": { "kind": "build", "isDefault": true },
+                "group": { "kind": "build" },
                 "problemMatcher": [{ "base": "$gcc", "fileLocation": ["relative", "${workspaceFolder:AM32}"] }],
                 "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
             },
