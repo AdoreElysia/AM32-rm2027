@@ -3103,6 +3103,15 @@ void tenKhzRoutine()
             cl_runs_stopped++;
             cl_done_latch = 1;      /* ★ 锁存：必须收油后才能再跑（见启动逻辑处的判断）*/
         }
+        /* ★★ 2026-10-12 解除锁存必须放在【主循环】里 ★★
+         *   我第一版把它放进了 olStepTick()，而那个函数在正常构建（非 OL_ARM_ONLY）
+         *   下【根本不会被调用】⇒ 锁存一粘就永远粘住 ⇒ 一次自动停机之后电机再也起不来：
+         *   实测 cl_done_latch 恒为 1、给油 6 秒 ol_steps Δ=0、running 恒为 0、串口 0 事件。
+         *   收油（原始油门 < 48）或未解锁时，解除"闭环跑完"锁存与到点计时。 */
+        if (newinput < 48 || !armed) {
+            cl_done_latch = 0;
+            cl_run_armed = 0;
+        }
 #endif
         if (one_khz_loop_counter > PID_LOOP_DIVIDER) { // 1khz PID loop
             PROCESS_ADC_FLAG = 1; // set flag to do new adc read at lower priority
