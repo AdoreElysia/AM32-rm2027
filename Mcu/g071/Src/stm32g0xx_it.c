@@ -549,6 +549,10 @@ void DMA1_Channel2_3_IRQHandler(void)
                  * 把上报的过零时刻往前挪 ⇒ 缩短"过零→换相"的等待 ⇒ 换相提前。 */
                 if (zc_cnt >= bemf_zc_lead_ticks) { zc_cnt -= bemf_zc_lead_ticks; }
                 bemf_zc_time = (zc_cnt > 0xFFFFu) ? (uint16_t)0xFFFFu : (uint16_t)zc_cnt;
+                /* ★ 2026-10-12 记下"这个过零发生在哪一步"，供每步 waitTime 表索引 */
+                { extern volatile uint8_t bemf_zc_step;
+                  /* step 已在包含的头里声明（comparator.h，非 volatile）——不要再重复限定符 */
+                  bemf_zc_step = (uint8_t)step; }
 
                 /* ★★ 2026-10-10 实验埋点（用户要求："开环跑，但用闭环的数据"）★★
                  *   开环驱动期间（ol_startup_arm=1）路径 B 不驱动换相，但这里

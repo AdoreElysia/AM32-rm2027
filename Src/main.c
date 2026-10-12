@@ -812,6 +812,21 @@ uint32_t ol_bench_oc_trips = 0;
  *   实测（埋点）靠 delta 分出两类（±5~±39 是本帧翻转、±374~±409 是滞后几百帧）
  *   才把这条钉死。用它做 thiszctime，CNT/CI 才能收敛到 1.0。 */
 volatile uint16_t bemf_zc_time = 0;
+/* ★ 2026-10-12 记录【这个过零发生在哪一步】—— 每步 waitTime 表要用它当索引 */
+volatile uint8_t  bemf_zc_step = 0;
+
+/* ★★★ 2026-10-12 每步 waitTime 表（由【开环实测】导出）★★★
+ *   来源：在开环区（步长 0.917ms、1856 拍，转子跟着固定时基走、无反馈）实测每个 step 的
+ *         "过零落在步内的位置 p_open"，则【过零 → 下一次换相】的理想延迟 = (1 − p_open)×步长。
+ *   实测 p_open / 比例（= 这里的分母 1000）：
+ *     step1 0.682 → 0.314    step2 0.636 → 0.359    step3 0.727 → 0.269
+ *     step4 0.636 → 0.359    step5 0.952 → 0.047    step6 0.571 → 0.423
+ *   ★ 关键：六个比例【全都小于 0.5】⇒ 开环实际是"过零后 0.05~0.42 步就换相"，
+ *     远早于教科书 30°（= 0.5 步）。而闭环原来一律用 ci/2 = 0.5 ⇒ 换相整体偏晚
+ *     ⇒ 相位偏 ⇒ 转矩掉 ⇒ 变慢。本表把闭环的相位"对齐到开环那套好的相位"。
+ *   ⚠ 用比例（×ci）而不是绝对拍：步长随转速变，绝对拍不随动。
+ *   ⚠ 方向风险：用户扫 advance 曾得"越提前越慢"，与本表方向相反 —— 先跑一次定方向。 */
+static const uint16_t wt_num[6] = { 314u, 359u, 269u, 359u, 47u, 423u };  /* ÷1000 */
 
 /* ★ 2026-10-09：本步内"|悬空相 − V0|"的最大值（每帧更新、每次过零清零）。
  *   用途：一眼看出反电势真实幅值 ⇒ 直接决定施密特滞回 BEMF_HYST_LSB 该取多少。
@@ -2332,7 +2347,14 @@ void PeriodElapsedCallback()
 	} else {
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
-    waitTime = (commutation_interval >> 1) - advance;
+    /* ★ 2026-10-12 每步 waitTime：改为查表（比例 × ci），不再一律 ci/2。
+     *   索引用【这个过零发生在哪一步】（bemf_zc_step，由 ADC 中断在认到过零时记录）——
+     *   因为"过零 → 下一次换相"的延迟属于"过零所在的那一步"。
+     *   （advance 已并入表里，这里不再减；auto_advance 逻辑保留但不参与。） */
+    {
+        uint8_t _s = (bemf_zc_step >= 1u && bemf_zc_step <= 6u) ? (uint8_t)(bemf_zc_step - 1u) : 0u;
+        waitTime = (uint16_t)(((uint32_t)commutation_interval * (uint32_t)wt_num[_s]) / 1000u);
+    }
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt
     }
