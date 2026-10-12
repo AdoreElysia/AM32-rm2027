@@ -69,9 +69,10 @@ case "$cmd" in
     echo "== RAM 写读验证 =="
     ok=1
     for A in 0x20003FFC 0x20004000 0x20008000 0x20008800 0x20008FFC; do
-        MAGIC=$(printf '0x%08X' $(( (RANDOM<<16 ^ RANDOM) & 0xFFFFFFFF )))
+        # ★ 魔数用小写：openocd 的 mdw 输出是小写十六进制，大小写不一致会误判成"读不回"
+        MAGIC=$(printf '0x%08x' $(( (RANDOM<<16 ^ RANDOM) & 0xFFFFFFFF )))
         run_oc -c "mww $A $MAGIC" >/dev/null
-        got=$(rd32 "$A")
+        got=$(rd32 "$A" | tr 'A-Z' 'a-z')
         if [ "$got" = "${MAGIC#0x}" ]; then
             echo "  ✅ $A 写读一致（$MAGIC）"
         else
