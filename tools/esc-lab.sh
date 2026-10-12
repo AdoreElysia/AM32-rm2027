@@ -77,19 +77,31 @@ core_build_flash() {
 
     echo
     echo "---- 烧录 ----"
-    echo "⚠ 请先【开 12V】，并确认 F1 正在发 0 油门（烧完电调会复位运行）"
+    echo "⚠ 烧录【不需要 12V】：电调逻辑由 ST-Link 的 3.3V 供电就够。"
+    echo "   反过来说，开着 12V + F1 还给着油，会让 AM32 引导程序认定"
+    echo "   '信号持续高 ⇒ 进固件升级模式' 而不跳 app（实测 PC 停在 0x08000104），"
+    echo "   此时写 flash 会随机报 'block write failed'。"
+    echo "   ⇒ 请先【让 F1 收油】（额外拓展任务 [5]），最好再把 12V 关掉。"
     read -rp "   准备好后按回车继续（Ctrl-C 取消）" _ || { echo "❌ 没读到回车（EOF/管道）⇒ 取消烧录，安全第一"; return 1; }
-    OUT=$(timeout 300 openocd -f interface/stlink.cfg -f target/stm32g0x.cfg \
-        -c "adapter speed 500" -c "init" -c "reset halt" \
-        -c "flash write_image erase $BIN $APP_ADDR" \
-        -c "verify_image $BIN $APP_ADDR" \
-        -c "reset run" -c "shutdown" 2>&1)
-    echo "$OUT" | grep -aiE "wrote|verified|Error" | sed 's/^/  /'
-    if ! echo "$OUT" | grep -qai "verified"; then
-        echo "❌ 烧录或校验失败（ST-Link 连接？）"; return 1
-    fi
-    echo "✅ 烧录完成并校验通过（只写 app 段 $APP_ADDR）"
-    return 0
+
+    # ★ 重试 3 次：'block write failed' 大多数是瞬时（信号/电源抖动、引导程序状态）
+    local try OUT
+    for try in 1 2 3; do
+        OUT=$(timeout 300 openocd -f interface/stlink.cfg -f target/stm32g0x.cfg \
+            -c "adapter speed 500" -c "init" -c "reset halt" \
+            -c "flash write_image erase $BIN $APP_ADDR" \
+            -c "verify_image $BIN $APP_ADDR" \
+            -c "reset run" -c "shutdown" 2>&1)
+        echo "$OUT" | grep -aiE "wrote|verified|flash size|RDP level|block write failed|Error" | sed 's/^/  /'
+        if echo "$OUT" | grep -qai "verified"; then
+            echo "✅ 烧录完成并校验通过（第 $try 次尝试；只写 app 段 $APP_ADDR）"
+            return 0
+        fi
+        echo "  ⚠ 第 $try 次失败 —— 常见原因：① F1 还在给油（引导程序停在升级模式）② USB/ST-Link 抖动"
+        [ "$try" -lt 3 ] && sleep 2
+    done
+    echo "❌ 连续 3 次失败。请依次：① 让 F1 收油 ② 关掉 12V ③ 拔插一次 ST-Link 再试"
+    return 1
 }
 
 # ---------------------------------------------------------------- F1 油门
