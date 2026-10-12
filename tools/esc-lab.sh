@@ -78,7 +78,7 @@ core_build_flash() {
     echo
     echo "---- 烧录 ----"
     echo "⚠ 请先【开 12V】，并确认 F1 正在发 0 油门（烧完电调会复位运行）"
-    read -rp "   准备好后按回车继续（Ctrl-C 取消）" _
+    read -rp "   准备好后按回车继续（Ctrl-C 取消）" _ || { echo "❌ 没读到回车（EOF/管道）⇒ 取消烧录，安全第一"; return 1; }
     OUT=$(timeout 300 openocd -f interface/stlink.cfg -f target/stm32g0x.cfg \
         -c "adapter speed 500" -c "init" -c "reset halt" \
         -c "flash write_image erase $BIN $APP_ADDR" \
@@ -99,9 +99,20 @@ f1_throttle() {   # $1 = 0 给油 / 1 收油
 }
 
 # ---------------------------------------------------------------- 一条龙
+# 默认跑 6 秒（闭环）：发热上限 ≤7s；关键信息在交棒后 0~2s，2~6s 看恶化。
+# ★ 注意：跑多久必须【大于触发点】，否则窗口还没冻结电机就停了。
+#   扫 4000/6000ms 那两档时要手动输 7 秒。
 one_shot() {
-    local SECS=${1:-8} TRIG=${2:-36000}
+    local SECS=${1:-6} TRIG=${2:-36000}
+    local TRIG_MS=$(( TRIG / 24 ))          # 帧 -> ms（1 帧 = 41.67µs）
     echo "== 一条龙：arm → 给油 → 采 ${SECS}s → 收油 → dump =="
+    echo "   触发点 = ${TRIG} 帧 = ${TRIG_MS} ms"
+    # ★ 防呆：跑的时间必须大于触发点，否则窗口还没冻结电机就停了
+    if [ "$TRIG_MS" -ge $(( SECS * 1000 )) ]; then
+        echo "❌ 触发点 ${TRIG_MS}ms ≥ 本次只跑 ${SECS}s ⇒ 窗口来不及冻结就停机了"
+        echo "   建议把秒数改成 $(( TRIG_MS / 1000 + 2 ))（且不超过 7 秒的发热上限）"
+        return 1
+    fi
     [ -x "$ESC_DBG" ] && "$ESC_DBG" arm "$TRIG"
     ( timeout $((SECS + 15)) python3 "$WORK/evt-dump.py" "$SERIAL" "$SECS" >/tmp/evt_run.log 2>&1 ) &
     local L=$!
@@ -127,14 +138,16 @@ extra_menu() {
         echo "  [5] F1 收油"
         echo "  [6] 一条龙：arm → 给油 → 采 N 秒 → 收油 → dump"
         echo "  [0] 返回"
-        read -rp "选择: " c
+        read -rp "选择: " c || return      # ★ EOF/管道断就返回，别空转
         case "${c:-x}" in
-          1) read -rp "触发点帧数 [36000=交棒后1500ms]: " f; "$ESC_DBG" arm "${f:-36000}" ;;
-          2) read -rp "秒数 [8]: " s; python3 "$WORK/win-dump.py" "$SERIAL" "${s:-8}" ;;
+          1) read -rp "触发点帧数 [36000=交棒后1500ms]: " f || return; "$ESC_DBG" arm "${f:-36000}" ;;
+          2) read -rp "秒数 [闭环6 / 开环4]: " s || return; python3 "$WORK/win-dump.py" "$SERIAL" "${s:-6}" ;;
           3) python3 "$WORK/zcw-dump.py" | tail -4 ;;
           4) echo "⚠ 即将给油，电机会转"; f1_throttle 0; echo "已给油" ;;
           5) f1_throttle 1; echo "已收油" ;;
-          6) read -rp "采多少秒 [8]: " s; read -rp "触发点帧数 [36000]: " f; one_shot "${s:-8}" "${f:-36000}" ;;
+          6) read -rp "采多少秒 [6=闭环 / 4=开环；扫 4000/6000ms 触发点用 7]: " s || return
+             read -rp "触发点帧数 [36000=交棒后1500ms]: " f || return
+             one_shot "${s:-6}" "${f:-36000}" ;;
           0) return ;;
           *) echo "无效" ;;
         esac
@@ -148,7 +161,7 @@ main_menu() {
     echo "  [1] 编译当前分支 → 固件改名 → 烧录"
     echo "  [2] 1 + 额外拓展任务（采集 / 调试）"
     echo "  [0] 退出"
-    read -rp "选择: " c
+    read -rp "选择: " c || exit 0        # ★ read 失败(EOF/管道断)就退出，否则会空转死循环
     case "${c:-x}" in
       1) core_build_flash ;;
       2) core_build_flash && extra_menu ;;
