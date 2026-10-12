@@ -78,11 +78,22 @@ void ADC_DMA_Callback()
         adc_capture_sample(ADCDataDMA[0], ADCDataDMA[1]);   /* ★ 抓 A、B 两路 */
     }
 #else
-    bemf_adc_vph = ADCDataDMA[0];      /* rank1 = 当前悬空相 */
-    bemf_adc_v0  = ADCDataDMA[1];      /* rank2 = V0 */
-    ADC_raw_current = ADCDataDMA[2];   /* rank3 */
-    ADC_raw_volts   = ADCDataDMA[3];   /* rank4 */
-    ADC_raw_temp    = ADCDataDMA[4];   /* rank5 */
+    /* ★ 2026-10-12 四路电压版：rank1~4 = VA/VB/VC/V0，悬空相【软件选】 */
+    bemf_adc_va = ADCDataDMA[0];
+    bemf_adc_vb = ADCDataDMA[1];
+    bemf_adc_vc = ADCDataDMA[2];
+    bemf_adc_v0 = ADCDataDMA[3];
+    /* 悬空相映射与 changeCompInput 一致：step 1/4→C, 2/5→A, 3/6→B */
+    {
+        extern volatile uint8_t step;
+        uint8_t st = step;
+        if (st == 1u || st == 4u)      { bemf_adc_vph = bemf_adc_vc; }
+        else if (st == 2u || st == 5u) { bemf_adc_vph = bemf_adc_va; }
+        else                           { bemf_adc_vph = bemf_adc_vb; }
+    }
+    ADC_raw_current = ADCDataDMA[4];   /* rank5 */
+    ADC_raw_volts   = ADCDataDMA[5];   /* rank6 */
+    ADC_raw_temp    = ADCDataDMA[6];   /* rank7 */
 #endif
 #else
     ADC_raw_temp = ADCDataDMA[2];
@@ -108,8 +119,8 @@ void enableADC_DMA()
 #if ADC_CAPTURE_MODE
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 7);
 #else
-    /* 5 档：悬空相 / V0 / 电流 / 电压 / 温度（与 rank 顺序一体，改一处必须改另一处） */
-    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 5);
+    /* 7 档：VA/VB/VC/V0 / 电流 / 电压 / 温度（与 rank 顺序一体，改一处必须改另一处） */
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 7);
 #endif
 #elif defined(USE_ADC_INPUT)
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, 4);
@@ -249,8 +260,9 @@ void ADC_Init(void)
     /* 捕获模式：7 档 VA/VB/VC/V0/电流/电压/温度 */
     ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_7RANKS;
 #else
-    /* 5 档：悬空相 / V0 / 电流 / 电压 / 温度（见 ADC_DMA_Callback 的说明） */
-    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_5RANKS;
+    /* ★ 2026-10-12 四路电压版：7 档 VA/VB/VC/V0 / 电流 / 电压 / 温度
+     *   （原来 5 档是"悬空相+V0+电流+电压+温度"，rank 顺序改了这里必须跟着改）*/
+    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_7RANKS;
 #endif
 #else
     ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_3RANKS;
@@ -345,25 +357,32 @@ void ADC_Init(void)
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7, LL_ADC_CHANNEL_TEMPSENSOR);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR, LL_ADC_SAMPLINGTIME_COMMON_2);
 #else
-    /* rank1 = 悬空相（开机先放 A 相，之后由 changeCompInput() 每次换相改写）
-     * rank2 = V0（固定）—— 这两路就是过零判据要的全部，排在最前 ⇒ 只需 40 拍。 */
+    /* ★★★ 2026-10-12 【四路电压版】rank1~4 = VA / VB / VC / V0 ★★★
+     *   为什么改：诊断要"同一帧看见三相 + 中性点"才能判
+     *     ① 采样到底坏没坏、② V0 ≈ (VA+VB+VC)/3 是否成立（代码里定的自检）、
+     *     ③ "悬空相"选对了没有。
+     *   代价（必须记住）：BEMF 从 2 档 40 拍变回 4 档 80 拍 ⇒ 采样需求
+     *     CCR4(200)+80 = 280 拍 ⇒ duty 下限由约 9% 回到约 10.5%
+     *     （约束见 targets.h：CCR4 + 扫描拍数 < duty/2000×2665）。
+     *   delta 不再依赖"动态改写 rank1"，改由 ADC_DMA_Callback 按 step 在软件里选悬空相。 */
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_A_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, BEMF_ADC_NEUTRAL_CH);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, BEMF_ADC_PHASE_B_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, BEMF_ADC_PHASE_C_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, BEMF_ADC_NEUTRAL_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
 
-    /* 另外两相【不采】：判据只用"悬空相 − V0"，另两相的值没人读（原来是采了不用）。
-     * 少两档 = 少 40 拍，直接换成 duty 的下限空间。 */
-
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, CURRENT_ADC_CHANNEL);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5, CURRENT_ADC_CHANNEL);
     LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL,
         LL_ADC_SAMPLINGTIME_COMMON_1);
 
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, VOLTAGE_ADC_CHANNEL);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_6, VOLTAGE_ADC_CHANNEL);
     LL_ADC_SetChannelSamplingTime(ADC1, VOLTAGE_ADC_CHANNEL,
         LL_ADC_SAMPLINGTIME_COMMON_1);
 
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5,
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7,
         LL_ADC_CHANNEL_TEMPSENSOR);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
         LL_ADC_SAMPLINGTIME_COMMON_2);

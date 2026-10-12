@@ -27,6 +27,9 @@
  *   bemf_adc_v0  = rank2 = V0
  *   另两相不再采样 —— 判据只用"悬空相 − V0"，它们没人读（原来是采了不用，
  *   白占 40 拍采样窗口，而窗口正是 duty 下限的瓶颈）。 */
+volatile uint16_t bemf_adc_va  = 2048;
+volatile uint16_t bemf_adc_vb  = 2048;
+volatile uint16_t bemf_adc_vc  = 2048;
 volatile uint16_t bemf_adc_vph = 2048;
 volatile uint16_t bemf_adc_v0  = 2048;
 
@@ -108,17 +111,26 @@ void changeCompInput(void)
      *   映射与 comStep 一致：step 1/4 → C 悬空，2/5 → A 悬空，3/6 → B 悬空。 */
     if (step == 1 || step == 4) {
         active_phase = 2;
-#if !ADC_CAPTURE_MODE
+/* ★ 2026-10-12 四路电压版：rank1~4 固定为 VA/VB/VC/V0，
+         *   这里【必须停掉】动态改写，否则 rank1 会被改成悬空相、三路全乱。
+         *   悬空相改由 ADC_DMA_Callback 按 step 在软件里选。 */
+#if 0
         adc_set_first_rank(BEMF_ADC_PHASE_C_CH);
 #endif
     } else if (step == 2 || step == 5) {
         active_phase = 0;
-#if !ADC_CAPTURE_MODE
+/* ★ 2026-10-12 四路电压版：rank1~4 固定为 VA/VB/VC/V0，
+         *   这里【必须停掉】动态改写，否则 rank1 会被改成悬空相、三路全乱。
+         *   悬空相改由 ADC_DMA_Callback 按 step 在软件里选。 */
+#if 0
         adc_set_first_rank(BEMF_ADC_PHASE_A_CH);
 #endif
     } else if (step == 3 || step == 6) {
         active_phase = 1;
-#if !ADC_CAPTURE_MODE
+/* ★ 2026-10-12 四路电压版：rank1~4 固定为 VA/VB/VC/V0，
+         *   这里【必须停掉】动态改写，否则 rank1 会被改成悬空相、三路全乱。
+         *   悬空相改由 ADC_DMA_Callback 按 step 在软件里选。 */
+#if 0
         adc_set_first_rank(BEMF_ADC_PHASE_B_CH);
 #endif
     }

@@ -1924,8 +1924,11 @@ static uint8_t evt_crc8(const uint8_t *p, uint8_t n)
  *   每窗一包：A5 5A A5 5A | win_seq u16 | ts u32 | n u16 | n*(delta i16 + step u8)
  *   （靠 4 字节独特帧头 + 长度字段同步；ts = 本窗首帧的 24kHz 总帧号）*/
 #define WIN_N        512
-#define WIN_TOTAL    (12 + WIN_N * 3)     /* 头 12 字节 + 载荷 */
-volatile int16_t  win_buf[WIN_N];
+#define WIN_TOTAL    (12 + WIN_N * 10)    /* 头 12 字节 + 每帧 10 字节(VA/VB/VC/V0+step+1保留) */
+volatile int16_t  win_buf[WIN_N];       /* ★ 现在语义 = VA（四路电压版）*/
+volatile int16_t  win_vb[WIN_N];
+volatile int16_t  win_vc[WIN_N];
+volatile int16_t  win_v0[WIN_N];
 volatile uint8_t  win_step[WIN_N];
 volatile uint16_t win_n;
 volatile uint8_t  win_state;     /* 0=采集中 1=待发送 2=发送中 */
@@ -1936,7 +1939,7 @@ volatile uint8_t  win_tx[200];
 static uint8_t    win_pkt[WIN_TOTAL];    /* ★ 整包组好后一次性交给 DMA（见 win_pump）*/
 
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
-void win_push(int16_t d, uint8_t st)
+void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, uint8_t st)
 {
     if (win_state != 0u) { return; }        /* 发送中/待发送 ⇒ 本窗不再采 */
     /* ★★ 2026-10-12 补：每个窗口记下【本窗首帧的绝对 24kHz 帧号】★★
@@ -1947,7 +1950,10 @@ void win_push(int16_t d, uint8_t st)
      *   所以取到的是"上一帧"的编号 —— 差 1 帧 = 41.67µs，拼时间轴无影响。 */
     if (win_n == 0u) { win_ts = adc_frame_total; }
     uint16_t i = win_n;
-    win_buf[i]  = d;
+    win_buf[i]  = va;
+    win_vb[i]   = vb;
+    win_vc[i]   = vc;
+    win_v0[i]   = v0;
     win_step[i] = st;
     i++;
     if (i >= WIN_N) {
@@ -1977,10 +1983,17 @@ void win_pump(void)
     win_pkt[9] = (uint8_t)((win_ts >> 24) & 0xFF);
     win_pkt[10] = (uint8_t)(WIN_N & 0xFF);   win_pkt[11] = (uint8_t)(WIN_N >> 8);
     for (uint16_t f = 0; f < WIN_N; f++) {
-        uint16_t k = (uint16_t)(12u + f * 3u);
-        win_pkt[k]     = (uint8_t)( win_buf[f]       & 0xFF);
+        uint16_t k = (uint16_t)(12u + f * 10u);
+        win_pkt[k + 0] = (uint8_t)( win_buf[f]       & 0xFF);  /* VA */
         win_pkt[k + 1] = (uint8_t)((win_buf[f] >> 8) & 0xFF);
-        win_pkt[k + 2] = win_step[f];
+        win_pkt[k + 2] = (uint8_t)( win_vb[f]        & 0xFF);  /* VB */
+        win_pkt[k + 3] = (uint8_t)((win_vb[f]  >> 8) & 0xFF);
+        win_pkt[k + 4] = (uint8_t)( win_vc[f]        & 0xFF);  /* VC */
+        win_pkt[k + 5] = (uint8_t)((win_vc[f]  >> 8) & 0xFF);
+        win_pkt[k + 6] = (uint8_t)( win_v0[f]        & 0xFF);  /* V0 */
+        win_pkt[k + 7] = (uint8_t)((win_v0[f]  >> 8) & 0xFF);
+        win_pkt[k + 8] = win_step[f];
+        win_pkt[k + 9] = 0u;                                   /* 保留 */
     }
 
     win_seq++;

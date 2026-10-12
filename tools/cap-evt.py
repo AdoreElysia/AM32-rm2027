@@ -92,13 +92,15 @@ def parse(buf):
         if crc8(buf[j:j + 20]) == buf[j + 20]:
             rows.append(struct.unpack_from('<HIhBHHh', buf, j + 4) + (buf[j + 19],))
             i = j + 21
-        elif (j + 12 + 512 * 3 <= len(buf)
+        elif (j + 12 + 512 * 10 <= len(buf)
               and struct.unpack_from('<H', buf, j + 10)[0] == 512):
+            # ★ 2026-10-12 四路电压版：每帧 10 字节 = VA VB VC V0 (各 i16) + step + 保留
             wseq, wts = struct.unpack_from('<HI', buf, j + 4)
-            pay = np.frombuffer(buf[j + 12:j + 12 + 512 * 3], dtype=np.uint8).reshape(-1, 3)
-            d = (pay[:, 0].astype(np.int16) | (pay[:, 1].astype(np.int16) << 8))
-            wins.append((wseq, wts, d, pay[:, 2].copy()))
-            i = j + 12 + 512 * 3
+            pay = np.frombuffer(buf[j + 12:j + 12 + 512 * 10], dtype=np.uint8).reshape(-1, 10)
+            def _i16(c):
+                return pay[:, c].astype(np.int16) | (pay[:, c + 1].astype(np.int16) << 8)
+            wins.append((wseq, wts, _i16(0), _i16(2), _i16(4), _i16(6), pay[:, 8].copy()))
+            i = j + 12 + 512 * 10
         else:
             i = j + 1
     n_raw = len(rows)
@@ -190,7 +192,10 @@ if wins:
     npzp = csvp.replace('.csv', '_win.npz')
     np.savez(npzp, seq=np.array([w[0] for w in wins]),
              ts=np.array([w[1] for w in wins]),
-             d=np.array([w[2] for w in wins]), step=np.array([w[3] for w in wins]))
+             va=np.array([w[2] for w in wins]), vb=np.array([w[3] for w in wins]),
+             vc=np.array([w[4] for w in wins]), v0=np.array([w[5] for w in wins]),
+             step=np.array([w[6] for w in wins]))
+    print(f'  （四路电压版：VA/VB/VC/V0 各 512 点）')
     print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
 if not rows:
     print('❌ 一个事件都没收到 —— 检查 12V(母线电压) / F1 油门'); sys.exit(1)

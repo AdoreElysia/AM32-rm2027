@@ -10,8 +10,12 @@
 
 /* ADC 原始码（由 ADC DMA 扫描序列填入） */
 /* ★ 2026-10-10 重排后：rank1 = 当前悬空相（通道随换相动态改写），rank2 = V0 */
-extern volatile uint16_t bemf_adc_vph;  /* rank1 = 当前悬空相（A/B/C 之一） */
-extern volatile uint16_t bemf_adc_v0;   /* rank2 = V0_SENSE(PA3) */
+/* ★ 2026-10-12 四路电压版：rank1~4 固定为 VA/VB/VC/V0，悬空相改由软件按 step 选 */
+extern volatile uint16_t bemf_adc_va;   /* rank1 = VA */
+extern volatile uint16_t bemf_adc_vb;   /* rank2 = VB */
+extern volatile uint16_t bemf_adc_vc;   /* rank3 = VC */
+extern volatile uint16_t bemf_adc_vph;  /* 软件选出的当前悬空相（供 adc_bemf_get_delta 用） */
+extern volatile uint16_t bemf_adc_v0;   /* rank4 = V0_SENSE(PA3) */
 
 /* ★ 过零检测的"武装"标志（取代比较器的 EXTI）：换相后置 1、认到过零清 0。
  *   ADC-DMA 完成中断里读它（Mcu/g071/Src/stm32g0xx_it.c）。 */
