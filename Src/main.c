@@ -2893,6 +2893,16 @@ if (!stepper_sine && armed) {
 
                 duty_cycle_setpoint = duty_cycle_setpoint + (uint16_t)(stall_protection_adjust/10000);
             }
+
+#if RM2027_CL_ANCHOR_DUTY > 0 && !RM2027_OL_ARM_ONLY
+            /* ★★ 2026-10-12 闭环锚定占空比（开关见 targets.h 的 RM2027_CL_ANCHOR_DUTY）★★
+             *   放在上面所有夹子【之后】⇒ 这一轮占空比由它说了算（速度环只能空转）。
+             *   加 !OL_STARTUP_ACTIVE()：起步段（对齐/斜坡/交棒）仍走原 V/f 斜坡，
+             *   否则斜坡被钉死 ⇒ 交棒条件（OL_VERIFY_PASS）永远不满足。 */
+            if (running && !OL_STARTUP_ACTIVE()) {
+                duty_cycle_setpoint = RM2027_CL_ANCHOR_DUTY;
+            }
+#endif
         }
     }
 #endif
