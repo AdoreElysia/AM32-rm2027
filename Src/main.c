@@ -2356,14 +2356,10 @@ void PeriodElapsedCallback()
 	} else {
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
-    /* ★ 2026-10-12 每步 waitTime：改为查表（比例 × ci），不再一律 ci/2。
-     *   索引用【这个过零发生在哪一步】（bemf_zc_step，由 ADC 中断在认到过零时记录）——
-     *   因为"过零 → 下一次换相"的延迟属于"过零所在的那一步"。
-     *   （advance 已并入表里，这里不再减；auto_advance 逻辑保留但不参与。） */
-    {
-        uint8_t _s = (bemf_zc_step >= 1u && bemf_zc_step <= 6u) ? (uint8_t)(bemf_zc_step - 1u) : 0u;
-        waitTime = (uint16_t)(((uint32_t)commutation_interval * (uint32_t)wt_num[_s]) / 1000u);
-    }
+    /* ★★ 2026-10-12 回退：本行恢复成教科书式 ci/2，取消"分步相位补偿表" ★★
+     *   原因：用户要先拿"无补偿版"当基线，单独去查【过零识别率 vs 占空比】这条。
+     *   （分步表那版改天再上；表定义 wt_num[] 先留着不删。）*/
+    waitTime = (commutation_interval >> 1) - advance;
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt
     }
