@@ -246,8 +246,10 @@ try:
             '-c','adapter speed 1800','-c','init','-c','halt','-c','mww 0x40003000 0xAAAA',
             '-c',f'mdw {_sym[name]:#x} {words}','-c','mww 0x40003000 0xAAAA','-c','resume','-c','shutdown'],
             capture_output=True,text=True)
+        # ★ openocd 把 `mdw` 的数据行写在 **stderr** 上（stdout 是空的）⇒ 必须两边都扫。
+        #   只扫 stdout 会得到空列表，接着就是 "list index out of range"（2026-10-13 踩到）。
         _v=[]
-        for _l in _o.stdout.splitlines():
+        for _l in (_o.stdout + _o.stderr).splitlines():
             _m=re.match(r'^0x[0-9a-fA-F]+:\s*(.*)$',_l)
             if _m: _v += [int(x,16) for x in _m.group(1).split()]
         return _v
