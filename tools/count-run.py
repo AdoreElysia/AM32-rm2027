@@ -54,13 +54,21 @@ def poke(sym, val):
 def analyse(csvp):
     rows = list(csv.DictReader(open(csvp)))
     if not rows:
-        print('❌ CSV 空'); return
+        print('❌ CSV 空'); return None
     ts = np.array([int(r['ts_frame']) for r in rows], float)
     stg = np.array([int(r['stage']) for r in rows])
     st = np.array([int(r['step']) for r in rows])
     tmo = np.array([int(r['bemf_timeout']) for r in rows])
     rej = np.array([int(r['zc_reject']) for r in rows])
     m = stg == 0
+    # ★★ 先判"电机到底转了没有" ★★
+    #   实测踩过：F1 油门那一步偶尔静默失败（cap-evt 的 f1() 不检查返回值），
+    #   于是电机只走了一下对齐（ol_cm_n=1）、一个事件都没有 —— 而"漏过零=0"
+    #   会被误读成"判据很干净"。所以达不到门槛就直接判本轮作废、不给读数。
+    if len(rows) < 300 or int(m.sum()) < 200:
+        print(f'   ⚠⚠ 本轮作废：事件只有 {len(rows)} 条（闭环 {int(m.sum())}）'
+              f' —— 电机基本没转（F1 油门没生效？）。不要读这一轮的漏过零数！')
+        return None
     print(f'   行数 {len(rows)}   开环 {int((stg==1).sum())}   闭环 {int(m.sum())}', end='')
     print('   ✅ 交棒发生' if m.sum() else '   ❌ 未交棒')
     if m.sum():
