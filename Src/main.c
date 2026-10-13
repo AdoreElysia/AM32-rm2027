@@ -2205,7 +2205,14 @@ static void evt_push(void)
             extern int32_t  stall_protection_adjust;
             p[36]=(uint8_t)(duty_cycle_setpoint&0xFF); p[37]=(uint8_t)(duty_cycle_setpoint>>8);
             p[38]=(uint8_t)(duty_cycle_maximum&0xFF);  p[39]=(uint8_t)(duty_cycle_maximum>>8);
-            p[40]=(uint8_t)bemf_timeout_happened;      p[41]=0u;
+            p[40]=(uint8_t)bemf_timeout_happened;
+            /* ★ 2026-10-13：p[41] 原来是保留字节(恒 0)，改记【失步判据触发计数】的低 8 位。
+             *   为什么要它：用户报"转起来正常一会、突然卡顿甚至停下"——那条分支
+             *   （见下面 PeriodElapsedCallback 里的 desync_check 段）会 desync_happened++
+             *   并且**把 last_duty_cycle 砍到 min_startup_duty/2**，正好解释"顿一下"。
+             *   但 desync_happened 原来没进载荷 ⇒ 数不出来。记在 p[41] 就不用改帧长(仍 49)。
+             *   ⚠ 解析侧同步改：cap-evt.py 现在把 j+40 当 8 位 timeout、j+41 当 desync。 */
+            p[41]=(uint8_t)(desync_happened & 0xFF);
             p[42]=(uint8_t)(adc_zc_n_reject&0xFF);     p[43]=(uint8_t)((adc_zc_n_reject>>8)&0xFF);
             p[44]=(uint8_t)(input&0xFF);               p[45]=(uint8_t)(input>>8);
             p[46]=(uint8_t)((uint16_t)stall_protection_adjust&0xFF);
@@ -4223,7 +4230,15 @@ if(zero_crosses < 5){
                 zero_crosses = 0;
                 desync_happened++;
                 enableCompInterrupts();
+#if !RM2027_NO_DESYNC_DUTYCUT
+                /* ★ 2026-10-13 可切开关：这一句是"打顿"的疑似执行机构 ——
+                 *   本板这条分支【不回滚 running】（见上面注释，那是关键修复⑤），
+                 *   只把应用的占空比砍到"最小起步占空比的一半"一拍。而这条判据自己在
+                 *   注释里承认会误触发（"ci 收敛期 average_interval 本来就会上下跳 ⇒
+                 *   每次跳都被判成失步"）⇒ 一次误判 = 一次转矩掉一下 = 用户手上的"卡顿"。
+                 *   RM2027_NO_DESYNC_DUTYCUT=1（默认）⇒ 只计数 + 重新武装，不动占空比。 */
                 last_duty_cycle = min_startup_duty / 2;
+#endif
 #else
                 zero_crosses = 0;
                 desync_happened++;

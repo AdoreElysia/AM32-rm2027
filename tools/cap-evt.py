@@ -96,9 +96,11 @@ def parse(buf):
             tzc, lzc, avgi, adv = struct.unpack_from('<HHHH', buf, j + 28)
             dsp, dmax = struct.unpack_from('<HH', buf, j + 36)
             tmo, rej = struct.unpack_from('<HH', buf, j + 40)
+            tmo = tmo & 0xFF              # ★ j+40 只记 8 位 timeout
+            desync = buf[j + 41]         # ★ j+41 = desync_happened 低 8 位（原保留字节）
             inp, spa = struct.unpack_from('<HH', buf, j + 44)
             rows.append(s7 + (buf[j + 27] & 1, iov, smax, uca, cci, tzc, lzc, avgi, adv,
-                              dsp, dmax, tmo, rej, inp, spa))
+                              dsp, dmax, tmo, rej, inp, spa, desync))
             i = j + 49
         elif (j + 12 + 512 * 12 <= len(buf)
               and struct.unpack_from('<H', buf, j + 10)[0] == 512):
@@ -191,7 +193,7 @@ rows, wins, nfake = parse(buf)
 stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 csvp = os.path.join(OUTD, f'evt_run_{stamp}.csv')
 with open(csvp, 'w', newline='') as f:
-    w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci','thiszctime','lastzctime','average_interval','advance','duty_setpoint','duty_max','bemf_timeout','zc_reject','input','stall_adj'])
+    w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci','thiszctime','lastzctime','average_interval','advance','duty_setpoint','duty_max','bemf_timeout','zc_reject','input','stall_adj','desync'])
     w.writerows(rows)
 rate = f'{len(buf)/SECS/1000:.1f} KB/s' if SECS else '—'
 print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {len(wins)}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')

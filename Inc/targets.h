@@ -2795,6 +2795,18 @@
  *       ⚠ 但那个结论早于轮 20 的"表索引差 1 修正"与换相屏蔽 —— 那两个正是治"换相点跳台阶"的，
  *         所以值得重测；重测时先在纯开环（RM2027_NEVER_HANDOVER=1）确认表与离线一致，再进闭环。）
  */
+/* ★★ 2026-10-13 失步分支不再砍占空比（RM2027_NO_DESYNC_DUTYCUT）★★
+ *   背景：用户报"转起来正常一会、突然卡顿甚至停下"。定位到 PeriodElapsedCallback 的
+ *   失步分支（判据：换相间隔变长 >50% 且 <2000 拍）里有
+ *       last_duty_cycle = min_startup_duty / 2;
+ *   即"判一次失步就把应用的占空比砍到最小起步占空比的一半"一拍 ⇒ 转矩掉一下 = 打顿。
+ *   而该判据的注释自己承认在 ci 收敛期会被频繁误触发。
+ *   1 = 不砍（只计数 desync_happened++ 并重新武装过零判据）；0 = 保持原行为。
+ *   同时 desync_happened 已记进事件载荷的 p[41]（原来那个字节是保留位）⇒ 可数。 */
+#ifndef RM2027_NO_DESYNC_DUTYCUT
+#define RM2027_NO_DESYNC_DUTYCUT 1
+#endif
+
 #ifndef RM2027_STEP_GAINOFF
 #define RM2027_STEP_GAINOFF  0
 #endif
