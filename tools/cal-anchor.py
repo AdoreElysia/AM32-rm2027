@@ -42,6 +42,7 @@ OUTD_DEF = os.path.join(DIR, '一切为了校准')
 F = {1: 'C', 2: 'A', 3: 'B', 4: 'C', 5: 'A', 6: 'B'}      # 第 s 步悬空相
 PHK = {'A': 'va', 'B': 'vb', 'C': 'vc'}
 COL = {'A': '#c0392b', 'B': '#2471a3', 'C': '#27ae60'}
+COLW = {1: '#c0392b', 2: '#d35400', 3: '#b7950b', 4: '#27ae60', 5: '#8e44ad', 6: '#2471a3'}
 FS = 24000.0                 # ADC 采样率 (Hz)
 TICK = 0.5e-6                # 1 拍 = 0.5 µs (TIM2 @2MHz)
 SEG_MIN = 12                 # 步段至少 12 个采样点才用
@@ -1104,6 +1105,103 @@ def figure_gain_phase_step(DATA, outpng):
     print('增益校准图 →', outpng)
 
 
+def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
+    """开环稳定段的【四路全速率采样】多窗口波形 + 判据信号 + V0 自检。
+
+    口径（与 cal-anchor 其它模式一致）：
+      · 只取【最长 stage==1 段内】的窗口（按 ts 对齐，不是 seq）；剔死窗；
+      · 再要求该窗步长落在 1500~2400 拍（≈稳态），按 ts 等距取 nwin 片。
+    每行 3 栏：
+      ① 四路原始电压（全速率 512 点 @24kHz = 21.33ms）+ 换相点（按 step 上色）
+         —— 看三相悬空弧的幅值是否已经一样齐（增益归一的效果）
+      ② delta = 悬空相 − 参考：**硬件 V0** 与 **三相平均** 两条画在同一坐标直接比
+         （固件控制路径现在用三相平均；窗口载荷记的是硬件 V0，所以两条都能算）
+      ③ V0 自检：硬件 V0 vs (VA+VB+VC)/3 + 两者之差
+    """
+    cf = npz.replace('_win.npz', '.csv')
+    ts_c, st_c, span = read_csv(cf)
+    z = np.load(npz)
+    ST, TS = z['step'], z['ts'].astype(np.int64)
+    PH = {k: z[k].astype(float) for k in ('va', 'vb', 'vc')}
+    have_v0 = 'v0' in z.files
+    V0HW = z['v0'].astype(float) if have_v0 else (PH['va'] + PH['vb'] + PH['vc']) / 3.0
+    SW = (PH['va'] + PH['vb'] + PH['vc']) / 3.0
+    ok = []
+    for wi in range(len(ST)):
+        t = float(TS[wi])
+        if not all_stage:
+            if stage_at(ts_c, st_c, t) != 1:
+                continue
+            if span and not (span[0] <= t <= span[1]):
+                continue
+        mx = np.maximum(PH['va'][wi], PH['vb'][wi]); mx = np.maximum(mx, PH['vc'][wi])
+        if np.median(mx) < 200:
+            continue
+        idx = np.where(np.diff(ST[wi].astype(int)) != 0)[0]
+        if len(idx) < 2:
+            continue
+        tl = np.median(np.diff(idx)) * 83.333
+        if not (1500 <= tl <= 2400):
+            continue
+        ok.append(wi)
+    if not ok:
+        print('!! 找不到"开环稳定"窗口'); return
+    sel = [ok[k] for k in np.linspace(0, len(ok) - 1, min(nwin, len(ok))).astype(int)]
+    print('开环稳定窗口 %d 个（总 %d 片），画 %d 片' % (len(ok), len(ST), len(sel)))
+    FS = 24000.0
+    fig, axs = plt.subplots(len(sel), 3, figsize=(18.5, 3.5 * len(sel)))
+    if len(sel) == 1:
+        axs = axs.reshape(1, 3)
+    for r, wi in enumerate(sel):
+        st = ST[wi].astype(int)
+        t = np.arange(512) / FS * 1e3
+        a0, a1, a2 = axs[r]
+        for nm, v, col, lw in (('VA', PH['va'], '#c0392b', 1.0), ('VB', PH['vb'], '#2980b9', 1.0),
+                               ('VC', PH['vc'], '#16a085', 1.0), ('V0(硬件)', V0HW, '#8e44ad', 1.3)):
+            a0.plot(t, v[wi], lw=lw, color=col, label=nm)
+        a0.plot(t, SW[wi], lw=1.0, color='#e67e22', ls='--', label='三相平均')
+        idx = np.where(np.diff(st) != 0)[0] + 1
+        for k in idx:
+            a0.axvline(t[k], color=COLW[int(st[k])], lw=1.2, ls=':', alpha=.95)
+        a0.plot([], [], color='0.4', lw=1.2, ls=':', label='换相点(按step上色)')
+        a0.set_ylim(-120, 1420); a0.grid(alpha=.22); a0.set_ylabel('ADC 码')
+        a0.set_title('窗 seq=%d  步长中位 %.0f 拍  |  ① 四路原始电压（全速率 512 点 @24kHz）'
+                     % (z['seq'][wi], np.median(np.diff(idx)) * 83.333), fontsize=10)
+        a0.legend(fontsize=8, ncol=6, loc='lower center', framealpha=.9)
+        # ② delta 两条参考
+        vph = np.where((st == 1) | (st == 4), PH['vc'][wi],
+              np.where((st == 2) | (st == 5), PH['va'][wi], PH['vb'][wi]))
+        a1.plot(t, vph - V0HW[wi], lw=1.3, color='#8e44ad', label='悬空相 − 硬件V0')
+        a1.plot(t, vph - SW[wi], lw=1.3, color='#e67e22', ls='--', label='悬空相 − 三相平均')
+        a1.axhline(0, color='k', lw=1.0)
+        for k in idx:
+            a1.axvline(t[k], color='0.65', lw=1.0, ls=':')
+        a1.grid(alpha=.22); a1.set_ylabel('delta (码)')
+        a1.set_title('② 过零判据用的 delta（两种参考直接对比）', fontsize=10)
+        a1.legend(fontsize=8.5, loc='lower right')
+        # ③ V0 自检
+        d = V0HW[wi] - SW[wi]
+        a2.plot(t, V0HW[wi], lw=1.2, color='#8e44ad', label='V0(硬件)')
+        a2.plot(t, SW[wi], lw=1.2, color='#e67e22', ls='--', label='(VA+VB+VC)/3')
+        a2.set_ylabel('ADC 码'); a2.grid(alpha=.22)
+        a2b = a2.twinx()
+        a2b.plot(t, d, lw=1.0, color='#7f8c8d', label='两者之差')
+        a2b.axhline(0, color='0.8', lw=.8); a2b.set_ylabel('差 (码)', fontsize=9)
+        h1, l1 = a2.get_legend_handles_labels(); h2, l2 = a2b.get_legend_handles_labels()
+        a2.legend(h1 + h2, l1 + l2, fontsize=8.5, loc='lower right')
+        a2.set_title('③ V0 自检  差：中位 %+.1f，峰峰 %.0f 码'
+                     % (float(np.median(d)), float(d.max() - d.min())), fontsize=10)
+        if r == len(sel) - 1:
+            for a in (a0, a1, a2):
+                a.set_xlabel('窗口内时间 (ms)')
+    fig.suptitle('开环稳定段 · 四路全速率采样 · %s%s'
+                 % (os.path.basename(npz)[8:23],
+                    '（A/B/C 已增益归一）' if npz.find('135') > 0 or npz.find('140') > 0 else ''), fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, .97])
+    fig.savefig(outpng, dpi=118, bbox_inches='tight'); plt.close(fig)
+    print('全速率波形图 →', outpng)
+
+
 # ---------------------------------------------------------------- main
 def main():
     a = sys.argv[1:]
@@ -1171,6 +1269,15 @@ def main():
             figure_standard(name, STD, os.path.join(outdir, '理论标准_%s.png' % name), v0)
             figure_stitch_3ph(name, STD, os.path.join(outdir, '三相合一_%s.png' % name))
             figure_composite(name, STD, SEG, os.path.join(outdir, '悬空相合成_%s.png' % name), v0)
+        return
+    if '--wave' in a:
+        for run in runs:
+            npz = resolve(run)
+            if not os.path.exists(npz):
+                print('!! 找不到', npz); continue
+            nm = os.path.basename(npz)[8:23]
+            figure_wave(npz, os.path.join(outdir, '开环全速_%s.png' % nm), v0mode=v0mode,
+                        all_stage=all_stage)
         return
     if '--adc-gain' in a:
         DATA = {}
