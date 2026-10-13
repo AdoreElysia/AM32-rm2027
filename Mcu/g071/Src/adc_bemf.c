@@ -182,8 +182,7 @@ int16_t adc_bemf_get_delta(void)
     {
         static const int16_t sg[7] = RM2027_SG_NUM;
         static const int16_t so[7] = RM2027_SO_OFF;
-        extern volatile uint8_t step;
-        uint8_t _s = step;
+        uint8_t _s = (uint8_t)step;      /* step 已在 comparator.h 里声明为 char */
         int16_t _d = (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0);
         if (_s >= 1u && _s <= 6u) {
             _d = (int16_t)(((int32_t)_d * sg[_s]) / 1000) + so[_s];
