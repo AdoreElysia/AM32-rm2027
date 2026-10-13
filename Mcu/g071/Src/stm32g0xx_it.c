@@ -355,6 +355,11 @@ void DMA1_Channel2_3_IRQHandler(void)
                 }
 #endif
                 uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
+#if RM2027_LOCK_DETECT
+                /* ★ 锁定判据：喂【原始】delta（要的是真实反电势幅值，与补偿无关）*/
+                { extern void lock_frame(int16_t d_raw, uint8_t st);
+                  lock_frame(dzc, (uint8_t)step); }
+#endif
                 /* 顺手把这一帧写进闭环波形环形缓冲（交棒时冻结，供 SWD dump 画图）
                  * ★ vph / v0 / step 分开记 —— 这样才分得清交棒时的偏置跳变
                  *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */

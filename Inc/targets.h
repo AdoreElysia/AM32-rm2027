@@ -2627,7 +2627,7 @@
  *                     ② 关键信息（掉速、ci 起漂）全在交棒后 0~2 秒，恶化看 2~6 秒。
  *   ⚠ 做"触发点扫描"时：跑的时间必须【大于触发点】。扫 4000/6000ms 那两档调到 7000。*/
 #ifndef RM2027_CL_RUN_MS
-#define RM2027_CL_RUN_MS        6000
+#define RM2027_CL_RUN_MS        3000   /* ★ 2026-10-13 由 6000 改 3000（用户："开环闭环都短一点我怕烧电机"）*/
 #endif
 
 /* ★★ 2026-10-12 闭环【锚定占空比】开关（分支 1012-g071-闭环锚定占空比）★★
@@ -2655,7 +2655,7 @@
  *   （奇步中心均值 +52.3 码、偶步 −15.4 码，差 +67.8 码）。
  *   1 = 开；0 = 关。 */
 #ifndef RM2027_CL_PARITY_OFF
-#define RM2027_CL_PARITY_OFF 1
+#define RM2027_CL_PARITY_OFF 0   /* 本分支=纯基线，不补偿；复测时逐个打开 */
 #endif
 #ifndef RM2027_CL_PAR_ODD
 #define RM2027_CL_PAR_ODD   52
@@ -6387,4 +6387,12 @@
 
 #ifndef POLLING_MODE_THRESHOLD
 #define POLLING_MODE_THRESHOLD 2000
+#endif
+
+/* ★★ 2026-10-13 锁定判据开关（分支 1013-g071-锁定判据+自动停机）★★
+ *   1 = 开：A×ci（磁链不变量）跌破健康峰值的 1/2 连续 6 步 ⇒ 判失锁 ⇒ allOff。
+ *   依据与实测分离度见 Src/main.c 的 lock_frame() 说明。
+ *   ⚠ 这是所有"补偿/迭代"的前置条件：失锁段的数据绝不能被喂进任何校准。 */
+#ifndef RM2027_LOCK_DETECT
+#define RM2027_LOCK_DETECT      1
 #endif

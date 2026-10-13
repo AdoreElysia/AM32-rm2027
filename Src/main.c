@@ -841,6 +841,66 @@ static const uint16_t wt_num[6] = { 314u, 359u, 269u, 359u, 47u, 423u };  /* ÷1
  *   用途：一眼看出反电势真实幅值 ⇒ 直接决定施密特滞回 BEMF_HYST_LSB 该取多少。
  *   实测它和"接受时 delta 只有 ±5~±11"配合，才能判定"信号在阈值上蹭"这件事。 */
 volatile int16_t  bemf_dmax = 0;
+/* ★★ 2026-10-13 闭环自动停机 + 锁定判据（分支 1013-g071-锁定判据+自动停机）★★
+ *   自动停机：交棒后最多跑 RM2027_CL_RUN_MS 毫秒，到点无条件收油
+ *   —— 用户要求"怕烧电机，开环闭环都短一点"；原来这条基线【没有】这道闸，
+ *      所以我那次 12s 采集 = 闭环真转了 12.12s（而且转子是停的）⇒ 必须有。
+ *   锁定判据：见 lock_frame() 的说明。 */
+
+/* ★★★ 2026-10-13 锁定判据：A × ci ≈ 常数（磁链不变量）★★★
+ *   用户原话："他会电机停转，空有换向……如果这部分的数据被算进了迭代里面，
+ *   这一步是不是要进一步完善完善"——完全正确，必须先有"锁定检测"。
+ *
+ *   物理依据：反电势幅值 A ∝ 转速 ω，而换相周期 ci ∝ 1/ω ⇒ A × ci = 常数
+ *   （就是"磁链"，也是 TI InstaSPIN-BLDC 积分法用的那个量）。
+ *   实测分离度（六步幅值中位 × ci）：
+ *     健康（跑②）：A ≈ 120 码、ci ≈ 2475 拍 ⇒ A×ci ≈ 297000
+ *     失锁/停转（2026-10-13 那一跑）：A = 3 码、ci = 434 拍 ⇒ A×ci ≈ 1302（差 230 倍）
+ *   ⇒ 判据：A×ci 跌破"健康峰值的 1/2"连续 6 步（= 一个电周期）⇒ 判失锁。
+ *   峰值用【慢衰减峰保持】（不是低通！低通会被故障一起拖下去、永远不触发）。 */
+volatile uint32_t lock_flux = 0;        /* 本步的 A×ci */
+volatile uint32_t lock_flux_ref = 0;    /* 健康峰值（慢衰减）*/
+volatile uint8_t  lock_lost = 0;        /* 1 = 已判失锁，交主循环处理停机 */
+volatile uint16_t lock_bad_steps = 0;   /* 连续不合格的步数 */
+volatile uint16_t lock_trips = 0;       /* 累计判失锁次数 */
+volatile int16_t  lock_last_amp = 0;    /* 最近一步的幅值（诊断）*/
+static int16_t lk_mx1, lk_mx2, lk_mn1, lk_mn2;
+static uint8_t lk_last_step = 0;
+
+/* 每帧由 ADC 中断调用（传【原始】delta：锁定判据要的是真实反电势，与补偿无关）*/
+void lock_frame(int16_t d_raw, uint8_t st)
+{
+    if (d_raw > lk_mx1) { lk_mx2 = lk_mx1; lk_mx1 = d_raw; }
+    else if (d_raw > lk_mx2) { lk_mx2 = d_raw; }
+    if (d_raw < lk_mn1) { lk_mn2 = lk_mn1; lk_mn1 = d_raw; }
+    else if (d_raw < lk_mn2) { lk_mn2 = d_raw; }
+    if (st < 1u || st > 6u) { return; }
+    if (lk_last_step == 0u) { lk_last_step = st; return; }
+    if (st == lk_last_step) { return; }
+    {   /* ---- 结算刚结束的那一步 ---- */
+        uint16_t a  = (uint16_t)(lk_mx2 - lk_mn2);
+        uint32_t f  = (uint32_t)a * (uint32_t)commutation_interval;
+        lock_last_amp = (int16_t)a;
+        lock_flux = f;
+        if (f > lock_flux_ref) { lock_flux_ref = f; }
+        else { lock_flux_ref -= (lock_flux_ref >> 7) + 1u; }
+        if (!ol_startup_arm && running && lock_flux_ref > 30000u) {
+            if (f < (lock_flux_ref >> 1)) {
+                if (++lock_bad_steps >= 6u) {
+                    lock_lost = 1;
+                    lock_trips++;
+                    lock_bad_steps = 0;
+                }
+            } else if (lock_bad_steps > 0u) {
+                lock_bad_steps--;
+            }
+        } else {
+            lock_bad_steps = 0;
+        }
+    }
+    lk_mx1 = lk_mx2 = -32768; lk_mn1 = lk_mn2 = 32767;
+    lk_last_step = st;
+}
 /* ★ 奇偶偏置闸/计数（见 stm32g0xx_it.c 与 targets.h 的说明）*/
 volatile uint16_t ci_clamp_rejects = 0;
 
@@ -3240,6 +3300,29 @@ void tenKhzRoutine()
             cl_runs_stopped++;
             cl_done_latch = 1;      /* ★ 锁存：必须收油后才能再跑（见启动逻辑处的判断）*/
         }
+#if RM2027_LOCK_DETECT
+        /* ★★★ 2026-10-13 失锁 ⇒ 立刻停机 ★★★
+         *   这是"电机停转、换相照跑"的唯一出口。之前没有任何机制能发现这种状态：
+         *     · desync_check 只在"换相间隔变长 >50%"时判失锁 —— 而我们这种死法是
+         *       换相自己越跑越快、间隔一路【变短】⇒ 完全在它判据之外；
+         *     · stuck_rotor_protection 被显式关掉了；
+         *     · bemf_timeout 兜底换相反而让"没认到过零也照换"变成正常行为。
+         *   判据 = A×ci（磁链）跌破健康峰值的一半（见 lock_frame）⇒ 实测分离度 230 倍。 */
+        if (lock_lost) {
+            lock_lost = 0;
+            allOff();
+            running = 0;
+            ol_state = 0;
+            ol_input_cur = 0;
+            ol_step_div_cur = OL_STEP_DIV;
+            ol_run_ticks = 0;
+            ol_timeouts++;
+            ol_stop_reason = 3;          /* 3 = 失锁（新站点码）*/
+            ol_led_off_req = 1;
+            cl_run_armed = 0;
+            cl_done_latch = 1;           /* 与自动停机同规：必须先收油才能再跑 */
+        }
+#endif
         /* ★★ 2026-10-12 解除锁存必须放在【主循环】里 ★★
          *   我第一版把它放进了 olStepTick()，而那个函数在正常构建（非 OL_ARM_ONLY）
          *   下【根本不会被调用】⇒ 锁存一粘就永远粘住 ⇒ 一次自动停机之后电机再也起不来：
