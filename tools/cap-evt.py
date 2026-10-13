@@ -38,9 +38,27 @@ else:
 
 
 def valid(r):
-    """剔除"窗口包被误读成事件帧"的假帧（判据抄 evt-plot.py）"""
+    """剔除"窗口包被误读成事件帧"的假帧。
+
+    ★ 2026-10-13 扩充：原来只查 step/duty/cur/delta，于是**窗口包魔数 A5 5A 被当成 input**
+      这类假帧照样进来（实测抓到 input=23205=0x5AA5、input=56666 —— 正好是窗口包头的前几个
+      字节），而它会把 `bemf_timeout`/`duty_setpoint` 等字段一起带歪 ⇒ 让人把"解析伪影"
+      误读成"电调复位/油门跳变"。踩过三次，所以把后段字段也一并验：
+        input ≤ 2047、advance ≤ 600、average_interval 合理、duty_setpoint ≤ 3600。
+      （`p[41]` 已改记 desync，不再是 timeout 的高字节。）"""
     _seq, _ts, dl, st, _w, du, cur = r[:7]
-    return (1 <= st <= 6) and (0 <= du <= 2000) and (abs(dl) < 3000) and (0 <= cur < 400)
+    if not ((1 <= st <= 6) and (0 <= du <= 2000) and (abs(dl) < 3000) and (0 <= cur < 400)):
+        return False
+    iov, smax, uca, cci, tzc, lzc, avgi, adv, dsp, dmax, tmo, rej, inp, spa = r[8:22] if len(r) >= 22 else (0,) * 14
+    if not (0 <= inp <= 2047):
+        return False
+    if not (0 <= adv <= 600):
+        return False
+    if not (0 <= dsp <= 3600):
+        return False
+    if not (500 <= avgi <= 60000):
+        return False
+    return True
 
 
 def crc8(b):
