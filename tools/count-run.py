@@ -54,42 +54,61 @@ def poke(sym, val):
 def analyse(csvp):
     rows = list(csv.DictReader(open(csvp)))
     if not rows:
-        print('❌ CSV 空'); return
+        print('❌ CSV 空'); return None
     ts = np.array([int(r['ts_frame']) for r in rows], float)
     stg = np.array([int(r['stage']) for r in rows])
     st = np.array([int(r['step']) for r in rows])
     tmo = np.array([int(r['bemf_timeout']) for r in rows])
     rej = np.array([int(r['zc_reject']) for r in rows])
-    m = stg == 0
-    print(f'   行数 {len(rows)}   开环 {int((stg==1).sum())}   闭环 {int(m.sum())}', end='')
-    print('   ✅ 交棒发生' if m.sum() else '   ❌ 未交棒')
-    if m.sum():
-        dur = (ts[m].max() - ts[m].min()) / 24000.0
-        print(f'   闭环 ts 跨度 {dur:5.2f}s（含停机后滑行）')
-        print(f'   ① bemf_timeout 最大 = {tmo.max():4d}   ★ 这是漏过零次数'
-              f'{"（=0，判据干净）" if tmo.max()==0 else ""}')
-        if tmo.max():
-            # 计数增长的时刻（用来定位发生在哪一步）
-            inc = np.where(np.diff(tmo) > 0)[0] + 1
-            s_inc = st[inc] if len(inc) else np.array([], int)
-            dist = {s: int((s_inc == s).sum()) for s in range(1, 7)}
-            print(f'   ② 超时增长 {len(inc)} 次，按事件 step 分布 ' +
-                  ' '.join(f'{s}:{dist[s]}' for s in range(1, 7)))
-    print(f'   ③ 各 step 真实换相间隔（Δts 中位，拍）：')
-    dts = np.diff(ts); good = (dts > 0) & (dts < 300)
+    du = np.array([int(r['duty']) for r in rows])
+    cur = np.array([int(r['cur']) for r in rows])
+    # ★★ 判分窗口 = 【锚定闭环】那一段 ★★
+    #   踩过两次坑，所以窗口不能用 stage 定义：
+    #   ① stage==0 不等于"在闭环里" —— 没给油时的空转事件 stage 也是 0
+    #      （实测把 5s 采集算成"闭环跨度 90.88s"就是这个原因）；
+    #   ② 额度到点固件自己停机后锚定失效，占空比退回按油门算（input≈400⇒duty≈351），
+    #      电机还在转 —— 那是另一种工况，混进来会把六步长度/漏过零都带偏。
+    #   锚定闭环的定义很干净：stage==0 且 duty==300。
+    ANCOR = 300
+    anch = (stg == 0) & (np.abs(du - ANCOR) <= 2)
+    drv = (stg == 0) & (du > 100)
+    if len(rows) < 300 or int(anch.sum()) < 150:
+        print(f'   ⚠⚠ 本轮作废：事件 {len(rows)} 条、其中锚定闭环只有 {int(anch.sum())} 条'
+              f'（电机没转 / F1 油门没生效 / 采集没覆盖到闭环）。不要读这一轮的数！')
+        return None
+    idx = np.where(anch)[0]
+    i0, i1 = int(idx[0]), int(idx[-1])
+    n_win = int(anch.sum())
+    dur = (ts[i1] - ts[i0]) / 24000.0
+    print(f'   事件 {len(rows)}（开环 {int((stg==1).sum())} / stage0 {int((stg==0).sum())}）')
+    print(f'   判分窗口 = 锚定闭环：{n_win} 条事件 / {dur:.2f}s'
+          f'（占"被驱动时间" {100.0*anch.sum()/max(1,drv.sum()):.0f}%）')
+    print(f'   工况：duty 中位 {np.median(du[anch]):.0f}   电流中位 {np.median(cur[anch]):.0f}'
+          f'（P90 {np.percentile(cur[anch],90):.0f}）')
+    tw = tmo[i0:i1 + 1]
+    n_tmo = int(tw.max() - tw.min())
+    print(f'   ① ★漏过零（bemf_timeout 窗口内增量）= {n_tmo}'
+          f'   ⇒ {n_tmo/max(dur,1e-9):.2f} 次/秒' + ('   ✅ 判据干净' if n_tmo == 0 else ''))
+    if n_tmo:
+        inc = np.where(np.diff(tw) > 0)[0] + 1
+        s_inc = st[i0:i1 + 1][inc]
+        print('      按事件 step 分布 ' + ' '.join(f'{s}:{int((s_inc==s).sum())}' for s in range(1, 7)))
+    dts = np.diff(ts); inw = anch[:-1] & anch[1:]
+    print('   ② 六步真实换相间隔（Δts 中位，拍）—— 只在锚定窗口内：')
     med = []
     for s in range(1, 7):
-        mm = good & (st[1:] == s) & (stg[1:] == 0) & (stg[:-1] == 0)
-        v = np.median(dts[mm]) * TICK if mm.sum() else float('nan')
+        mm = inw & (st[1:] == s)
+        v = np.median(dts[mm]) * TICK if mm.sum() > 5 else float('nan')
         med.append(v)
-        print(f'        step{s}: n={int(mm.sum()):5d}  中位 {v:7.0f} 拍', end='')
-        print(f'   P90 {np.percentile(dts[mm],90)*TICK:7.0f}' if mm.sum() else '')
+        if mm.sum() > 5:
+            print(f'        step{s}: n={int(mm.sum()):5d}  中位 {v:7.0f} 拍   '
+                  f'P10 {np.percentile(dts[mm],10)*TICK:6.0f}  P90 {np.percentile(dts[mm],90)*TICK:7.0f}')
     ok = [v for v in med if v == v]
     if ok:
-        print(f'      ⇒ 六步中位 {min(ok):.0f}~{max(ok):.0f} 拍，'
-              f'极差 {100*(max(ok)-min(ok))/np.mean(ok):.1f}%（越小越均匀）')
-    print(f'   ④ zc_reject 末值 {rej[-1]}（判据拒收累计；≤ 每次换相约 0.4 倍为常态）')
-    return tmo.max()
+        print(f'      ⇒ 六步中位 {min(ok):.0f}~{max(ok):.0f} 拍，极差 '
+              f'{100*(max(ok)-min(ok))/np.mean(ok):.1f}%  ★越小越均匀')
+    print(f'   ③ zc_reject 末值 {rej[-1]}（判据拒收累计，与"超时"互补：拒收=来了不认）')
+    return n_tmo
 
 
 def main():
