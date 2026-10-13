@@ -354,6 +354,18 @@ void DMA1_Channel2_3_IRQHandler(void)
                     }
                 }
 #endif
+#if RM2027_CL_GAINOFF
+                /* ★ 复测#3：电压域静态两参数表（偏置先减、再乘增益）—— 表见 Src/main.c */
+                {
+                    extern volatile int16_t zo_tab[6], zg_tab[6];
+                    extern volatile uint8_t ol_startup_arm;
+                    if (!ol_startup_arm && step >= 1 && step <= 6) {
+                        uint8_t _i = (uint8_t)(step - 1);
+                        dzc_judge = (int16_t)((((int32_t)dzc - (int32_t)zo_tab[_i])
+                                               * (int32_t)zg_tab[_i]) >> 8);
+                    }
+                }
+#endif
                 uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
 #if RM2027_LOCK_DETECT
                 /* ★ 锁定判据：喂【原始】delta（要的是真实反电势幅值，与补偿无关）*/
