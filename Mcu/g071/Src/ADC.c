@@ -82,7 +82,19 @@ void ADC_DMA_Callback()
     bemf_adc_va = ADCDataDMA[0];
     bemf_adc_vb = ADCDataDMA[1];
     bemf_adc_vc = ADCDataDMA[2];
-    bemf_adc_v0 = ADCDataDMA[3];
+    bemf_adc_v0 = ADCDataDMA[3];      /* rank4 = 硬件星形中点通道 */
+#if RM2027_V0_SOFTMEAN
+    /* ★ 2026-10-13 实验（分支 1013-g071-V0软件均值）：V0 改用【软件均值】。
+     *   动机：竖直偏移"按奇偶分组、与负载无关、与采样点无关"，首要候选是
+     *   V0 星形网络与三相分压网络的 RC 不一致（对 PWM 斩波响应不同 ⇒ 采样瞬间
+     *   V0 读到的不是三相均值的正确值 ⇒ 残差随驱动极性翻转）。
+     *   判据：换成软件均值后，若每步竖直偏移（尤其奇偶差）明显变化 ⇒ 锁定在 V0 网络；
+     *        若几乎不变 ⇒ 排除 V0，指向驱动→悬空相共模耦合。
+     *   注意：软件均值会继承三相通道各自的 settling 误差（rank 顺序），
+     *        所以它不一定是"更好的 V0"，这里只当【因果探针】用。 */
+    bemf_adc_v0 = (uint16_t)(((uint32_t)bemf_adc_va + (uint32_t)bemf_adc_vb
+                              + (uint32_t)bemf_adc_vc) / 3u);
+#endif
     /* 悬空相映射与 changeCompInput 一致：step 1/4→C, 2/5→A, 3/6→B */
     {
         extern volatile uint8_t step;

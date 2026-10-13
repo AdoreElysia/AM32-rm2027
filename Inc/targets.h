@@ -6407,3 +6407,9 @@
 #ifndef RM2027_LOCK_DETECT
 #define RM2027_LOCK_DETECT      1
 #endif
+
+/* ★ 2026-10-13 实验开关：V0 用软件均值 (VA+VB+VC)/3 代替硬件星形通道。
+ *   1 = 软件均值（因果探针）；0 = 硬件星形通道（原行为）。见 Mcu/g071/Src/ADC.c。 */
+#ifndef RM2027_V0_SOFTMEAN
+#define RM2027_V0_SOFTMEAN      1
+#endif
