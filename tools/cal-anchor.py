@@ -1105,7 +1105,7 @@ def figure_gain_phase_step(DATA, outpng):
     print('增益校准图 →', outpng)
 
 
-def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
+def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False, which='open', duty_eq=None):
     """开环稳定段的【四路全速率采样】多窗口波形 + 判据信号 + V0 自检。
 
     口径（与 cal-anchor 其它模式一致）：
@@ -1126,14 +1126,41 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
     have_v0 = 'v0' in z.files
     V0HW = z['v0'].astype(float) if have_v0 else (PH['va'] + PH['vb'] + PH['vc']) / 3.0
     SW = (PH['va'] + PH['vb'] + PH['vc']) / 3.0
+    # 交棒时刻（stage 1→0 的第一次）：闭环段必须晚于它（否则会把上电起始那两行 stage=0 也算进来）
+    hand_ts = None
+    if ts_c is not None and st_c is not None:
+        for i in range(1, len(st_c)):
+            if st_c[i - 1] == 1 and st_c[i] == 0:
+                hand_ts = float(ts_c[i]); break
+    # duty_setpoint 随时间（画在标题上，用来分清"锚定段 / 失速再起步段"）
+    duty_ts, duty_v = [], []
+    cf2 = npz.replace('_win.npz', '.csv')
+    if os.path.exists(cf2):
+        with open(cf2, encoding='utf-8-sig') as fh:
+            for r in csv.DictReader(fh):
+                v = num(r, 'duty_setpoint')
+                if np.isfinite(v):
+                    duty_ts.append(num(r, 'ts_frame')); duty_v.append(v)
+        o = np.argsort(duty_ts); duty_ts = np.array(duty_ts)[o]; duty_v = np.array(duty_v)[o]
+
+    def duty_at(t):
+        if len(duty_ts) == 0:
+            return np.nan
+        i = int(np.searchsorted(duty_ts, t, 'right')) - 1
+        return float(duty_v[i]) if i >= 0 else np.nan
+
     ok = []
     for wi in range(len(ST)):
         t = float(TS[wi])
-        if not all_stage:
-            if stage_at(ts_c, st_c, t) != 1:
+        if which == 'closed':
+            if hand_ts is None or t < hand_ts:
                 continue
-            if span and not (span[0] <= t <= span[1]):
-                continue
+        else:
+            if not all_stage:
+                if stage_at(ts_c, st_c, t) != 1:
+                    continue
+                if span and not (span[0] <= t <= span[1]):
+                    continue
         mx = np.maximum(PH['va'][wi], PH['vb'][wi]); mx = np.maximum(mx, PH['vc'][wi])
         if np.median(mx) < 200:
             continue
@@ -1141,8 +1168,12 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
         if len(idx) < 2:
             continue
         tl = np.median(np.diff(idx)) * 83.333
-        if not (1500 <= tl <= 2400):
+        if which != 'closed' and not (1500 <= tl <= 2400):
             continue
+        if duty_eq is not None:
+            dv = duty_at(t)
+            if not (np.isfinite(dv) and abs(dv - duty_eq) < 1):
+                continue
         ok.append(wi)
     if not ok:
         print('!! 找不到"开环稳定"窗口'); return
@@ -1165,8 +1196,9 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
             a0.axvline(t[k], color=COLW[int(st[k])], lw=1.2, ls=':', alpha=.95)
         a0.plot([], [], color='0.4', lw=1.2, ls=':', label='换相点(按step上色)')
         a0.set_ylim(-120, 1420); a0.grid(alpha=.22); a0.set_ylabel('ADC 码')
-        a0.set_title('窗 seq=%d  步长中位 %.0f 拍  |  ① 四路原始电压（全速率 512 点 @24kHz）'
-                     % (z['seq'][wi], np.median(np.diff(idx)) * 83.333), fontsize=10)
+        a0.set_title('窗 seq=%d  步长中位 %.0f 拍  duty_setpoint=%.0f  |  ① 四路原始电压（全速率 512 点 @24kHz）'
+                     % (z['seq'][wi], np.median(np.diff(idx)) * 83.333, duty_at(float(TS[wi]))),
+                     fontsize=10)
         a0.legend(fontsize=8, ncol=6, loc='lower center', framealpha=.9)
         # ② delta 两条参考
         vph = np.where((st == 1) | (st == 4), PH['vc'][wi],
@@ -1176,8 +1208,22 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
         a1.axhline(0, color='k', lw=1.0)
         for k in idx:
             a1.axvline(t[k], color='0.65', lw=1.0, ls=':')
+        # 实测过零（delta 变号处，取每步中点附近那个）+ 理论过零（步中点）
+        for i0, i1, ss in segs(st):
+            if ss not in F or i0 == 0 or i1 == 512 or i1 - i0 < 14:
+                continue
+            seg = (vph - V0HW[wi])[i0:i1] if have_v0 else (vph - SW[wi])[i0:i1]
+            u = (np.arange(i0, i1) - i0) / float(i1 - i0)
+            zc = [u[k] for k in range(1, len(seg)) if seg[k - 1] * seg[k] <= 0 and seg[k - 1] != seg[k]]
+            zc = [v for v in zc if 0.2 < v < 0.9]
+            if zc:
+                a1.plot([(i0 + zc[0] * (i1 - i0)) / FS * 1e3], [0], 'o', ms=6, mfc='none',
+                        mec='#c0392b', mew=1.5)
+            a1.plot([(i0 + 0.5 * (i1 - i0)) / FS * 1e3], [0], 'k^', ms=6)
+        a1.plot([], [], 'o', ms=6, mfc='none', mec='#c0392b', mew=1.5, label='实测过零')
+        a1.plot([], [], 'k^', ms=6, label='理论过零(步正中)')
         a1.grid(alpha=.22); a1.set_ylabel('delta (码)')
-        a1.set_title('② 过零判据用的 delta（两种参考直接对比）', fontsize=10)
+        a1.set_title('② 判据用的 delta（两种参考）+ 实测/理论过零', fontsize=10)
         a1.legend(fontsize=8.5, loc='lower right')
         # ③ V0 自检
         d = V0HW[wi] - SW[wi]
@@ -1194,9 +1240,11 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
         if r == len(sel) - 1:
             for a in (a0, a1, a2):
                 a.set_xlabel('窗口内时间 (ms)')
-    fig.suptitle('开环稳定段 · 四路全速率采样 · %s%s'
-                 % (os.path.basename(npz)[8:23],
-                    '（A/B/C 已增益归一）' if npz.find('135') > 0 or npz.find('140') > 0 else ''), fontsize=13)
+    fig.suptitle('%s · 四路全速率采样 · %s%s'
+                 % ('闭环段' if which == 'closed' else '开环稳定段',
+                    os.path.basename(npz)[8:23],
+                    ('（只取 duty_setpoint=%.0f 的窗）' % duty_eq) if duty_eq is not None else ''),
+                 fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, .97])
     fig.savefig(outpng, dpi=118, bbox_inches='tight'); plt.close(fig)
     print('全速率波形图 →', outpng)
@@ -1427,7 +1475,7 @@ def main():
         do_pick(outdir)
         if not a:
             return
-    runs = [x for x in a if not x.startswith('--')]
+    runs = [x for x in a if not x.startswith('--') and not x.replace('.', '').isdigit()]
     if '--all-typical' in a:
         runs = do_pick(outdir, write=False)[:5]      # 取"可用步段"最多的前 5 组
     if '--compare-v0' in a:
@@ -1481,13 +1529,19 @@ def main():
             figure_composite(name, STD, SEG, os.path.join(outdir, '悬空相合成_%s.png' % name), v0)
         return
     if '--wave' in a:
+        which = 'closed' if '--cl' in a else 'open'
+        duty_eq = None
+        if '--duty' in a:
+            duty_eq = float(a[a.index('--duty') + 1])
         for run in runs:
             npz = resolve(run)
             if not os.path.exists(npz):
                 print('!! 找不到', npz); continue
             nm = os.path.basename(npz)[8:23]
-            figure_wave(npz, os.path.join(outdir, '开环全速_%s.png' % nm), v0mode=v0mode,
-                        all_stage=all_stage)
+            tagf = ('闭环全速' if which == 'closed' else '开环全速') + \
+                   ('_duty%d' % int(duty_eq) if duty_eq is not None else '')
+            figure_wave(npz, os.path.join(outdir, '%s_%s.png' % (tagf, nm)),
+                        v0mode=v0mode, all_stage=all_stage, which=which, duty_eq=duty_eq)
         return
     if '--step-fix' in a:
         for run in runs:
