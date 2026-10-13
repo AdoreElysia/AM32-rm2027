@@ -334,7 +334,27 @@ void DMA1_Channel2_3_IRQHandler(void)
             adc_bemf_take_edges(0, 0, 1, 1);   /* 旧判据的边沿读出来丢掉 */
             {
                 int16_t dzc = adc_bemf_get_delta();
-                uint8_t zc  = adc_zc_push(dzc, (uint16_t)INTERVAL_TIMER->CNT);
+                int16_t dzc_judge = dzc;
+#if RM2027_CL_PARITY_OFF
+                /* ★★★ 2026-10-12 奇偶偏置（本分支唯一的新变量）★★★
+                 *   依据：美国专利 US20130033212A1 "the average BEMF voltage differs for
+                 *   odd and even steps" —— 奇/偶两步的平均反电势本来就不同，业界做法是
+                 *   奇偶分别设参考。我们自己的开环稳定段实测也是这个形状：
+                 *     奇步(1,3,5) 竖直中心 = +40.8 / +36.5 / +79.8  均值 +52.3 码
+                 *     偶步(2,4,6) 竖直中心 = -30.2 / -14.5 /  -1.5  均值 -15.4 码
+                 *     ⇒ 奇偶差 +67.8 码 —— 偏置的主导项是"奇偶"(驱动极性)，不是每步随机。
+                 *   ⇒ 只用【两个数】把 delta 竖直中心拉回零点：奇步减 +52、偶步减 −15。
+                 *     （6 个独立值的表会去拟合噪声，这正是那些表怎么调都不稳的原因之一。）
+                 *   只在闭环段施加：斜坡段反电势几码，减 52 码会把符号整段翻过去。 */
+                {
+                    extern volatile uint8_t ol_startup_arm;
+                    if (!ol_startup_arm && step >= 1 && step <= 6) {
+                        dzc_judge = (int16_t)(dzc - ((step & 1) ? RM2027_CL_PAR_ODD
+                                                               : RM2027_CL_PAR_EVEN));
+                    }
+                }
+#endif
+                uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
                 /* 顺手把这一帧写进闭环波形环形缓冲（交棒时冻结，供 SWD dump 画图）
                  * ★ vph / v0 / step 分开记 —— 这样才分得清交棒时的偏置跳变
                  *   是 vph 动、v0 动，还是 rank1 指错了相（见 adc_zc.h 的说明）。 */

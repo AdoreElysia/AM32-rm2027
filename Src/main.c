@@ -841,6 +841,8 @@ static const uint16_t wt_num[6] = { 314u, 359u, 269u, 359u, 47u, 423u };  /* ÷1
  *   用途：一眼看出反电势真实幅值 ⇒ 直接决定施密特滞回 BEMF_HYST_LSB 该取多少。
  *   实测它和"接受时 delta 只有 ±5~±11"配合，才能判定"信号在阈值上蹭"这件事。 */
 volatile int16_t  bemf_dmax = 0;
+/* ★ 奇偶偏置闸/计数（见 stm32g0xx_it.c 与 targets.h 的说明）*/
+volatile uint16_t ci_clamp_rejects = 0;
 
 #define OL_TRACE_LEN 32
 volatile uint16_t OL_TRACE_CNT[OL_TRACE_LEN];  /* 认到过零时"距上次过零"的拍数（TIM2, 0.5µs） */
@@ -2223,11 +2225,18 @@ void commutate()
          *     也能在几十步内到位。而单次扰动最多只能把平均推 17%（2 倍÷6 步）。
          *   ★ 注意这里钳的是【存进环里的值】，不是 ci 本身 —— 不改变任何滤波/限速
          *     逻辑，只把明显不该信的样本挡在外面。 */
-        uint32_t lo = commutation_interval >> 2;
-        uint32_t hi = commutation_interval << 1;
+        /* ★★★ 2026-10-12 ci 合理性闸：只接受当前 ci 的 ±25%（原来是 ci/4 ~ 2ci）★★★
+         *   实测（五跑补偿实验）：闭环一旦认到多余的跨零，本步间隔就被记小；而六步环
+         *   允许到 ci/4 ⇒ ci 被拉小 ⇒ waitTime=比例×ci 变小 ⇒ 换相提前 ⇒ 间隔更短
+         *   …… 一路往下冲（ci 从 0.68ms 掉到 0.19ms，而转子真实一步 ≈5.3ms）
+         *   ⇒ 固件按 25 倍于转子的速率换相 ⇒ 转子跟不上 ⇒ 卡一下冲一下、电机只嗡。
+         *   ⇒ 每格只收【当前 ci 的 ±25%】，越界丢弃并计数。
+         *   ⚠ 起步/斜坡段 ci 每步只变约 6% ⇒ ±25% 不影响正常跟踪。 */
+        uint32_t lo = commutation_interval - (commutation_interval >> 2);
+        uint32_t hi = commutation_interval + (commutation_interval >> 2);
         if (lo < 64u) { lo = 64u; }
-        if (meas_step < lo) { meas_step = lo; }
-        if (meas_step > hi) { meas_step = hi; }
+        if (meas_step < lo) { ci_clamp_rejects++; meas_step = lo; }
+        if (meas_step > hi) { ci_clamp_rejects++; meas_step = hi; }
         commutation_intervals[step - 1] =
             (uint16_t)((meas_step > 0xFFFFu) ? 0xFFFFu : meas_step);
     }

@@ -2649,6 +2649,21 @@
 #define RM2027_CL_ANCHOR_DUTY   300
 #endif
 
+/* ★★ 2026-10-12 奇偶偏置（分支 test-cl-补偿方式-奇偶偏置，本分支唯一新变量）★★
+ *   判据入口减掉一个"奇步/偶步"两值的竖直中心。依据见 Mcu/g071/Src/stm32g0xx_it.c：
+ *   专利 US20130033212A1「奇偶两步的平均反电势不同」+ 我们开环稳定段实测
+ *   （奇步中心均值 +52.3 码、偶步 −15.4 码，差 +67.8 码）。
+ *   1 = 开；0 = 关。 */
+#ifndef RM2027_CL_PARITY_OFF
+#define RM2027_CL_PARITY_OFF 1
+#endif
+#ifndef RM2027_CL_PAR_ODD
+#define RM2027_CL_PAR_ODD   52
+#endif
+#ifndef RM2027_CL_PAR_EVEN
+#define RM2027_CL_PAR_EVEN  (-15)
+#endif
+
 /* ★ 闭环必须的开关：过零检测从"轮询"切到"中断"的时机
  *   上游默认（不定义时）是：低转速用轮询（zcfoundroutine 忙等）、转速上来后切中断模式。
  *   本板没有比较器、中断源是 ADC-DMA 完成中断（见 stm32g0xx_it.c）⇒ 期望行为是
