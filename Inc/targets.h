@@ -6396,3 +6396,10 @@
 #ifndef RM2027_LOCK_DETECT
 #define RM2027_LOCK_DETECT      1
 #endif
+
+/* ★★ 2026-10-13 复测#3：电压域静态两参数表（增益+偏置）开关 ★★
+ *   1 = 开：d_judge = ((d_raw − zo[s])×zg[s])>>8（表见 Src/main.c）
+ *   0 = 关。与 RM2027_CL_PARITY_OFF 互斥使用（复测时只开一个）。 */
+#ifndef RM2027_CL_GAINOFF
+#define RM2027_CL_GAINOFF       1
+#endif
