@@ -882,11 +882,18 @@ void lock_frame(int16_t d_raw, uint8_t st)
         uint32_t f  = (uint32_t)a * (uint32_t)commutation_interval;
         lock_last_amp = (int16_t)a;
         lock_flux = f;
-        if (f > lock_flux_ref) { lock_flux_ref = f; }
+        /* ★ 2026-10-13 修正①：峰值上升要限速。
+         *   第一版直接 f > ref 就 ref = f ⇒ 一个瞬态就把基准抬到 4 倍
+         *   （实测 lock_flux_ref = 950992，而健康值只有 ~25 万）⇒ 正常值被误判失锁、
+         *   闭环刚稳 1.28s 就被停掉。原因：某个瞬间"step 窗口跨了不止一个电周期"
+         *   （换相被漏记）⇒ A 正常但 ci 很大 ⇒ 乘积虚高。
+         *   ⇒ 上升改成每步最多涨 1/64（一次瞬态只能推动 1.6%），下降仍走慢衰减。
+         *   修正②：连续不合格从 6 步加到 10 步（一个电周期以上），更抗瞬时抖动。 */
+        if (f > lock_flux_ref) { lock_flux_ref += (f - lock_flux_ref) >> 6; }
         else { lock_flux_ref -= (lock_flux_ref >> 7) + 1u; }
         if (!ol_startup_arm && running && lock_flux_ref > 30000u) {
             if (f < (lock_flux_ref >> 1)) {
-                if (++lock_bad_steps >= 6u) {
+                if (++lock_bad_steps >= 10u) {
                     lock_lost = 1;
                     lock_trips++;
                     lock_bad_steps = 0;
