@@ -337,8 +337,14 @@ void ADC_Init(void)
      *   ⇒ τ≈15ns ⇒ 234ns ≈ 15τ（12 位只需 ~8.3τ）⇒ 精度足够。
      *   （COMMON_1 也管电流/电压通道：电压分压源阻 ~4.3k ⇒ τ≈21ns ⇒ 11τ ✓；
      *     温度通道在 COMMON_2（160.5 周期）不受影响。） */
+    /* ★ 2026-10-13 加长采样时间：改的是【SMP1 字段的值】，不是通道选择位。
+     *   ⚠ LL 的语义坑（上一版就栽在这）：SetSamplingTimeCommonChannels(COMMON_1, <值>)
+     *     才是写采样时间；SetChannelSamplingTime(ch, <值>) 只写"该通道选 SMP1 还是 SMP2"
+     *     的选择位（掩码 (ch<<8) & 0x1F00），把时间值传进去会被掩成 0 ⇒ 空操作。
+     *     判定方法：读 ADC1->SMPR（0x40012414），SMP1[2:0]/SMP2[6:4] 才是时间，
+     *     SMPSEL[21:8] 是选择位。加长前读回 0x00100072 = SMP1 7.5 / SMP2 160.5(温度)。 */
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_1,
-        LL_ADC_SAMPLINGTIME_7CYCLES_5);
+        RM2027_ADC_SMP_BEMF);
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_2,
         LL_ADC_SAMPLINGTIME_160CYCLES_5);
     LL_ADC_DisableIT_EOC(ADC1);
