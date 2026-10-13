@@ -32,6 +32,7 @@ volatile uint16_t bemf_adc_vb  = 2048;
 volatile uint16_t bemf_adc_vc  = 2048;
 volatile uint16_t bemf_adc_vph = 2048;
 volatile uint16_t bemf_adc_v0  = 2048;
+volatile uint16_t bemf_adc_v0_hw = 2048;   /* ★ 硬件 V0 原值（日志用） */
 
 /* 由 ADC.c 提供：动态改写 ADC 序列的 rank1 通道 */
 extern void adc_set_first_rank(uint32_t channel);

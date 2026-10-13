@@ -15,7 +15,11 @@ extern volatile uint16_t bemf_adc_va;   /* rank1 = VA */
 extern volatile uint16_t bemf_adc_vb;   /* rank2 = VB */
 extern volatile uint16_t bemf_adc_vc;   /* rank3 = VC */
 extern volatile uint16_t bemf_adc_vph;  /* 软件选出的当前悬空相（供 adc_bemf_get_delta 用） */
-extern volatile uint16_t bemf_adc_v0;   /* rank4 = V0_SENSE(PA3) */
+extern volatile uint16_t bemf_adc_v0;   /* rank4 = V0_SENSE(PA3)，或软件均值（见 RM2027_V0_SOFTMEAN）*/
+/* ★ 2026-10-13：硬件 V0 的原值，**永远**是 ADC 第 4 档的读数。
+ *   控制路径用的 bemf_adc_v0 可能被换成三相平均（RM2027_V0_SOFTMEAN），
+ *   但窗口载荷记录的是本变量 ⇒ 日志语义不变，且能直接拿它和三相平均对照。 */
+extern volatile uint16_t bemf_adc_v0_hw;
 
 /* ★ 过零检测的"武装"标志（取代比较器的 EXTI）：换相后置 1、认到过零清 0。
  *   ADC-DMA 完成中断里读它（Mcu/g071/Src/stm32g0xx_it.c）。 */

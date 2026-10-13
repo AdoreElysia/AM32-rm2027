@@ -82,7 +82,21 @@ void ADC_DMA_Callback()
     bemf_adc_va = ADCDataDMA[0];
     bemf_adc_vb = ADCDataDMA[1];
     bemf_adc_vc = ADCDataDMA[2];
-    bemf_adc_v0 = ADCDataDMA[3];
+    bemf_adc_v0_hw = ADCDataDMA[3];    /* ★ 硬件 V0 原值：永远记它（日志语义不变） */
+    bemf_adc_v0    = bemf_adc_v0_hw;
+#if RM2027_V0_SOFTMEAN
+    /* ★★★ 2026-10-13：V0 改用【三相平均】★★★
+     *   原理图上 V0 就是"三只电阻从三相接到一个公共节点" ⇒ 它**本来就应该等于三相平均**。
+     *   实测（一切为了校准/03 §六）：把 A/B/C 的增益归一之后，硬件 V0 与三相平均的
+     *   **六步均值只差 −1.0 码**（未归一前 −19.1 码）⇒ 两者在均值上已经对上了；
+     *   但**逐步还有 ±20 码的摆动**（极差 38 码 = 6%），那不是增益误差、是 V0 节点本身的
+     *   逐步失真。取三相平均 ⇒ 这个摆动按定义归零（自参照）。
+     *   ⚠ 必须放在上面三相增益校正【之后】（用的是校正后的 va/vb/vc）。
+     *   ⚠ 历史教训：`归档/1013-g071-V0软件均值` 上线跑败过（超时 42240、散布 18%），
+     *     但那次没有三相增益归一，而且是把多件事一起改的 ⇒ 本轮只改这一件。 */
+    bemf_adc_v0 = (uint16_t)(((uint32_t)bemf_adc_va + (uint32_t)bemf_adc_vb
+                              + (uint32_t)bemf_adc_vc) / 3u);
+#endif
 #if RM2027_ADC_GAIN_CAL
     /* ★★★ 2026-10-13 ADC 通道增益归一 ★★★
      *   在这里做（而不是在 adc_bemf_get_delta 里）的理由：这三行是【唯一】的入口，
