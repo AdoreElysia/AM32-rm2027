@@ -354,6 +354,16 @@ void DMA1_Channel2_3_IRQHandler(void)
                     }
                 }
 #endif
+#if RM2027_CL_OFFTAB
+                /* 复测#4：每步偏置（表见 Src/main.c）*/
+                {
+                    extern volatile int16_t off_tab[6];
+                    extern volatile uint8_t ol_startup_arm;
+                    if (!ol_startup_arm && step >= 1 && step <= 6) {
+                        dzc_judge = (int16_t)(dzc - off_tab[(uint8_t)(step - 1)]);
+                    }
+                }
+#endif
                 uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
 #if RM2027_LOCK_DETECT
                 /* ★ 锁定判据：喂【原始】delta（要的是真实反电势幅值，与补偿无关）*/

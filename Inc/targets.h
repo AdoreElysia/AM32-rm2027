@@ -6399,3 +6399,9 @@
 #ifndef RM2027_LOCK_DETECT
 #define RM2027_LOCK_DETECT      1
 #endif
+
+/* ★ 2026-10-13 复测#4：电压域每步偏置表（不带增益）开关。1=开，0=关。
+ *   与 RM2027_CL_PARITY_OFF / RM2027_CL_GAINOFF 互斥（复测时只开一个）。 */
+#ifndef RM2027_CL_OFFTAB
+#define RM2027_CL_OFFTAB        1
+#endif
