@@ -28,7 +28,7 @@ import numpy as np
 
 REPO = '/home/lpl/桌面/RM2027/AM32-rm2027'
 OUTD = '/home/lpl/桌面/RM2027'
-SECS = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
+SECS = float(sys.argv[1]) if len(sys.argv) > 1 else 5.0   # ★ 交棒实测在 ~3s；额度 1500ms ⇒ 采集到 5s 正好在自动停机处结束
 TAG = sys.argv[2] if len(sys.argv) > 2 else ''
 TICK = 2500.0 / 30.0        # 83.333 拍/ADC 帧
 
@@ -88,7 +88,16 @@ def analyse(csvp):
     if ok:
         print(f'      ⇒ 六步中位 {min(ok):.0f}~{max(ok):.0f} 拍，'
               f'极差 {100*(max(ok)-min(ok))/np.mean(ok):.1f}%（越小越均匀）')
-    print(f'   ④ zc_reject 末值 {rej[-1]}（判据拒收累计；≤ 每次换相约 0.4 倍为常态）')
+    # ★★ 工况闸：确认采到的是"锚定闭环"而不是"自动停机后按油门硬拖" ★★
+    #   RM2027_CL_ANCHOR_DUTY=300 只在 running && !OL_STARTUP_ACTIVE 时生效；一旦
+    #   额度到点固件自己停机（running=0），锚定失效、占空比退回按油门算（input≈400
+    #   ⇒ duty≈351），而电机还在转 ⇒ 采到的是另一种工况（实测 duty 300→351、电流 26→42）。
+    du = np.array([int(r['duty']) for r in rows])
+    cur = np.array([int(r['cur']) for r in rows])
+    frac = 100.0 * np.mean(np.abs(du[m] - 300) <= 2) if m.sum() else 0.0
+    print(f'   ④ 工况：闭环段 duty 中位 {np.median(du[m]):.0f}  电流中位 {np.median(cur[m]):.0f}  '
+          f'锚定300占比 {frac:.0f}%' + ('' if frac >= 80 else '   ⚠ 采到停机后工况了，本轮数字不能比！'))
+    print(f'   ⑤ zc_reject 末值 {rej[-1]}（判据拒收累计；≤ 每次换相约 0.4 倍为常态）')
     return tmo.max()
 
 
