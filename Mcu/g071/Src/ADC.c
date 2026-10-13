@@ -83,6 +83,17 @@ void ADC_DMA_Callback()
     bemf_adc_vb = ADCDataDMA[1];
     bemf_adc_vc = ADCDataDMA[2];
     bemf_adc_v0 = ADCDataDMA[3];
+#if RM2027_ADC_GAIN_CAL
+    /* ★★★ 2026-10-13 ADC 通道增益归一 ★★★
+     *   在这里做（而不是在 adc_bemf_get_delta 里）的理由：这三行是【唯一】的入口，
+     *   校正之后 bemf_adc_vph / delta / 窗口载荷 / 所有埋点全自动拿到校正后的值，
+     *   不会出现"判据用校正值、记录用原始值"这种半拉子状态。
+     *   只乘三相、**不动 V0**（V0 是参考）。系数见 Inc/targets.h 的 RM2027_ADCGC_*。
+     *   实现是"乘 + 右移 10"，在 24kHz 的 DMA 中断里只多 3 次乘法，不占采样预算。 */
+    bemf_adc_va = (uint16_t)(((uint32_t)bemf_adc_va * RM2027_ADCGC_A) >> 10);
+    bemf_adc_vb = (uint16_t)(((uint32_t)bemf_adc_vb * RM2027_ADCGC_B) >> 10);
+    bemf_adc_vc = (uint16_t)(((uint32_t)bemf_adc_vc * RM2027_ADCGC_C) >> 10);
+#endif
     /* 悬空相映射与 changeCompInput 一致：step 1/4→C, 2/5→A, 3/6→B */
     {
         extern volatile uint8_t step;

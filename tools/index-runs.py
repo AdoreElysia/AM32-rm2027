@@ -40,7 +40,8 @@ def steps_of(st):
 
 rows = []
 for npzf in sorted(glob.glob(os.path.join(DIR, 'evt_run_*_win.npz'))):
-    tag = os.path.basename(npzf)[8:21]
+    tag = os.path.basename(npzf)[8:23]      # ★ 原先写 [8:21]，把秒的最后两位截掉了
+                                            #   ⇒ 表名对不上、KNOWN 的 5 条标注永远匹配不上
     z = np.load(npzf)
     ST = z['step']
     per_win = [np.median(steps_of(ST[wi])) for wi in range(len(ST))]
@@ -49,13 +50,19 @@ for npzf in sorted(glob.glob(os.path.join(DIR, 'evt_run_*_win.npz'))):
         continue
     cruise = sum(1 for x in per_win if 1600 / PER_SAMPLE <= x <= 2200 / PER_SAMPLE)
     # CSV：交棒是否发生 + duty
-    handed, duty = False, []
+    # ★ 判据修正：不能再写"出现过 stage==0 就算交棒" —— 每次上电起始那 2 行就是 0
+    #   （启动阶段），于是"全程纯开环"的 run 也会被标成"交棒=是"。
+    #   真正的交棒是 stage 由 1（开环）变 0（闭环）这一次跳变。
+    handed, duty, prev = False, [], None
     cf = npzf.replace('_win.npz', '.csv')
     if os.path.exists(cf):
         with open(cf, newline='', encoding='utf-8', errors='replace') as fh:
             for r in csv.DictReader(fh):
-                if r.get('stage') == '0':
-                    handed = True
+                s = r.get('stage')
+                if s in ('0', '1'):
+                    if s == '0' and prev == '1':
+                        handed = True
+                    prev = s
                 if 'duty_setpoint' in r:
                     try:
                         v = float(r['duty_setpoint'])
@@ -88,7 +95,8 @@ if '--csv' not in sys.argv:
     print()
     print('列说明：')
     print('  · **巡航窗** = 步长落在 1600~2200 拍的窗口数（＝可用于过零/形状分析的稳态段）')
-    print('  · **交棒** = CSV 里是否出现过 stage=0（开环→闭环交棒）；否 ⇒ 这一轮只跑了开环')
+    print('  · **交棒** = CSV 里 stage 由 1（开环）跳成 0（闭环）发生过；否 ⇒ 这一轮**全程开环**'
+          '（注意：不能写"出现过 stage=0 就算交棒"——每次上电起始两行就是 0）')
     print('  · **可分析** ★ = 巡航窗 ≥30（够做统计）；· = 5~29；空 = <5（基本只能看过程）')
     print('  · 步长越小＝越快：1600 拍/步 ≈ 2080 转/分（电机机械转速，6 极对）')
     print('  · ⚠ 数据文件不带固件版本 ⇒ 「未标注」的行无法确定当时烧的是哪个分支（见交接说明 §4）')
