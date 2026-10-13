@@ -2655,7 +2655,7 @@
  *   （奇步中心均值 +52.3 码、偶步 −15.4 码，差 +67.8 码）。
  *   1 = 开；0 = 关。 */
 #ifndef RM2027_CL_PARITY_OFF
-#define RM2027_CL_PARITY_OFF 0   /* 本分支=纯基线，不补偿；复测时逐个打开 */
+#define RM2027_CL_PARITY_OFF 1   /* 复测#2：打开奇偶偏置（奇步 +52 / 偶步 −15 码）*/
 #endif
 #ifndef RM2027_CL_PAR_ODD
 #define RM2027_CL_PAR_ODD   52
