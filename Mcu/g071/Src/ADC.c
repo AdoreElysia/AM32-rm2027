@@ -79,9 +79,10 @@ void ADC_DMA_Callback()
     }
 #else
     /* ★ 2026-10-12 四路电压版：rank1~4 = VA/VB/VC/V0，悬空相【软件选】 */
-    bemf_adc_va = ADCDataDMA[0];
+    /* ★ AC 对调后：rank1=VC ⇒ [0]、rank2=VB ⇒ [1]、rank3=VA ⇒ [2]、rank4=V0 ⇒ [3] */
+    bemf_adc_va = ADCDataDMA[2];
     bemf_adc_vb = ADCDataDMA[1];
-    bemf_adc_vc = ADCDataDMA[2];
+    bemf_adc_vc = ADCDataDMA[0];
     bemf_adc_v0 = ADCDataDMA[3];
     /* 悬空相映射与 changeCompInput 一致：step 1/4→C, 2/5→A, 3/6→B */
     {
@@ -365,12 +366,17 @@ void ADC_Init(void)
      *     CCR4(200)+80 = 280 拍 ⇒ duty 下限由约 9% 回到约 10.5%
      *     （约束见 targets.h：CCR4 + 扫描拍数 < duty/2000×2665）。
      *   delta 不再依赖"动态改写 rank1"，改由 ADC_DMA_Callback 按 step 在软件里选悬空相。 */
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_A_CH);
-    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    /* ★★ 2026-10-13（分支 1013-g071-AC对调分辨）：只把 VA 与 VC 对调位置，其余一律不动。★★
+     *   分辨"每相倍率差异"跟着谁：
+     *     跟着 rank  ⇒ 现在最先采的 C 会变成最弱（A 变强）⇒ ADC 顺序采样问题
+     *     跟着相     ⇒ A 依然最弱（尽管现在排第 3）        ⇒ A 相硬件问题
+     *   ⚠ 档数与采样时间完全不变 ⇒ 不占导通窗预算、不引入越界风险。 */
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_C_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, BEMF_ADC_PHASE_B_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, BEMF_ADC_PHASE_C_CH);
-    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, BEMF_ADC_PHASE_A_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, BEMF_ADC_NEUTRAL_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
 
