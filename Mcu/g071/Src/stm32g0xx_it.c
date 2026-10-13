@@ -354,6 +354,28 @@ void DMA1_Channel2_3_IRQHandler(void)
                     }
                 }
 #endif
+#if RM2027_OFF_SLEW
+                /* ★ 连续逐步补偿：施加的偏移【限速逼近】当前步的目标值（不许跳变）。
+                 *   目标随 step 切换（差最大 68 码），但每帧只走 RM2027_OFF_SLEW 码
+                 *   ⇒ 跳变被摊平成一个步内的斜坡 ⇒ 判据看不到台阶。*/
+                {
+                    extern volatile int16_t off_now[6];
+                    extern volatile uint8_t ol_startup_arm;
+                    static int16_t off_app = 0;
+                    int16_t tgt = 0;
+                    if (!ol_startup_arm && step >= 1 && step <= 6) {
+                        tgt = off_now[(uint8_t)(step - 1)];
+                    }
+                    if (off_app < tgt) {
+                        off_app = (int16_t)(off_app + RM2027_OFF_SLEW);
+                        if (off_app > tgt) { off_app = tgt; }
+                    } else if (off_app > tgt) {
+                        off_app = (int16_t)(off_app - RM2027_OFF_SLEW);
+                        if (off_app < tgt) { off_app = tgt; }
+                    }
+                    dzc_judge = (int16_t)(dzc - off_app);
+                }
+#endif
                 uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
 #if RM2027_LOCK_DETECT
                 /* ★ 锁定判据：喂【原始】delta（要的是真实反电势幅值，与补偿无关）*/

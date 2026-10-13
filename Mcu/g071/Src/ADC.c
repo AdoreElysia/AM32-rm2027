@@ -314,8 +314,16 @@ void ADC_Init(void)
      *     温度通道在 COMMON_2（160.5 周期）不受影响。） */
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_1,
         LL_ADC_SAMPLINGTIME_7CYCLES_5);
+    /* ★ 2026-10-13（轮 13）：温度通道 160.5 → 79.5 周期。
+     *   为什么：扫描长度是按【TIM1 计数】算的（1 计数 = 1/64MHz = 15.6ns），
+     *   而温度独占 160.5 周期 ≈ 2.5µs ≈ 173 计数 —— 在 duty=300 的导通窗（400 计数）里
+     *   独占 43%，是扫描里最贵的一档（也是我上次把 CCR4 直接跳 260 却算错的根源：
+     *   本文件里"拍"字混用了 TIM1 计数与 TIM2 的 0.5µs 两种单位）。
+     *   ⇒ 降到 79.5 周期（≈1.2µs）省约 80 计数，换来把 CCR4 往后挪的本钱。
+     *   ⚠ 温度读数会略偏（G0 的 TS 建议 ≥5µs），台架温保有余量，可接受；
+     *     真要精确温度时再单独慢速采一次。 */
     LL_ADC_SetSamplingTimeCommonChannels(ADC1, LL_ADC_SAMPLINGTIME_COMMON_2,
-        LL_ADC_SAMPLINGTIME_160CYCLES_5);
+        LL_ADC_SAMPLINGTIME_79CYCLES_5);
     LL_ADC_DisableIT_EOC(ADC1);
     LL_ADC_DisableIT_EOS(ADC1);
 
