@@ -1149,6 +1149,22 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False, which='open
         i = int(np.searchsorted(duty_ts, t, 'right')) - 1
         return float(duty_v[i]) if i >= 0 else np.nan
 
+    # ★ 固件 ci 随时间（用来剔"波形被时间拉长"的窗；见 03 §十二）
+    ci_ts, ci_v = [], []
+    if os.path.exists(cf2):
+        with open(cf2, encoding='utf-8-sig') as fh:
+            for r in csv.DictReader(fh):
+                v = num(r, 'ci')
+                if np.isfinite(v):
+                    ci_ts.append(num(r, 'ts_frame')); ci_v.append(v)
+        o = np.argsort(ci_ts); ci_ts = np.array(ci_ts)[o]; ci_v = np.array(ci_v)[o]
+
+    def ci_at(t):
+        if len(ci_ts) == 0:
+            return np.nan
+        i = int(np.searchsorted(ci_ts, t, 'right')) - 1
+        return float(ci_v[i]) if i >= 0 else np.nan
+
     ok = []
     for wi in range(len(ST)):
         t = float(TS[wi])
@@ -1170,6 +1186,11 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False, which='open
         tl = np.median(np.diff(idx)) * 83.333
         if which != 'closed' and not (1500 <= tl <= 2400):
             continue
+        if which == 'closed':
+            # ★ 波形步长必须与固件 ci 对得上（±25%）：否则该窗的时间轴被拉长 ⇒ 数据不可信
+            c = ci_at(t)
+            if not (np.isfinite(c) and 0.75 <= tl / c <= 1.30):
+                continue
         if duty_eq is not None:
             dv = duty_at(t)
             if not (np.isfinite(dv) and abs(dv - duty_eq) < 1):
