@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-offline-fix.py —— 离线算一板参数，并对比【修正前 / 修正后】的过零点检测。
+offline-fix.py（v2，稳健口径）—— 离线参数表 + 修正前后过零位置对比（画在数据上）。
 
-思路（用户方案）：开环稳定段 → ① 每步幅值归一化（增益表）→ ② 再算每步竖直偏置 → ③ 看
-过零位置 p 是否被"卡"到同一条线上（六步一致）。p = 过零落在步内的位置（0=换相点，1=下一次）。
+★ v1 的问题（已作废）：用"峰峰值"量幅值 —— 但一个步内 delta 是【整段斜坡】，
+  峰峰值取决于纳入多长的斜坡，而每步换相时刻本来就偏得不一样 ⇒ 幅值被相位污染
+  （换统计量/换掐头去尾，表就变 10~20%）。
+★ v2 改成【对斜坡做线性拟合】取两个稳健量：
+    斜率 |k|      → 增益表（k_ref/|k|）
+    拟合零点 p    → 偏置修正量 = −k·(0.5−p)·w（把过零搬到步正中所需的竖直平移）
+  拟合只用段中间 40%（两端各去 30%）⇒ 天然避开换相瞬态 ✓
 
-产出：
-  · 控制台：每相/每步的增益与偏置表；p 的逐步对比 + 散布
-  · 图：每个步一段（3 个窗口），画【原始 delta(灰)】与【修正后 delta(黑)】，
-        标出原始过零(红虚线)与修正后过零(绿实线)，并标每步的 p
+⚠ 按用户要求 waitTime 不动 ⇒ 偏置修正必须【减掉六步共模】（只保留步间差异），
+  这样六步相对相位拉齐、整体相位不变（waitTime 表仍成立）。
+
 用法: python3 tools/offline-fix.py <baseline_win.npz> [输出png]
 """
 import sys
@@ -26,8 +30,8 @@ plt.rcParams['axes.unicode_minus'] = False
 NPZ = sys.argv[1]
 OUT = sys.argv[2] if len(sys.argv) > 2 else NPZ.replace('_win.npz', '_离线修正对比.png')
 F = {1: 'C', 2: 'A', 3: 'B', 4: 'C', 5: 'A', 6: 'B'}
-TPS = 1000.0 / 24000.0 * 2000.0            # 拍/采样
-WLO, WHI = 1600.0, 2200.0                  # 开环稳定段（分割外生 ⇒ 测量干净）
+WLO, WHI = 1600.0, 2200.0
+FRAC = 0.30
 
 z = np.load(NPZ)
 ST, V0 = z['step'], z['v0']
@@ -43,120 +47,102 @@ def segs(st):
     return o
 
 
-def rob(d):
-    s = np.sort(d)
-    return (s[-2] - s[1]), (s[-2] + s[1]) / 2.0
+def fit(v, frac=FRAC):
+    n = len(v); a = int(n * frac); b = n - a
+    if b - a < 8:
+        return None
+    x = np.arange(a, b, dtype=float)
+    k, b0 = np.polyfit(x, v[a:b], 1)
+    if abs(k) < 1e-6:
+        return None
+    return k, -b0 / k / n          # k(码/采样, 带符号), p(段内相对位置)
 
 
-# ---------- 收集（开环稳定段）----------
-rec = []          # (wi, i0, i1, step, d_raw, raw_pp_per_phase)
+# ---------- ① 参数表 ----------
+S = {s: [] for s in range(1, 7)}
 for wi in range(len(ST)):
     for i0, i1, s in segs(ST[wi]):
-        if s not in F or i0 == 0 or i1 == 512 or i1 - i0 < 14:
+        if s not in F or i0 == 0 or i1 == 512 or i1 - i0 < 24:
             continue
-        w = (i1 - i0) * TPS
-        if not (WLO <= w <= WHI):
+        if not (WLO <= (i1 - i0) * 83.333 <= WHI):
             continue
-        d = PH[F[s]][wi][i0:i1].astype(float) - V0[wi][i0:i1]
-        rec.append((wi, i0, i1, s, d))
+        v = PH[F[s]][wi][i0:i1].astype(float) - V0[wi][i0:i1]
+        r = fit(v)
+        if r:
+            S[s].append((r[0], r[1], i1 - i0))
 
-# 每相"纯通道"倍率（用原始悬空读数峰峰）
-rawph = {'A': [], 'B': [], 'C': []}
-for wi, i0, i1, s, d in rec:
-    v = PH[F[s]][wi][i0:i1].astype(float)
-    pp, _ = rob(v[3:-3]); rawph[F[s]].append(pp)
-gC = float(np.median(rawph['C']))
-gain_ch = {p: float(np.median(rawph[p])) / gC for p in 'ABC'}
-print('== 每相纯通道倍率（原始悬空读数峰峰，相对 C）==')
-for p in 'ABC':
-    print('   %s: %.3f' % (p, gain_ch[p]))
+kabs = {s: float(np.median([abs(k) for k, _, _ in S[s]])) for s in range(1, 7)}
+kref = float(np.median(list(kabs.values())))
+gain = {s: kref / kabs[s] for s in range(1, 7)}
+# ★ 关键：减共模必须在【p 域】做 —— 目标取"六步 p 的共同值 pbar"（而不是 0.5），
+#   否则每步 k·w 不同 ⇒ 减掉同样的码数并不等于相同的 p 位移 ⇒ 六步落不到一条线上。
+pbar = float(np.mean([np.median([pp for _, pp, _ in S[s]]) for s in range(1, 7)]))
+craw = {s: float(np.median([-k * (0.5 - pp) * n for k, pp, n in S[s]])) for s in range(1, 7)}
+corr = {s: float(np.median([-k * (pbar - pp) * n for k, pp, n in S[s]])) for s in range(1, 7)}
+cmean = float(np.mean(list(craw.values())))
 
-# 每步幅值（原始 delta）→ 增益表
-amp = {s: [] for s in range(1, 7)}
-off = {s: [] for s in range(1, 7)}
-for wi, i0, i1, s, d in rec:
-    a, o = rob(d[3:-3]); amp[s].append(a); off[s].append(o)
-Amed = {s: float(np.median(amp[s])) for s in range(1, 7)}
-Aref = float(np.median(list(Amed.values())))
-gain = {s: Aref / Amed[s] for s in range(1, 7)}
-print('\n== 增益表（每步幅值归一，参考=六步中位 %.0f 码）==' % Aref)
-print('   step  幅值(码)  增益')
+print('== ① 增益表（斜率口径，k_ref=%.2f 码/采样）==' % kref)
+print('   step   |k|     增益')
 for s in range(1, 7):
-    print('    %d    %6.0f   %.3f' % (s, Amed[s], gain[s]))
+    print('    %d   %6.2f  %.3f' % (s, kabs[s], gain[s]))
+print('\n== ② 偏置修正（目标：把六步 p 都搬到共同值 pbar=%.3f，整体相位不动）==' % pbar)
+print('   （对照）搬到 p=0.5 的平移: ' + ' '.join('%+7.1f' % craw[s] for s in range(1, 7)))
+print('   实际采用(减共模/保相位):   ' + ' '.join('%+7.1f' % corr[s] for s in range(1, 7)))
+print('   （step1..6 对应浮相 C A B C A B）')
 
-# ② 先增益归一，再重测偏置
-off2 = {s: [] for s in range(1, 7)}
-for wi, i0, i1, s, d in rec:
-    d1 = d * gain[s]
-    _, o = rob(d1[3:-3]); off2[s].append(o)
-OFF = {s: float(np.median(off2[s])) for s in range(1, 7)}
-print('\n== 偏置表（在【归一化后】的 delta 上测）==')
-print('   step  偏置(码)')
+
+def p_after(s, p, k, n_):
+    kk = k * gain[s]
+    if abs(kk) < 1e-9:
+        return np.nan
+    return p - corr[s] / (kk * n_)
+
+
+print('\n== ③ 过零位置 p（斜率拟合口径）==')
+print('   step 浮相   修正前p   修正后p   样本')
+sp0, sp1 = [], []
 for s in range(1, 7):
-    print('    %d   %+7.1f' % (s, OFF[s]))
+    a = float(np.median([p for _, p, _ in S[s]]))
+    b = float(np.median([p_after(s, p, k, n_) for k, p, n_ in S[s]]))
+    sp0.append(a); sp1.append(b)
+    print('    %d   %s   %7.3f  %8.3f  %5d' % (s, F[s], a, b, len(S[s])))
+print('   → 六步 p 散布(σ): 修正前 %.3f   **修正后 %.3f**' % (np.std(sp0), np.std(sp1)))
+print('   → 六步 p 均值    : 修正前 %.3f   修正后 %.3f   （减共模 ⇒ 均值应基本不变）'
+      % (np.mean(sp0), np.mean(sp1)))
 
-
-def p_of(d, skip=3):
-    dd = d[skip:-skip] if len(d) > 2 * skip else d
-    for k in range(1, len(dd)):
-        if dd[k - 1] * dd[k] <= 0 and dd[k - 1] != dd[k]:
-            return (k + skip) / float(len(d))
-    return np.nan
-
-
-# ③ 对比 p：原始 / 只归一化 / 归一化+偏置
-P0 = {s: [] for s in range(1, 7)}
-P1 = {s: [] for s in range(1, 7)}
-P2 = {s: [] for s in range(1, 7)}
-for wi, i0, i1, s, d in rec:
-    P0[s].append(p_of(d))
-    d1 = d * gain[s]
-    P1[s].append(p_of(d1))
-    P2[s].append(p_of(d1 - OFF[s]))
-print('\n== 过零位置 p（0.5=步正中）==')
-print('   step 浮相   原始p   只归一化   归一化+偏置')
-sp0, sp1, sp2 = [], [], []
-for s in range(1, 7):
-    a, b, c = (np.nanmedian(P0[s]), np.nanmedian(P1[s]), np.nanmedian(P2[s]))
-    sp0.append(a); sp1.append(b); sp2.append(c)
-    print('    %d   %s  %7.3f  %8.3f  %10.3f' % (s, F[s], a, b, c))
-print('   → 六步 p 散布(σ): 原始 %.3f   只归一化 %.3f   **归一化+偏置 %.3f**'
-      % (np.nanstd(sp0), np.nanstd(sp1), np.nanstd(sp2)))
-print('   → 六步 p 均值    : 原始 %.3f   只归一化 %.3f   归一化+偏置 %.3f'
-      % (np.nanmean(sp0), np.nanmean(sp1), np.nanmean(sp2)))
-
-# ---------- 画图：3 个窗口，原始 vs 修正后 ----------
-wins = sorted(set(r[0] for r in rec))
-pick = [wins[int(len(wins) * f)] for f in (0.3, 0.55, 0.8)]
-fig, axes = plt.subplots(len(pick), 1, figsize=(16, 4.2 * len(pick)), sharex=False)
+# ---------- ④ 画图 ----------
+wins = sorted(set(seg[0] for wi in range(len(ST)) for seg in [None] if False)) or []
+wins = []
+for wi in range(len(ST)):
+    if any((i1 - i0) >= 20 for i0, i1, s in segs(ST[wi]) if s in F):
+        wins.append(wi)
+pick = wins[int(len(wins) * 0.35):int(len(wins) * 0.35) + 2]
+fig, axes = plt.subplots(len(pick), 1, figsize=(16, 4.4 * len(pick)))
 if len(pick) == 1:
     axes = [axes]
 for ax, wi in zip(axes, pick):
     t = np.arange(512) * (1000.0 / 24000.0)
     for i0, i1, s in segs(ST[wi]):
-        if s not in F or (i1 - i0) < 20:
+        if s not in F or (i1 - i0) < 12:
             continue
         d = PH[F[s]][wi][i0:i1].astype(float) - V0[wi][i0:i1]
         x = t[i0:i1]
-        ax.plot(x, d, lw=.9, color='0.65', label='原始 delta' if s == 1 else None)
-        d1 = d * gain[s]
-        d2 = d1 - OFF[s]
-        ax.plot(x, d2, lw=1.3, color='k', label='修正后 delta' if s == 1 else None)
-        k0 = p_of(d)
-        if k0 == k0 and int(k0 * len(d)) < len(x):
-            ax.axvline(x[int(k0 * len(d))], color='#c0392b', ls='--', lw=1.0)
-        k2 = p_of(d2)
-        if k2 == k2 and int(k2 * len(d)) < len(x):
-            ax.axvline(x[int(k2 * len(d))], color='#27ae60', ls='-', lw=1.4)
+        d2 = d * gain[s] - corr[s]
+        ax.plot(x, d, lw=1.0, color='0.62', label='原始 delta' if s == 1 else None)
+        ax.plot(x, d2, lw=1.4, color='k', label='修正后（增益+去共模偏置）' if s == 1 else None)
+        r0 = fit(d); r2 = fit(d2)
+        if r0 and 0 <= int(r0[1] * len(d)) < len(x):
+            ax.axvline(x[int(r0[1] * len(d))], color='#c0392b', ls='--', lw=1.0)
+        if r2 and 0 <= int(r2[1] * len(d2)) < len(x):
+            ax.axvline(x[int(r2[1] * len(d2))], color='#27ae60', ls='-', lw=1.5)
         ax.axvline(x[0], color='#2471a3', ls=':', lw=.9)
-        if k0 == k0:
-            ax.text(x[2], 430, 'p %.2f→%.2f' % (k0, k2), fontsize=7.5)
+        if r0 and r2:
+            ax.text(x[1], 460, 'p %.2f→%.2f' % (r0[1], r2[1]), fontsize=7)
     ax.axhline(0, color='gray', lw=.7)
-    ax.set_ylim(-520, 520); ax.grid(alpha=.22)
-    ax.set_ylabel('delta (码)')
-    ax.set_title('窗口 #%d：灰=原始 delta，黑=修正后(增益归一+偏置)；红虚线=原始过零，绿实线=修正后过零，蓝点线=换相点'
+    ax.set_ylim(-560, 560); ax.grid(alpha=.22); ax.set_ylabel('delta (码)')
+    ax.set_title('窗口 #%d  灰=原始 黑=修正后  红虚线=原始过零 绿实线=修正后过零  蓝点线=换相点'
                  % int(z['seq'][wi]), fontsize=10)
     ax.legend(fontsize=8, loc='upper right')
-axes[-1].set_xlabel('窗口内时间 (ms) —— 一片 = 512 点 @24kHz = 21.33ms')
+axes[-1].set_xlabel('窗口内时间 (ms) —— 512 点 @24kHz = 21.33ms 连续全速')
 plt.tight_layout(); plt.savefig(OUT, dpi=125)
 print('\n图 →', OUT)
