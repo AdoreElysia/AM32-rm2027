@@ -253,15 +253,28 @@ try:
             _m=re.match(r'^0x[0-9a-fA-F]+:\s*(.*)$',_l)
             if _m: _v += [int(x,16) for x in _m.group(1).split()]
         return _v
-    _D=_rd('OL_CM_D',32); _T=_rd('OL_CM_T',16); _W=_rd('OL_CM_W',16); _S=_rd('OL_CM_S',8)
+    # ★ 字宽必须按声明来（2026-10-13 修）：mdw 一次读的是【32 位字】，
+    #   OL_CM_D 是 int16[32] ⇒ 只占 64 字节 = 16 个字，每个字里塞着 2 个 int16；
+    #   OL_CM_S 是 uint8[32] ⇒ 8 个字，每字 4 个 uint8。
+    #   原来 `_rd('OL_CM_D',32)` 读了 32 个字（= 把隔壁 OL_CM_T 也读进来当 D），
+    #   又不拆半字 ⇒ 表里印出一堆 16 位巨数（实测 1258289370058217 之类）。
+    _D=_rd('OL_CM_D',16); _T=_rd('OL_CM_T',16); _W=_rd('OL_CM_W',16); _S=_rd('OL_CM_S',8)
     _n=_rd('ol_cm_n',1); _i=_rd('ol_cm_idx',1)
+    def _u16(ws):
+        out=[]
+        for x in ws: out += [x & 0xFFFF, (x >> 16) & 0xFFFF]
+        return out
     def _i16(x): return x-0x10000 if x & 0x8000 else x
-    _ds=[_i16(x) for x in _D]
+    _ds=[_i16(x) for x in _u16(_D)][:32]
+    _T=_u16(_T)[:32]; _W=_u16(_W)[:32]
     _ss=[(_S[k//4]>>((k%4)*8))&0xFF for k in range(32)]
-    print(f'\n★ 换相埋点（最近 32 次换相；累计 {_n[0] if _n else "?"} 次）')
-    print(f'{"idx":>4}{"step":>5}{"delta(悬空相-V0)":>17}{"CNT":>7}{"waitTime":>9}')
-    for k in range(min(32,len(_ds))):
-        print(f'{k:4d}{_ss[k]:5d}{_ds[k]:17d}{_T[k] if k<len(_T) else 0:7d}{_W[k] if k<len(_W) else 0:9d}')
+    # ol_cm_idx 指向"下一个要写的槽"⇒ 它是环形缓冲里最老的一条，按它起绕才是时间顺序
+    _idx=_i[0] if _i else 0
+    _ord=[(_idx+k) & 31 for k in range(32)]
+    print(f'\n★ 换相埋点（最近 32 次换相；累计 {_n[0] if _n else "?"} 次）—— 已按时间顺序排列')
+    print(f'{"序":>4}{"step":>5}{"delta(悬空相-V0)":>17}{"CNT(拍)":>9}{"waitTime":>10}')
+    for k,p in enumerate(_ord):
+        print(f'{k:4d}{_ss[p]:5d}{_ds[p]:17d}{_T[p]:9d}{_W[p]:10d}')
     _abs=[abs(x) for x in _ds if x!=0]
     if _abs:
         print(f'  ⇒ |delta| 中位 {np.median(_abs):.0f} 码  最小 {min(_abs)}  最大 {max(_abs)}')
