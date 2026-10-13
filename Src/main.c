@@ -2073,6 +2073,9 @@ volatile int16_t  win_vc[WIN_N];
 volatile int16_t  win_v0[WIN_N];
 volatile int16_t  win_cur[WIN_N];      /* ★ 每帧电流（ADC 原始码）*/
 volatile uint8_t  win_step[WIN_N];
+volatile uint8_t  win_dbg[WIN_N];        /* ★ 2026-10-13 未钳制的步内时间（ADC 帧，饱和 255）
+                                          *   必须【采集时逐点存】，不能在打包时用实时计数器算 ——
+                                          *   打包发生在发送前，那时实时值对 512 个点是同一个 ⇒ 会变成常数。*/
 volatile uint16_t win_n;
 volatile uint8_t  win_state;     /* 0=采集中 1=待发送 2=发送中 */
 volatile uint32_t win_seq;
@@ -2101,6 +2104,12 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
     win_v0[i]   = v0;
     win_cur[i]  = cu;
     win_step[i] = st;
+    {
+        /* 未钳制的步内时间：距上次换相过了多少个 ADC 帧（1 帧 = 41.67µs = 83.33 拍）*/
+        extern volatile uint16_t adc_frame_cnt;
+        uint16_t el = (uint16_t)(adc_frame_cnt - ccm_last_frame);
+        win_dbg[i] = (uint8_t)((el > 255u) ? 255u : el);
+    }
     i++;
     if (i >= WIN_N) {
         win_n = WIN_N;
@@ -2154,11 +2163,7 @@ void win_pump(void)
          *   （1 帧 = 41.67µs = 83.33 拍），饱和到 255（255 帧 ≈ 10.6ms，足够覆盖堵转）。
          *   ⇒ 每采样点一个锯齿，其【周期】就是该步的真实步长（未钳制、未滤波）✓
          *   ⚠ 解析侧同步：cap-evt.py 现在把每采样点第 12 字节存成 npz 里的 dbg 数组。 */
-        {
-            extern volatile uint16_t adc_frame_cnt;
-            uint16_t el = (uint16_t)(adc_frame_cnt - ccm_last_frame);
-            win_pkt[k +11] = (el > 255u) ? 255u : (uint8_t)el;
-        }
+        win_pkt[k +11] = win_dbg[f];   /* ★ 采集时逐点存下来的（见 win_push）*/
     }
 
     win_seq++;
