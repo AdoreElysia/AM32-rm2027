@@ -2754,6 +2754,27 @@
  * 关掉回到基线：把 RM2027_ADC_SMP_BEMF 设成 LL_ADC_SAMPLINGTIME_COMMON_1、
  *              并把 ADC_TRIGGER_CCR4 设回 200。
  */
+/* ★★ 2026-10-13 ADC 采样顺序交换校准（RM2027_ADC_AC_SWAP）★★
+ *
+ *   目的：判定"逐相幅值差（C 比 A 大 15~20%）"到底是不是**采样顺序（rank）**造成的。
+ *   做法：把 rank1 与 rank3 对调 —— 基线是 rank1=VA/rank3=VC，交换后 rank1=VC/rank3=VA，
+ *         并在 DMA 回调里把槽位映射反过来（slot0→vc、slot2→va），保证 va/vb/vc 仍是"引脚"语义。
+ *   判据（这一次要看的就一件事）：
+ *     · 交换后**幅值图样跟着翻转**（原来最弱的 A 变成最强、C 变成最弱）⇒ 是 rank 效应
+ *       ⇒ 那么"交替交换 + 平均"就是正解（离线标定可用；在线判据不能用，见下）；
+ *     · 交换后**图样不变**（还是 C 强 A 弱）⇒ 与顺序无关 ⇒ 是外部 RC / 驱动耦合 ⇒ 动硬件。
+ *
+ *   ⚠ 两个必须记住的限制：
+ *     ① 交换**不花扫描时间**（只是换 rank 的通道、再把槽位映射反过来）；
+ *     ② 但它**只能用于离线标定**，不能用于在线判据：判据每帧立即消费样本，顺序一交替等于
+ *        给阈值注入一个交替偏移 ⇒ 闭环会更差（就是"换 V0 不重调判据"那类坑）。
+ *
+ *   1 = 交换（rank1=VC, rank3=VA）；0 = 基线（rank1=VA, rank3=VC）。
+ */
+#ifndef RM2027_ADC_AC_SWAP
+#define RM2027_ADC_AC_SWAP  0
+#endif
+
 #ifndef RM2027_ADC_SMP_BEMF
 #define RM2027_ADC_SMP_BEMF  LL_ADC_SAMPLINGTIME_7CYCLES_5    /* ★ 2026-10-13 实测定案：加长无益，退回 7.5
                                                               *   SMP 7.5 → 19.5（片上读 SMPR 验证：0x00100072 → 0x00100074）后实测：

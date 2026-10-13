@@ -79,9 +79,16 @@ void ADC_DMA_Callback()
     }
 #else
     /* ★ 2026-10-12 四路电压版：rank1~4 = VA/VB/VC/V0，悬空相【软件选】 */
+#if RM2027_ADC_AC_SWAP
+    /* ★ rank1=VC / rank3=VA ⇒ 槽位映射反过来，保证 va/vb/vc 仍是"引脚"语义 */
+    bemf_adc_vc = ADCDataDMA[0];
+    bemf_adc_vb = ADCDataDMA[1];
+    bemf_adc_va = ADCDataDMA[2];
+#else
     bemf_adc_va = ADCDataDMA[0];
     bemf_adc_vb = ADCDataDMA[1];
     bemf_adc_vc = ADCDataDMA[2];
+#endif
     bemf_adc_v0_hw = ADCDataDMA[3];    /* ★ 硬件 V0 原值：永远记它（日志语义不变） */
     bemf_adc_v0    = bemf_adc_v0_hw;
 #if RM2027_V0_SOFTMEAN
@@ -396,12 +403,22 @@ void ADC_Init(void)
      *     CCR4(200)+80 = 280 拍 ⇒ duty 下限由约 9% 回到约 10.5%
      *     （约束见 targets.h：CCR4 + 扫描拍数 < duty/2000×2665）。
      *   delta 不再依赖"动态改写 rank1"，改由 ADC_DMA_Callback 按 step 在软件里选悬空相。 */
+#if RM2027_ADC_AC_SWAP
+    /* ★ 采样顺序交换校准：rank1 与 rank3 对调（rank1=VC、rank3=VA）。见 targets.h 的说明。*/
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_C_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, BEMF_ADC_PHASE_B_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, BEMF_ADC_PHASE_A_CH);
+    LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+#else
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, BEMF_ADC_PHASE_A_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_A_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, BEMF_ADC_PHASE_B_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_B_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, BEMF_ADC_PHASE_C_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_PHASE_C_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
+#endif
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, BEMF_ADC_NEUTRAL_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
 
