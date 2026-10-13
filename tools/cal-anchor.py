@@ -1202,6 +1202,216 @@ def figure_wave(npz, outpng, nwin=3, v0mode='auto', all_stage=False):
     print('全速率波形图 →', outpng)
 
 
+FITLO2, FITHI2 = 0.15, 0.95
+
+
+def step_fix(npz, v0mode='sw', lam=1e-3, all_stage=False, verbose=True):
+    """★ 六步分步【竖直增益 + 竖直偏移】反解，目标 = 【换相处连续】。
+
+    为什么"连续"是对的目标（物理依据）：
+      三相反电势互差 120°，而换相点落在步边界（该相 BEMF = ±半幅）⇒
+      **出去的悬空相反电势恰好等于进来的那一个** ⇒ 把六步的悬空相读数拼起来，
+      理想情形是一根**连续**的三角波（周期 120°）。所以：
+        "换相处两侧读数之差"(跳变) 就是可以量、也可以压的误差。
+      目标 1：跳变 → 0（连续性）；目标 2：过零点尽量落在 u=0.5（居中；开环下不强制）。
+
+    模型：每步 s 施以 (g_s, o_s)：  d' = g_s·d + o_s
+    只关心每步两端的外推值 e0(一步起点)、e1(一步终点)（从 u∈[0.15,0.95] 的直线拟合外推，
+    避开换相振铃）。于是边界 s→s+1 的跳变：
+        J_s = g_s·e1_s + o_s − g_{s+1}·e0_{s+1} − o_{s+1}
+    对 12 个未知量做【带岭正则】的最小二乘（λ 小 ⇒ 取"最小改动解"），
+    再报跳变/过零位置/幅值在修正前后的变化。
+    """
+    cf = npz.replace('_win.npz', '.csv')
+    ts_c, st_c, span = read_csv(cf)
+    z = np.load(npz)
+    ST, TS = z['step'], z['ts'].astype(np.int64)
+    PH = {k: z[k].astype(float) for k in ('va', 'vb', 'vc')}
+    v0m, why = pick_v0(z, v0mode) if 'v0' in z.files else ('sw', '无 V0')
+    V0 = (PH['va'] + PH['vb'] + PH['vc']) / 3.0 if v0m == 'sw' else z['v0'].astype(float)
+    # 收步段（与 collect 同口径）+ 每段两端外推值 + 相邻配对
+    e0s = {s: [] for s in range(1, 7)}
+    e1s = {s: [] for s in range(1, 7)}
+    u0s = {s: [] for s in range(1, 7)}
+    pair = []          # (s_from, e1, e0_next)
+    nwin = 0
+    for wi in range(len(ST)):
+        t = float(TS[wi])
+        if not all_stage:
+            if stage_at(ts_c, st_c, t) != 1:
+                continue
+            if span and not (span[0] <= t <= span[1]):
+                continue
+        mx = np.maximum(PH['va'][wi], PH['vb'][wi]); mx = np.maximum(mx, PH['vc'][wi])
+        if np.median(mx) < 200:
+            continue
+        nwin += 1
+        sg = [x for x in segs(ST[wi].astype(int)) if x[2] in F and x[0] != 0 and x[1] != 512
+              and x[1] - x[0] >= 14]
+        if not segs(ST[wi].astype(int)):
+            continue
+        loc = []
+        for i0, i1, s in sg:
+            w = float(i1 - i0)
+            u = (np.arange(i0, i1) - i0) / w
+            d = PH[PHK[F[s]]][wi][i0:i1] - V0[wi][i0:i1]
+            m = (u >= FITLO2) & (u <= FITHI2)
+            if m.sum() < 8:
+                continue
+            k, b = np.polyfit(u[m], d[m], 1)
+            e0, e1 = b, k + b
+            e0s[s].append(e0); e1s[s].append(e1); u0s[s].append(-b / k if k else np.nan)
+            loc.append((s, e1))
+        # 相邻步配对（时间上相邻 = 链表里相邻）
+        for (s1, e1v), (s2, _e0v) in zip(loc[:-1], loc[1:]):
+            pass
+        for a in range(len(loc) - 1):
+            s1, e1v = loc[a]
+            s2 = loc[a + 1][0]
+            # 用下一段自己的 e0（从它自己的数据算）
+            i0b, i1b, _ = sg[a + 1]
+            w2 = float(i1b - i0b)
+            u2 = (np.arange(i0b, i1b) - i0b) / w2
+            d2 = PH[PHK[F[s2]]][wi][i0b:i1b] - V0[wi][i0b:i1b]
+            m2 = (u2 >= FITLO2) & (u2 <= FITHI2)
+            if m2.sum() < 8:
+                continue
+            k2, b2 = np.polyfit(u2[m2], d2[m2], 1)
+            pair.append((s1, e1v, b2, s2))
+    if not e0s[1] and not any(e0s.values()):
+        print('!! 没有可用开环步段'); return None
+    E0 = {s: float(np.median(e0s[s])) if e0s[s] else np.nan for s in range(1, 7)}
+    E1 = {s: float(np.median(e1s[s])) if e1s[s] else np.nan for s in range(1, 7)}
+    U0 = {s: float(np.nanmedian(u0s[s])) if e0s[s] else np.nan for s in range(1, 7)}
+    A = {s: (E1[s] - E0[s]) for s in range(1, 7)}
+    if verbose:
+        print('\n' + '=' * 78)
+        print('【%s】六步分步增益+偏移反解（目标：换相连续）  V0=%s  开环窗 %d' % (
+            os.path.basename(npz)[8:23], v0m, nwin))
+        print('=' * 78)
+        print('   （e0/e1 = 从 u∈[%.2f,%.2f] 直线拟合外推到该步两端；跳变 = e1(s) − e0(s+1)）' % (FITLO2, FITHI2))
+        print('   %-4s %-4s %8s %8s %8s %8s' % ('步', '浮相', 'e0(码)', 'e1(码)', '幅值Δ', '过零u0'))
+        for s in range(1, 7):
+            print('   %-4d %-4s %8.0f %8.0f %8.0f %8.3f' % (s, F[s], E0[s], E1[s], A[s], U0[s]))
+    # 跳变：按【边界类型】取中位（比"两步各自中位再相减"更稳）
+    from collections import defaultdict
+    Jby = defaultdict(list)
+    for s1, e1v, e0v2, s2 in pair:
+        Jby[s1].append(e1v - e0v2)
+    idx = sorted(Jby.keys())
+    Jmed = {s: float(np.median(Jby[s])) for s in idx}
+    Jall = np.concatenate([np.array(v) for v in Jby.values()])
+    if verbose:
+        print('\n   ---- ① 换相跳变（原始；理想 = 0）----')
+        print('   %-16s %10s %10s %8s' % ('边界', '中位(码)', '样本数', '散布σ'))
+        for s in idx:
+            print('   %-16s %+10.0f %10d %8.0f' % ('步%d(%s)→步%d(%s)' % (
+                s, F[s], s % 6 + 1, F[s % 6 + 1]), Jmed[s], len(Jby[s]), float(np.std(Jby[s]))))
+        print('   ⇒ 六项中位跳变 RMS %.0f 码（全样本 RMS %.0f，散布来自段间差异）'
+              % (float(np.sqrt(np.mean([Jmed[s] ** 2 for s in idx]))), float(np.sqrt(np.mean(Jall ** 2)))))
+    # ---- 闭式解（推荐）：g_s = C/|A_s|（六步幅值归一）、o_s = −g_s·m_s（过零钉在正中）----
+    #   推导：施加 d' = g_s·d + o_s 后
+    #       跳变 J_s = (g_s·A_s + g_{s+1}·A_{s+1})/2 ；居中(u0=0.5) ⇔ o_s = −g_s·m_s
+    #   取 g_s = C/|A_s| ⇒ g_s·A_s = C·sgn(A_s) = ±C ⇒ J_s = (C·sgn − C·sgn' )/2 = 0 恒成立
+    #   （A 逐交替变号 ⇒ sgn(A_s) = −sgn(A_{s+1}) ⇒ 两项抵消）⇒ 六个跳变全为 0，且过零在 0.5。
+    absA = np.array([abs(A[s]) for s in idx])
+    C = float(np.mean(absA))
+    g = {s: C / abs(A[s]) for s in idx}                       # 幅值归一（相对中位 ⇒ 增益≈1±15%）
+    m = {s: (E0[s] + E1[s]) / 2.0 for s in idx}
+    o = {s: -g[s] * m[s] for s in idx}                        # 居中
+    if verbose:
+        print('\n   ---- ② 闭式解（把六步幅值归一 + 过零钉在正中）----')
+        print('   %-4s %-4s %9s %9s %10s %12s %12s' % ('步', '浮相', 'A_s(码)', 'm_s(码)', '增益 g_s', '偏移 o_s(码)', '归一后幅值'))
+        for s in idx:
+            print('   %-4d %-4s %9.0f %9.0f %10.4f %12.1f %12.0f'
+                  % (s, F[s], A[s], m[s], g[s], o[s], abs(g[s] * A[s])))
+        print('   ⇒ 增益范围 %.3f~%.3f（±%.0f%%）、偏移范围 %+.0f~%+.0f 码'
+              % (min(g[s] for s in idx), max(g[s] for s in idx),
+                 100 * max(abs(g[s] - 1) for s in idx), min(o[s] for s in idx), max(o[s] for s in idx)))
+    e0c = {s: g[s] * E0[s] + o[s] for s in idx}
+    e1c = {s: g[s] * E1[s] + o[s] for s in idx}
+    # 居中解只用于报数（上面已知恒 0.5）
+    u0c = {s: -(E0[s] + o[s] / g[s]) / A[s] for s in idx}   # u0 = −b'/k'
+    # 仅偏移解（对照：只压跳变、不管居中）
+    off_only, acc = {}, 0.0
+    for s in idx:
+        off_only[s] = acc; acc += Jmed[s]
+    e0o = {s: E0[s] + off_only[s] for s in idx}
+    e1o = {s: E1[s] + off_only[s] for s in idx}
+    u0o = {s: -(E0[s] + off_only[s]) / A[s] for s in idx}
+    Jc = np.array([e1c[s] - e0c[s % 6 + 1] for s in idx])
+    Jo = np.array([e1o[s] - e0o[s % 6 + 1] for s in idx])
+    Jb = np.array([Jmed[s] for s in idx])
+    if verbose:
+        print('\n   ---- ③ 修正后 ----')
+        print('      跳变 RMS：原 %.0f ⇒ 闭式解 %.0f ⇒ 仅偏移解 %.0f 码'
+              % (float(np.sqrt(np.mean(Jb ** 2))), float(np.sqrt(np.mean(Jc ** 2))),
+                 float(np.sqrt(np.mean(Jo ** 2)))))
+        m0 = [U0[s] for s in idx]
+        print('      过零 u0：原     %s （σ=%.3f）' % (' '.join('%.3f' % v for v in m0), float(np.std(m0))))
+        print('      过零 u0：仅偏移 %s （σ=%.3f）  ← 只压跳变会把过零推出这一步！'
+              % (' '.join('%.3f' % u0o[s] for s in idx), float(np.std([u0o[s] for s in idx]))))
+        print('      过零 u0：闭式解 %s （σ=%.3f）  ← 跳变和居中同时满足'
+              % (' '.join('%.3f' % u0c[s] for s in idx), float(np.std([u0c[s] for s in idx]))))
+        print('\n      直给的固件表（相对步 1 的中位）:')
+        print('        增益 g   : %s' % ' '.join('%.4f' % g[s] for s in idx))
+        print('        偏移 o(码): %s' % ' '.join('%+.0f' % o[s] for s in idx))
+    # ---- 出图：每步的【拟合直线外推到两端】——接缝才看得见 ----
+    fig, ax = plt.subplots(2, 1, figsize=(15, 8.8))
+    for wi in range(len(ST)):
+        t = float(TS[wi])
+        if stage_at(ts_c, st_c, t) != 1:
+            continue
+        if span and not (span[0] <= t <= span[1]):
+            continue
+        mx = np.maximum(PH['va'][wi], PH['vb'][wi]); mx = np.maximum(mx, PH['vc'][wi])
+        if np.median(mx) < 200:
+            continue
+        for i0, i1, ss in segs(ST[wi].astype(int)):
+            if ss not in F or i0 == 0 or i1 == 512 or i1 - i0 < 14:
+                continue
+            u = (np.arange(i0, i1) - i0) / float(i1 - i0)
+            d = PH[PHK[F[ss]]][wi][i0:i1] - V0[wi][i0:i1]
+            m = (u >= FITLO2) & (u <= FITHI2)
+            ax[0].plot((ss - 1) + u[m], d[m], '.', ms=2, color='#d5d8dc', alpha=.6)
+            ax[1].plot((ss - 1) + u[m], d[m], '.', ms=2, color='#d5d8dc', alpha=.6,
+                       label='实测（u∈[0.15,0.95]）' if (ss == 1 and wi == 0) else None)
+        break            # 只画第一个可用窗口，避免叠得太乱
+    for sh in (0.0, 6.0):
+        for s in range(1, 7):
+            if s not in E0:
+                continue
+            uu = np.array([0.0, 1.0])
+            raw = E0[s] + (E1[s] - E0[s]) * uu
+            cor = g[s] * raw + o[s]
+            ax[0].plot((s - 1) + uu + sh, raw, '-o', ms=5, lw=1.4, color='0.55',
+                       label='原始（拟合外推到两端）' if (s == 1 and sh == 0) else None)
+            ax[1].plot((s - 1) + uu + sh, raw, '-o', ms=5, lw=1.4, color='0.55',
+                       label='原始（拟合外推到两端）' if (s == 1 and sh == 0) else None)
+            ax[0].plot((s - 1) + uu + sh, cor, '-s', ms=5, lw=1.8, color='#c0392b',
+                       label='+分步增益/偏移后' if (s == 1 and sh == 0) else None)
+            ax[1].plot((s - 1) + uu + sh, cor, '-s', ms=5, lw=1.8, color='#c0392b',
+                       label='+分步增益/偏移后' if (s == 1 and sh == 0) else None)
+            if sh == 0:
+                ax[1].plot([(s - 1) + 0.5], [g[s] * (E0[s] + E1[s]) / 2 + o[s]], 'k^', ms=9)
+    for k in range(9):
+        for a_ in ax:
+            a_.axvline(k, color='0.6', ls=':', lw=1.0)
+    ax[1].plot([], [], 'k^', ms=9, label='过零点（修正后应落在步正中）')
+    ax[0].set_title('换相"接缝"检查：把每步的拟合直线【外推到两端】再连起来。'
+                    '灰色=原始（两端对不上）／红色=分步增益+偏移后（应当接上）', fontsize=11)
+    ax[1].set_title('同一份（含实测点）：修正后两端相接，且过零落在步正中（▲）', fontsize=10)
+    for a_ in ax:
+        a_.set_xlabel('τ = 步序号 + 步内位置（一个电周期 = 6 步；画两个周期看接缝）')
+        a_.set_ylabel('悬空相 − V0 (码)'); a_.grid(alpha=.22); a_.set_xlim(0, 7.6)
+    ax[1].legend(fontsize=9, loc='lower right')
+    fig.tight_layout()
+    fp = os.path.join(OUTD_DEF, '分步校正_拼图_%s.png' % os.path.basename(npz)[8:23])
+    fig.savefig(fp, dpi=118, bbox_inches='tight'); plt.close(fig)
+    print('\n   接缝图 →', fp)
+    return dict(E0=E0, E1=E1, A=A, U0=U0, g=g, o=o, u0c=u0c, J0=Jb, J1=Jc, idx=idx)
+
+
 # ---------------------------------------------------------------- main
 def main():
     a = sys.argv[1:]
@@ -1278,6 +1488,13 @@ def main():
             nm = os.path.basename(npz)[8:23]
             figure_wave(npz, os.path.join(outdir, '开环全速_%s.png' % nm), v0mode=v0mode,
                         all_stage=all_stage)
+        return
+    if '--step-fix' in a:
+        for run in runs:
+            npz = resolve(run)
+            if not os.path.exists(npz):
+                print('!! 找不到', npz); continue
+            step_fix(npz, v0mode=(v0mode if v0mode != 'auto' else 'sw'), all_stage=all_stage)
         return
     if '--adc-gain' in a:
         DATA = {}

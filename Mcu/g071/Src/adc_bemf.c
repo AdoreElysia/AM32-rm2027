@@ -175,6 +175,22 @@ int16_t adc_bemf_get_delta(void)
      *   rank1 已经被 changeCompInput() 动态设成"当前悬空相"，所以
      *   ADCDataDMA[0] 就是它 ⇒ 直接相减即可（也省掉一次 switch 的开销，
      *   这个函数跑在 24kHz 的中断里）。 */
+#if RM2027_STEP_GAINOFF
+    /* ★ 六步分步增益+偏移：让"悬空相读数"在换相处连续、且过零落在步正中。
+     *   表与推导见 Inc/targets.h 的 RM2027_STEP_GAINOFF。只改【判据用的 d】，
+     *   窗口载荷仍记原始 va/vb/vc/v0 ⇒ 日志语义不变、离线可用同一张表复算。*/
+    {
+        static const int16_t sg[7] = RM2027_SG_NUM;
+        static const int16_t so[7] = RM2027_SO_OFF;
+        extern volatile uint8_t step;
+        uint8_t _s = step;
+        int16_t _d = (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0);
+        if (_s >= 1u && _s <= 6u) {
+            _d = (int16_t)(((int32_t)_d * sg[_s]) / 1000) + so[_s];
+        }
+        return _d;
+    }
+#endif
     return (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0);
 }
 
