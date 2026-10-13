@@ -2696,7 +2696,7 @@
  * 关掉：把 RM2027_ADC_GAIN_CAL 置 0（回到纯基线读数）。
  */
 #ifndef RM2027_ADC_GAIN_CAL
-#define RM2027_ADC_GAIN_CAL  1
+#define RM2027_ADC_GAIN_CAL  0
 #endif
 /* 归一系数 = 校正系数 × 1024（见上面 ③）
  *
@@ -2724,7 +2724,7 @@
  *   ⚠ 历史：`归档/1013-g071-V0软件均值` 上线跑败过（超时 42240、散布 18%），
  *     但那次没有三相增益归一，且多件事一起改 ⇒ 本轮只改这一件、并保留硬件 V0 到日志里。 */
 #ifndef RM2027_V0_SOFTMEAN
-#define RM2027_V0_SOFTMEAN  1
+#define RM2027_V0_SOFTMEAN  0
 #endif
 
 /* ★★ 2026-10-13 加长 ADC 采样时间 + 缩小 CCR4（用户方案：要更合理的采样结果）★★
