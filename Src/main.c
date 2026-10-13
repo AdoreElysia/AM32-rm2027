@@ -865,6 +865,8 @@ volatile uint16_t lock_bad_steps = 0;   /* 连续不合格的步数 */
 volatile uint16_t lock_trips = 0;       /* 累计判失锁次数 */
 volatile int16_t  lock_last_amp = 0;    /* 最近一步的幅值（诊断）*/
 static int16_t lk_mx1, lk_mx2, lk_mn1, lk_mn2;
+static uint32_t lk_buf[16];   /* 最近 16 步的 A×ci，取中位当基准（对偶发异常免疫）*/
+static uint8_t  lk_bi = 0, lk_bn = 0;
 static uint8_t lk_last_step = 0;
 
 /* 每帧由 ADC 中断调用（传【原始】delta：锁定判据要的是真实反电势，与补偿无关）*/
@@ -889,8 +891,25 @@ void lock_frame(int16_t d_raw, uint8_t st)
          *   （换相被漏记）⇒ A 正常但 ci 很大 ⇒ 乘积虚高。
          *   ⇒ 上升改成每步最多涨 1/64（一次瞬态只能推动 1.6%），下降仍走慢衰减。
          *   修正②：连续不合格从 6 步加到 10 步（一个电周期以上），更抗瞬时抖动。 */
-        if (f > lock_flux_ref) { lock_flux_ref += (f - lock_flux_ref) >> 6; }
-        else { lock_flux_ref -= (lock_flux_ref >> 7) + 1u; }
+        /* ★★★ 2026-10-13 修正③：基准改用【最近 16 步 A×ci 的中位数】★★★
+         *   前两版用"峰保持"当基准，都被"step 窗口跨了不止一个电周期"（换相被漏记）
+         *   的偶发异常抬飞：第一版抬到 95 万（健康 25 万）⇒ 误停；
+         *   加限速后又缓慢爬到 128 万（当时 A=240 码明明很健康）⇒ 又误停。
+         *   中位数对偶发异常天然免疫 ⇒ 一次异常最多占 16 个样本里的 1 个，动不了中位。
+         *   （16 个数排序 ~120 次操作，每步只做一次 ≈ 1kHz ⇒ 开销可忽略。）*/
+        lk_buf[lk_bi] = f;
+        lk_bi = (uint8_t)((lk_bi + 1u) & 15u);
+        if (lk_bn < 16u) { lk_bn++; }
+        {
+            uint32_t tmp[16];
+            for (uint8_t _i = 0; _i < lk_bn; _i++) { tmp[_i] = lk_buf[_i]; }
+            for (uint8_t _i = 0; _i < lk_bn; _i++) {
+                for (uint8_t _j = (uint8_t)(_i + 1u); _j < lk_bn; _j++) {
+                    if (tmp[_j] < tmp[_i]) { uint32_t _x = tmp[_i]; tmp[_i] = tmp[_j]; tmp[_j] = _x; }
+                }
+            }
+            lock_flux_ref = tmp[lk_bn >> 1];
+        }
         if (!ol_startup_arm && running && lock_flux_ref > 30000u) {
             if (f < (lock_flux_ref >> 1)) {
                 if (++lock_bad_steps >= 10u) {
