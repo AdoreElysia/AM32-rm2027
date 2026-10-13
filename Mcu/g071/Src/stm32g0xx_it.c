@@ -354,6 +354,19 @@ void DMA1_Channel2_3_IRQHandler(void)
                     }
                 }
 #endif
+#if RM2027_OFF_COMMON != 0
+                /* ★ 2026-10-13 隔离实验：只加【常量】偏移（六步同一个数），不做逐步跳变。
+                 *   为什么：五条补偿路径都是"每步减不同的值" ⇒ 每个换相点跳一次(奇/偶差 68 码)，
+                 *   同时又因为把 step5 修好而使 ci 减半。三件事混在一起 ⇒ 分不清罪魁。
+                 *   本实验只动"零点电平"这一个变量，逐步结构保持原样。
+                 *   ⇒ 环路活着 ⇒ 罪魁是逐步跳变/ci 减半（有救）；也崩 ⇒ 动零点本身致命。*/
+                {
+                    extern volatile uint8_t ol_startup_arm;
+                    if (!ol_startup_arm) {
+                        dzc_judge = (int16_t)(dzc - RM2027_OFF_COMMON);
+                    }
+                }
+#endif
                 uint8_t zc  = adc_zc_push(dzc_judge, (uint16_t)INTERVAL_TIMER->CNT);
 #if RM2027_LOCK_DETECT
                 /* ★ 锁定判据：喂【原始】delta（要的是真实反电势幅值，与补偿无关）*/

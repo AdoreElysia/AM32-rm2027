@@ -6407,3 +6407,10 @@
 #ifndef RM2027_LOCK_DETECT
 #define RM2027_LOCK_DETECT      1
 #endif
+
+/* ★ 2026-10-13 隔离实验：只加常量偏移（六步同一个数）。
+ *   +25 = 六步竖直中心的均值（{+42,−24,+44,−13,+92,+9}/6），即"共模"那一部分。
+ *   0 = 关闭。见 Mcu/g071/Src/stm32g0xx_it.c 的说明。 */
+#ifndef RM2027_OFF_COMMON
+#define RM2027_OFF_COMMON       25
+#endif
