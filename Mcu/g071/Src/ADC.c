@@ -79,7 +79,7 @@ void ADC_DMA_Callback()
     }
 #else
     /* ★ 2026-10-12 四路电压版：rank1~4 = VA/VB/VC/V0，悬空相【软件选】 */
-    /* ★ 序列重排后：rank1=温度 rank2=母线电压 rank3=VA rank4=VB rank5=VC rank6=V0 rank7=电流 */
+    /* ★ 序列重排（修正版）：rank1=电流 rank2=母线电压 rank3=VA rank4=VB rank5=VC rank6=V0 rank7=温度 */
     bemf_adc_va = ADCDataDMA[2];
     bemf_adc_vb = ADCDataDMA[3];
     bemf_adc_vc = ADCDataDMA[4];
@@ -92,9 +92,9 @@ void ADC_DMA_Callback()
         else if (st == 2u || st == 5u) { bemf_adc_vph = bemf_adc_va; }
         else                           { bemf_adc_vph = bemf_adc_vb; }
     }
-    ADC_raw_current = ADCDataDMA[6];   /* rank7 */
+    ADC_raw_current = ADCDataDMA[0];   /* rank1 */
     ADC_raw_volts   = ADCDataDMA[1];   /* rank2 */
-    ADC_raw_temp    = ADCDataDMA[0];   /* rank1 */
+    ADC_raw_temp    = ADCDataDMA[6];   /* rank7 */
 #endif
 #else
     ADC_raw_temp = ADCDataDMA[2];
@@ -376,10 +376,18 @@ void ADC_Init(void)
      *     四路相位改到第 3~6 次 ⇒ 期望把 A/B/C 倍率拉到 ~1.0。
      *   ⚠ 档数仍为 7 ⇒ 导通窗预算不变（不引入新的越界风险）。
      *   ⚠ DMA 回调里的下标必须同步：VA=2 VB=3 VC=4 V0=5 电流=6 电压=1 温度=0。 */
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1,
-        LL_ADC_CHANNEL_TEMPSENSOR);
-    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
-        LL_ADC_SAMPLINGTIME_COMMON_2);
+    /* ★★ 2026-10-13（分支 1013-g071-序列重排-相位后置·修正版）：★★
+     *   迭代#1 我把【最贵的温度（采样 160.5 周期 ≈ 2.5µs）】放到了最前 ⇒ 四路相位被推到
+     *   触发后 ~5.9µs，压到导通窗尾（duty 290 时只有 6.0µs）⇒ 实测【四路相位中位读到 0】
+     *   （而 rank7 电流仍正常，因为关断期有续流）⇒ 开环验证过不了、永不交棒。
+     *   ⇒ 本版改成"**便宜的在前、最贵的在最后**"：
+     *      rank1 电流(低阻分流，20 周期) → rank2 母线电压(20 周期)
+     *      → rank3~6 VA/VB/VC/V0（被两次转换暖机，只被推后 ~0.6µs）
+     *      → rank7 温度（最贵，放最后，晚到无所谓）
+     *   目的不变：让四路相位躲过"触发后头几次转换不准"，同时不把它们推出导通窗。 */
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, CURRENT_ADC_CHANNEL);
+    LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL,
+        LL_ADC_SAMPLINGTIME_COMMON_1);
 
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, VOLTAGE_ADC_CHANNEL);
     LL_ADC_SetChannelSamplingTime(ADC1, VOLTAGE_ADC_CHANNEL,
@@ -397,9 +405,10 @@ void ADC_Init(void)
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_6, BEMF_ADC_NEUTRAL_CH);
     LL_ADC_SetChannelSamplingTime(ADC1, BEMF_ADC_NEUTRAL_CH, LL_ADC_SAMPLINGTIME_COMMON_1);
 
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7, CURRENT_ADC_CHANNEL);
-    LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL,
-        LL_ADC_SAMPLINGTIME_COMMON_1);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_7,
+        LL_ADC_CHANNEL_TEMPSENSOR);
+    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
+        LL_ADC_SAMPLINGTIME_COMMON_2);
 #endif
 #else
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, CURRENT_ADC_CHANNEL);
