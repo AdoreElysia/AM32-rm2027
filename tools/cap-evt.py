@@ -109,7 +109,8 @@ def parse(buf):
             pay = np.frombuffer(buf[j + 12:j + 12 + 512 * 12], dtype=np.uint8).reshape(-1, 12)
             def _i16(c):
                 return pay[:, c].astype(np.int16) | (pay[:, c + 1].astype(np.int16) << 8)
-            wins.append((wseq, wts, _i16(0), _i16(2), _i16(4), _i16(6), _i16(8), pay[:, 10].copy()))
+            wins.append((wseq, wts, _i16(0), _i16(2), _i16(4), _i16(6), _i16(8), pay[:, 10].copy(),
+                         pay[:, 11].copy()))   # ★ 第 12 字节 = 未钳制的步内时间(ADC 帧, 饱和 255)
             i = j + 12 + 512 * 12
         else:
             i = j + 1
@@ -204,7 +205,8 @@ if wins:
              ts=np.array([w[1] for w in wins]),
              va=np.array([w[2] for w in wins]), vb=np.array([w[3] for w in wins]),
              vc=np.array([w[4] for w in wins]), v0=np.array([w[5] for w in wins]),
-             cur=np.array([w[6] for w in wins]), step=np.array([w[7] for w in wins]))
+             cur=np.array([w[6] for w in wins]), step=np.array([w[7] for w in wins]),
+             dbg=np.array([w[8] for w in wins]))   # ★ dbg = 未钳制的步内时间(ADC 帧, 饱和 255)
     print(f'  （四路电压+电流版：VA/VB/VC/V0/电流 各 512 点）')
     print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
 if not rows:

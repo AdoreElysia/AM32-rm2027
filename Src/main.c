@@ -2145,7 +2145,20 @@ void win_pump(void)
         win_pkt[k + 8] = (uint8_t)( win_cur[f]       & 0xFF);  /* ★ 电流 */
         win_pkt[k + 9] = (uint8_t)((win_cur[f] >> 8) & 0xFF);
         win_pkt[k +10] = win_step[f];
-        win_pkt[k +11] = 0u;                                   /* 保留 */
+        /* ★★★ 2026-10-13 第 12 字节（原来是保留 0）= 【未钳制的实测步内时间】★★★
+         *   为什么必须是它：commutate() 里有一道离群值剔除把实测步长钳在 [ci/4, 2ci]，
+         *   而 PeriodElapsedCallback 又把 ci 做了一阶滤波 ⇒ **剧烈抖动/停顿会被抹平**
+         *   （源码注释原话："用户肉眼看到的抖正是被这段抹掉的部分"）。
+         *   所以用 ci 判"有没有失步/抖"在逻辑上不成立 —— 必须记一个【没被钳过】的量。
+         *   这里记 adc_frame_cnt − ccm_last_frame = 距上一次换相过了多少个 ADC 帧
+         *   （1 帧 = 41.67µs = 83.33 拍），饱和到 255（255 帧 ≈ 10.6ms，足够覆盖堵转）。
+         *   ⇒ 每采样点一个锯齿，其【周期】就是该步的真实步长（未钳制、未滤波）✓
+         *   ⚠ 解析侧同步：cap-evt.py 现在把每采样点第 12 字节存成 npz 里的 dbg 数组。 */
+        {
+            extern volatile uint16_t adc_frame_cnt;
+            uint16_t el = (uint16_t)(adc_frame_cnt - ccm_last_frame);
+            win_pkt[k +11] = (el > 255u) ? 255u : (uint8_t)el;
+        }
     }
 
     win_seq++;
