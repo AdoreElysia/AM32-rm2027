@@ -76,24 +76,38 @@ def analyse(csvp):
         print(f'   ⚠⚠ 本轮作废：事件 {len(rows)} 条、其中锚定闭环只有 {int(anch.sum())} 条'
               f'（电机没转 / F1 油门没生效 / 采集没覆盖到闭环）。不要读这一轮的数！')
         return None
+    # ★ 只保留 ts【连续】的那一块：CSV 里会夹进 ts 错乱/陈旧的事件
+    #   （实测踩到：5s 采集算出"判分窗口 306.57s"，于是速率被垃圾分母算歪）。
+    #   切块界 = max(0.2s, 20×中位间隔)，取最长的一块当判分窗口。
     idx = np.where(anch)[0]
-    i0, i1 = int(idx[0]), int(idx[-1])
-    n_win = int(anch.sum())
+    gaps = np.diff(ts[idx]) if len(idx) > 1 else np.array([])
+    if len(gaps):
+        thr = max(0.2 * 24000.0, 20.0 * np.median(gaps))
+        brk = np.where(gaps > thr)[0]
+        blocks = np.split(idx, brk + 1)
+        blk = max(blocks, key=len)
+    else:
+        blk = idx
+    win = np.zeros(len(rows), bool); win[blk] = True
+    i0, i1 = int(blk[0]), int(blk[-1])
+    n_win = int(win.sum())
     dur = (ts[i1] - ts[i0]) / 24000.0
+    if n_win < int(anch.sum()):
+        print(f'   ⚠ 丢掉 {int(anch.sum())-n_win} 条 ts 错乱/陈旧的锚定事件（判分窗口取最长连续块）')
     print(f'   事件 {len(rows)}（开环 {int((stg==1).sum())} / stage0 {int((stg==0).sum())}）')
     print(f'   判分窗口 = 锚定闭环：{n_win} 条事件 / {dur:.2f}s'
           f'（占"被驱动时间" {100.0*anch.sum()/max(1,drv.sum()):.0f}%）')
     print(f'   工况：duty 中位 {np.median(du[anch]):.0f}   电流中位 {np.median(cur[anch]):.0f}'
           f'（P90 {np.percentile(cur[anch],90):.0f}）')
-    tw = tmo[i0:i1 + 1]
+    tw = tmo[win]
     n_tmo = int(tw.max() - tw.min())
     print(f'   ① ★漏过零（bemf_timeout 窗口内增量）= {n_tmo}'
           f'   ⇒ {n_tmo/max(dur,1e-9):.2f} 次/秒' + ('   ✅ 判据干净' if n_tmo == 0 else ''))
     if n_tmo:
         inc = np.where(np.diff(tw) > 0)[0] + 1
-        s_inc = st[i0:i1 + 1][inc]
+        s_inc = st[win][inc]
         print('      按事件 step 分布 ' + ' '.join(f'{s}:{int((s_inc==s).sum())}' for s in range(1, 7)))
-    dts = np.diff(ts); inw = anch[:-1] & anch[1:]
+    dts = np.diff(ts); inw = win[:-1] & win[1:]
     print('   ② 六步真实换相间隔（Δts 中位，拍）—— 只在锚定窗口内：')
     med = []
     for s in range(1, 7):
