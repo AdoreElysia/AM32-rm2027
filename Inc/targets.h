@@ -2626,6 +2626,32 @@
 #define RM2027_WIN_EVERY_N   8
 #endif
 
+/* ★★ 2026-10-14 自适应电压偏移（用户方案）★★
+ * 为什么用它而不是改 waitTime：有些步"根本认不到过零"（实测波形轮里 23% 的步整段无过零）
+ *   ⇒ 时间域没有误差信号可用；只有电压域能把判据的交点挪进信号幅度范围内。
+ * 两条硬依据（量出来的，详见 一切为了校准/03_本轮结论.md §十九）：
+ *   ① 过零方向按【奇偶】交替：奇步(1/3/5)下降、偶步(2/4/6)上升（106 个闭环窗，88~98% 一致）
+ *      交点 d = −o/g ⇒ 要"提前"检测：偶步 o 增、奇步 o 减
+ *   ② 该补的量是 15~230 码（六步过零位置 0.533~0.913，理想 0.500）
+ *      ⇒ 老表的 ±60 码限幅根本不够 ⇒ 这里限幅放到 ±RM2027_AO_CLAMP（默认 250）
+ * 误差信号 = 换相→过零延迟 / ci − 0.5（0.5 = 步正中 = 理想），用现成的 bemf_zc_time 即可。
+ * 计数器全部放 RAM、走 SWD 读 —— 不走串口（串口今晚卡死过 3 次）。 */
+#ifndef RM2027_AO_ADAPT
+#define RM2027_AO_ADAPT   1
+#endif
+#ifndef RM2027_AO_K
+#define RM2027_AO_K       300   /* 比例（千分比）：Δo = K/1000 × 误差拍数 */
+#endif
+#ifndef RM2027_AO_DEAD
+#define RM2027_AO_DEAD    120   /* 死区（拍） */
+#endif
+#ifndef RM2027_AO_STEPMAX
+#define RM2027_AO_STEPMAX 25    /* 单次最大改动（码） */
+#endif
+#ifndef RM2027_AO_CLAMP
+#define RM2027_AO_CLAMP   250   /* 偏移限幅（码）—— 实测 step5 需要 ~230 码 */
+#endif
+
 #ifndef RM2027_NEVER_HANDOVER
 #define RM2027_NEVER_HANDOVER   0
 #endif  /* 20kHz 拍：1000 = 50ms 持续才切（躲瞬时尖峰）*/

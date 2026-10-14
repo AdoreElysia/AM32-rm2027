@@ -811,6 +811,14 @@ uint32_t ol_bench_oc_trips = 0;
  *   等到某一帧窗口通过才被"收下"，那时的 CNT 是"收下时刻"、不是过零时刻。
  *   实测（埋点）靠 delta 分出两类（±5~±39 是本帧翻转、±374~±409 是滞后几百帧）
  *   才把这条钉死。用它做 thiszctime，CNT/CI 才能收敛到 1.0。 */
+#if RM2027_AO_ADAPT
+/* ★ 自适应电压偏移的运行时状态（RAM，走 SWD 读；不进事件载荷 ⇒ 不占串口带宽） */
+volatile int16_t  ao_off[7]  = {0,0,0,0,0,0,0};   /* 每步当前偏移（码），d' = d + ao_off[step] */
+volatile uint16_t ao_chg[7]  = {0,0,0,0,0,0,0};   /* 每步偏移被改过几次（★收敛判据） */
+volatile uint16_t ao_nozc[7] = {0,0,0,0,0,0,0};   /* 每步"整段无过零"次数（可见性判据） */
+volatile int16_t  ao_err[7]  = {0,0,0,0,0,0,0};   /* 最近一次误差（拍，正=过零偏晚） */
+#endif
+
 volatile uint16_t bemf_zc_time = 0;
 /* ★ 2026-10-12 记录【这个过零发生在哪一步】—— 每步 waitTime 表要用它当索引 */
 volatile uint8_t  bemf_zc_step = 0;
@@ -2611,6 +2619,29 @@ void interruptRoutine()
      *   "关键修复③"。用错它会系统地短量 thiszctime ⇒ CNT/CI 恒 0.6、ci 被带小
      *   ⇒ runaway ⇒ 永久丢锁（22.5ms 兜底硬踹 ⇒ ~43 RPM 慢抖）。 */
     thiszctime = bemf_zc_time;
+#if RM2027_AO_ADAPT
+    /* ★★ 自适应电压偏移：误差 = 换相→过零延迟 / ci − 0.5（0.5 = 步正中 = 理想）★★
+     *   bemf_zc_time 就是【换相→过零】的拍数（定时器每次换相清零）⇒ 直接可用。
+     *   调的是【过零所在那一步】的偏移（bemf_zc_step），不是"接下来要换到的那一步"。
+     *   方向：交点 d = −o/g ⇒ 提前检测：偶步(过零上升) o 增、奇步(过零下降) o 减。 */
+    {
+        uint8_t zs = bemf_zc_step;
+        if (zs >= 1u && zs <= 6u) {
+            int32_t err = (int32_t)bemf_zc_time - ((int32_t)commutation_interval >> 1);
+            ao_err[zs] = (int16_t)(err > 32767 ? 32767 : (err < -32768 ? -32768 : err));
+            if (err > RM2027_AO_DEAD || err < -RM2027_AO_DEAD) {
+                int32_t sgn = (zs & 1u) ? -1 : +1;
+                int32_t d = (sgn * (int32_t)RM2027_AO_K * err) / 1000;
+                if (d >  RM2027_AO_STEPMAX) d =  RM2027_AO_STEPMAX;
+                if (d < -RM2027_AO_STEPMAX) d = -RM2027_AO_STEPMAX;
+                int32_t nv = (int32_t)ao_off[zs] + d;
+                if (nv >  RM2027_AO_CLAMP) nv =  RM2027_AO_CLAMP;
+                if (nv < -RM2027_AO_CLAMP) nv = -RM2027_AO_CLAMP;
+                if ((int16_t)nv != ao_off[zs]) { ao_off[zs] = (int16_t)nv; ao_chg[zs]++; }
+            }
+        }
+    }
+#endif
     SET_INTERVAL_TIMER_COUNT(0);
     SET_AND_ENABLE_COM_INT(waitTime+1); // enable COM timer interrupt
     __enable_irq();
@@ -4512,6 +4543,10 @@ if(zero_crosses < 5){
               zero_throttle_brake_active = 0;   // reset zero throttle brake on back emf timeout (rotation stop)
               if(running){
                 bemf_timeout_happened++;
+#if RM2027_AO_ADAPT
+                { uint8_t _s = (uint8_t)step;
+                  if (_s >= 1u && _s <= 6u) ao_nozc[_s]++; }   /* 这一步整段没认到过零 */
+#endif
                 
                 temp_comp_pwm = eepromBuffer.comp_pwm;
                 maskPhaseInterrupts();
