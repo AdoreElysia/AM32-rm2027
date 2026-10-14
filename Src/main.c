@@ -2132,6 +2132,20 @@ void win_pump(void)
     }
     if (!tx_ready()) { return; }            /* 串口忙（可能事件流在用）⇒ 等下一轮 */
     if (win_state != 1u) { return; }        /* 只有"采满待发"才动 */
+#if RM2027_WIN_EVERY_N > 1
+    /* ★ 窗口流降采样：只发每 N 个窗中的一个。其余在【组包之前】就丢掉
+     *   —— 组包本身要跑 512 次循环、发送要占 DMA，两者都是扰动的来源。
+     *   win_seq 照旧 +1（主机端可从 seq 空档看出降采样），win_sent 不加。 */
+    {
+        static uint16_t win_skip = 0;
+        if (win_skip) {
+            win_skip--;
+            win_n = 0; win_state = 0u; win_seq++;
+            return;
+        }
+        win_skip = (RM2027_WIN_EVERY_N - 1);
+    }
+#endif
 
     /* 组包（此时 ISR 已停写：win_state != 0 时 win_push 直接返回）*/
     win_pkt[0] = 0xA5; win_pkt[1] = 0x5A; win_pkt[2] = 0xA5; win_pkt[3] = 0x5A;
