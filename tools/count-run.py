@@ -51,6 +51,24 @@ def poke(sym, val):
     return sh('tools/esc-dbg.sh', 'poke', sym, str(val)).stdout.strip()
 
 
+def link_bytes(secs=3.0):
+    """读串口 N 秒，返回字节数。用来在跑前确认 ESC 的发送侧没卡死。"""
+    try:
+        import serial
+    except Exception:
+        return -1
+    try:
+        sp = serial.Serial('/dev/ttyUSB0', 1000000, timeout=0.5)
+        sp.reset_input_buffer()
+        n, t0 = 0, time.time()
+        while time.time() - t0 < secs:
+            n += len(sp.read(65536))
+        sp.close()
+        return n
+    except Exception:
+        return -1
+
+
 def analyse(csvp):
     rows = list(csv.DictReader(open(csvp)))
     if not rows:
@@ -76,24 +94,57 @@ def analyse(csvp):
         print(f'   ⚠⚠ 本轮作废：事件 {len(rows)} 条、其中锚定闭环只有 {int(anch.sum())} 条'
               f'（电机没转 / F1 油门没生效 / 采集没覆盖到闭环）。不要读这一轮的数！')
         return None
+    # ★ 只保留 ts【连续】的那一块：CSV 里会夹进 ts 错乱/陈旧的事件
+    #   （实测踩到：5s 采集算出"判分窗口 306.57s"，于是速率被垃圾分母算歪）。
+    #   切块界 = max(0.2s, 20×中位间隔)，取最长的一块当判分窗口。
     idx = np.where(anch)[0]
-    i0, i1 = int(idx[0]), int(idx[-1])
-    n_win = int(anch.sum())
-    dur = (ts[i1] - ts[i0]) / 24000.0
+    gaps = np.diff(ts[idx]) if len(idx) > 1 else np.array([])
+    if len(gaps):
+        thr = max(0.2 * 24000.0, 20.0 * np.median(gaps))
+        brk = np.where(gaps > thr)[0]
+        blocks = np.split(idx, brk + 1)
+        blk = max(blocks, key=len)
+    else:
+        blk = idx
+    win = np.zeros(len(rows), bool); win[blk] = True
+    i0, i1 = int(blk[0]), int(blk[-1])
+    n_win = int(win.sum())
+    # ★★ 时长不能用"末 ts − 首 ts" ★★
+    #   实测踩到大坑：补偿 ON 那轮算出 0.18s，而固件的 cl_runs_stopped 说每轮都跑满了
+    #   1500ms 到点停机 ⇒ 真相是 ts 里有错乱/跳跃的事件，把窗口切碎了。
+    #   ⇒ 改成【对窗口内相邻事件的 Δts 求和】（只累加 ≤20×中位间隔的合理间隔），
+    #     对孤立的 ts 跳变免疫。
+    _pair = win[:-1] & win[1:]
+    _d = np.diff(ts)[_pair]
+    _ok = _d <= max(0.05 * 24000.0, 20.0 * (np.median(_d) if _d.size else 1.0))
+    dur = float(_d[_ok].sum()) / 24000.0
+    _lost = int((~_ok).sum())
+    if _lost:
+        print(f'   （时长按 Δts 累加：跳过 {_lost} 个 ts 跳跃的间隔）')
+    if n_win < int(anch.sum()):
+        print(f'   ⚠ 丢掉 {int(anch.sum())-n_win} 条 ts 错乱/陈旧的锚定事件（判分窗口取最长连续块）')
+    # ★ 窗口太短就不许判：实测踩到 0.18s/293 条的窗口照样被打上"✅ 判据干净"，
+    #   那是假阳性——0 次超时在小窗口里没有统计意义。至少 0.8s 且 600 条才判。
+    if dur < 0.8 or n_win < 600:
+        print(f'   ⚠⚠ 本轮窗口太短（{dur:.2f}s / {n_win} 条，健康时应 ≥1.3s/~1000 条）'
+              f' ⇒ 闭环没真正跑起来（停滞或跑飞），本轮不作判分。')
+        rate = n_win / max(dur, 1e-9)
+        print(f'   （参考：窗口内换相速率仅 {rate:.0f} 次/秒；健康时 ~836/秒）')
+        return None
     print(f'   事件 {len(rows)}（开环 {int((stg==1).sum())} / stage0 {int((stg==0).sum())}）')
     print(f'   判分窗口 = 锚定闭环：{n_win} 条事件 / {dur:.2f}s'
           f'（占"被驱动时间" {100.0*anch.sum()/max(1,drv.sum()):.0f}%）')
     print(f'   工况：duty 中位 {np.median(du[anch]):.0f}   电流中位 {np.median(cur[anch]):.0f}'
           f'（P90 {np.percentile(cur[anch],90):.0f}）')
-    tw = tmo[i0:i1 + 1]
+    tw = tmo[win]
     n_tmo = int(tw.max() - tw.min())
     print(f'   ① ★漏过零（bemf_timeout 窗口内增量）= {n_tmo}'
           f'   ⇒ {n_tmo/max(dur,1e-9):.2f} 次/秒' + ('   ✅ 判据干净' if n_tmo == 0 else ''))
     if n_tmo:
         inc = np.where(np.diff(tw) > 0)[0] + 1
-        s_inc = st[i0:i1 + 1][inc]
+        s_inc = st[win][inc]
         print('      按事件 step 分布 ' + ' '.join(f'{s}:{int((s_inc==s).sum())}' for s in range(1, 7)))
-    dts = np.diff(ts); inw = anch[:-1] & anch[1:]
+    dts = np.diff(ts); inw = win[:-1] & win[1:]
     print('   ② 六步真实换相间隔（Δts 中位，拍）—— 只在锚定窗口内：')
     med = []
     for s in range(1, 7):
@@ -114,6 +165,30 @@ def analyse(csvp):
 def main():
     print(f'===== 计数轮 {TAG}  （{SECS:.0f}s 采集，闭环额度 1500ms）=====')
     cooldown()
+    # ★★ 跑前先验串口活着 ★★
+    #   踩过（2026-10-14）：ESC 的发送侧会卡死在"待发送"（win_seq==win_sent 不再增长、
+    #   tx_ready() 恒假），此时电机照转、但一个字节都收不到 ⇒ 会被误判成"电机没转/
+    #   没交棒"（我上一条就这么误判了）。win_enable=1 时窗口流应持续 ~100KB/s。
+    nb = link_bytes(3.0)
+    if nb >= 0 and nb < 5000:
+        print(f'   ⚠⚠ 串口卡死：3 秒只收到 {nb} 字节（正常应 ~300000）'
+              f' ⇒ ESC 发送侧停摆，本轮放弃。先复位/重烧一次再跑。')
+        return
+    print(f'   串口存活检查：3 秒 {nb} 字节 ✓')
+    # ★★ 跑前查母线电压 ★★（2026-10-14 踩到）
+    #   母线没电时固件照样"跑斜坡"：duty 290、电流却只有 5 单位（≈0.08A）⇒ 无电流、
+    #   无转矩、无反电势 ⇒ 永远认不到过零、永远不交棒，最后撞开环 8s 上限。
+    #   我当时把它当成"OFF+6000 不交棒"的固件异常查了两轮 —— 先读电压就不会。
+    bv = sh('tools/esc-dbg.sh', 'peek', 'battery_voltage')
+    try:
+        raw = int(bv.stdout.strip().rsplit('=', 1)[-1].split('(')[0].strip(), 16)
+        volts = (raw & 0xFFFF) / 100.0
+    except Exception:
+        volts = float('nan')
+    if not (volts == volts) or volts < 10.0:
+        print(f'   ⚠⚠ 母线电压只有 {volts:.2f} V（应 ~12 V）⇒ 12V 没给上/掉了，本轮放弃。')
+        return
+    print(f'   母线电压 {volts:.2f} V ✓')
     print('   → 关窗口流（把带宽全给事件流）')
     print('   ', poke('win_enable', 0))
     before = set(glob.glob(os.path.join(OUTD, 'evt_run_*.csv')))
