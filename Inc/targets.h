@@ -2808,7 +2808,7 @@
 #endif
 
 #ifndef RM2027_STEP_GAINOFF
-#define RM2027_STEP_GAINOFF  0
+#define RM2027_STEP_GAINOFF  1
 #endif
 /* 索引按 step 1..6；g 用千分比（1000 = ×1.000） */
 #ifndef RM2027_SG_NUM
