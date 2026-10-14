@@ -51,6 +51,24 @@ def poke(sym, val):
     return sh('tools/esc-dbg.sh', 'poke', sym, str(val)).stdout.strip()
 
 
+def link_bytes(secs=3.0):
+    """读串口 N 秒，返回字节数。用来在跑前确认 ESC 的发送侧没卡死。"""
+    try:
+        import serial
+    except Exception:
+        return -1
+    try:
+        sp = serial.Serial('/dev/ttyUSB0', 1000000, timeout=0.5)
+        sp.reset_input_buffer()
+        n, t0 = 0, time.time()
+        while time.time() - t0 < secs:
+            n += len(sp.read(65536))
+        sp.close()
+        return n
+    except Exception:
+        return -1
+
+
 def analyse(csvp):
     rows = list(csv.DictReader(open(csvp)))
     if not rows:
@@ -147,6 +165,16 @@ def analyse(csvp):
 def main():
     print(f'===== 计数轮 {TAG}  （{SECS:.0f}s 采集，闭环额度 1500ms）=====')
     cooldown()
+    # ★★ 跑前先验串口活着 ★★
+    #   踩过（2026-10-14）：ESC 的发送侧会卡死在"待发送"（win_seq==win_sent 不再增长、
+    #   tx_ready() 恒假），此时电机照转、但一个字节都收不到 ⇒ 会被误判成"电机没转/
+    #   没交棒"（我上一条就这么误判了）。win_enable=1 时窗口流应持续 ~100KB/s。
+    nb = link_bytes(3.0)
+    if nb >= 0 and nb < 5000:
+        print(f'   ⚠⚠ 串口卡死：3 秒只收到 {nb} 字节（正常应 ~300000）'
+              f' ⇒ ESC 发送侧停摆，本轮放弃。先复位/重烧一次再跑。')
+        return
+    print(f'   串口存活检查：3 秒 {nb} 字节 ✓')
     print('   → 关窗口流（把带宽全给事件流）')
     print('   ', poke('win_enable', 0))
     before = set(glob.glob(os.path.join(OUTD, 'evt_run_*.csv')))
