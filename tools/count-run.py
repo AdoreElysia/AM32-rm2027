@@ -162,6 +162,38 @@ def analyse(csvp):
     return n_tmo
 
 
+def write_meta(csvp, secs, log_lines):
+    """★ 给每一轮写一份【旁挂版本档案】—— 这是今晚最大的痛点：
+    CSV 本身不带任何版本信息，导致"这一轮到底是什么配置"要靠回忆 ✗。
+    档案内容：时间 / 分支 / 提交 / 六个关键开关 / 判分结果 / 自适应状态（若有）。"""
+    try:
+        branch = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                                cwd=REPO, capture_output=True, text=True).stdout.strip()
+        commit = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'],
+                                cwd=REPO, capture_output=True, text=True).stdout.strip()
+        src = open(os.path.join(REPO, 'Inc/targets.h')).read()
+        keys = []
+        for k in ('USE_ADC_BEMF', 'RM2027_CL_RUN_MS', 'RM2027_CL_ANCHOR_DUTY', 'RM2027_STEP_GAINOFF',
+                  'RM2027_AO_ADAPT', 'RM2027_ADC_GAIN_CAL', 'RM2027_V0_SOFTMEAN',
+                  'RM2027_ADC_AC_SWAP', 'RM2027_NO_DESYNC_DUTYCUT', 'RM2027_WIN_EVERY_N',
+                  'RM2027_CL_PARITY_OFF', 'RM2027_LOCK_DETECT', 'ADC_TRIGGER_CCR4',
+                  'RM2027_NEVER_HANDOVER', 'RM2027_OL_ARM_ONLY'):
+            m = re.search(r'^#define\s+' + k + r'\b\s*(.*)$', src, re.M)
+            if m:
+                keys.append(f'{k} = {m.group(1).strip()[:40]}')
+        lines = [f'# 采集轮档案  {os.path.basename(csvp)}',
+                 f'时间      : {time.strftime("%Y-%m-%d %H:%M:%S")}   采集 {secs:.0f}s',
+                 f'分支/提交 : {branch} @ {commit}',
+                 f'二进制    : {subprocess.run(["sha256sum","obj/AM32_RM2027_ESC_G071_2.21.bin"],cwd=REPO,capture_output=True,text=True).stdout[:16]}',
+                 '', '## 关键开关（从当前 targets.h 解析）'] + ['  ' + k for k in keys]
+        lines += ['', '## 判分'] + ['  ' + l for l in log_lines]
+        out = csvp.replace('.csv', '_meta.txt')
+        open(out, 'w').write('\n'.join(lines) + '\n')
+        print(f'   版本档案 → {os.path.basename(out)}')
+    except Exception as e:
+        print(f'   （写版本档案失败：{e}）')
+
+
 def main():
     print(f'===== 计数轮 {TAG}  （{SECS:.0f}s 采集，闭环额度 1500ms）=====')
     cooldown()
@@ -187,7 +219,12 @@ def main():
         print('❌ 没产生新 CSV'); return
     csvp = sorted(after, key=os.path.getmtime)[-1]
     print(f'   CSV {os.path.basename(csvp)}')
-    analyse(csvp)
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        analyse(csvp)
+    out = buf.getvalue(); print(out, end='')
+    write_meta(csvp, SECS, out.strip().splitlines())
     print('   → 恢复窗口流')
     print('   ', poke('win_enable', 1))
 
