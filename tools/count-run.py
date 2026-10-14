@@ -91,7 +91,18 @@ def analyse(csvp):
     win = np.zeros(len(rows), bool); win[blk] = True
     i0, i1 = int(blk[0]), int(blk[-1])
     n_win = int(win.sum())
-    dur = (ts[i1] - ts[i0]) / 24000.0
+    # ★★ 时长不能用"末 ts − 首 ts" ★★
+    #   实测踩到大坑：补偿 ON 那轮算出 0.18s，而固件的 cl_runs_stopped 说每轮都跑满了
+    #   1500ms 到点停机 ⇒ 真相是 ts 里有错乱/跳跃的事件，把窗口切碎了。
+    #   ⇒ 改成【对窗口内相邻事件的 Δts 求和】（只累加 ≤20×中位间隔的合理间隔），
+    #     对孤立的 ts 跳变免疫。
+    _pair = win[:-1] & win[1:]
+    _d = np.diff(ts)[_pair]
+    _ok = _d <= max(0.05 * 24000.0, 20.0 * (np.median(_d) if _d.size else 1.0))
+    dur = float(_d[_ok].sum()) / 24000.0
+    _lost = int((~_ok).sum())
+    if _lost:
+        print(f'   （时长按 Δts 累加：跳过 {_lost} 个 ts 跳跃的间隔）')
     if n_win < int(anch.sum()):
         print(f'   ⚠ 丢掉 {int(anch.sum())-n_win} 条 ts 错乱/陈旧的锚定事件（判分窗口取最长连续块）')
     # ★ 窗口太短就不许判：实测踩到 0.18s/293 条的窗口照样被打上"✅ 判据干净"，
