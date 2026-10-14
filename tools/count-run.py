@@ -94,6 +94,14 @@ def analyse(csvp):
     dur = (ts[i1] - ts[i0]) / 24000.0
     if n_win < int(anch.sum()):
         print(f'   ⚠ 丢掉 {int(anch.sum())-n_win} 条 ts 错乱/陈旧的锚定事件（判分窗口取最长连续块）')
+    # ★ 窗口太短就不许判：实测踩到 0.18s/293 条的窗口照样被打上"✅ 判据干净"，
+    #   那是假阳性——0 次超时在小窗口里没有统计意义。至少 0.8s 且 600 条才判。
+    if dur < 0.8 or n_win < 600:
+        print(f'   ⚠⚠ 本轮窗口太短（{dur:.2f}s / {n_win} 条，健康时应 ≥1.3s/~1000 条）'
+              f' ⇒ 闭环没真正跑起来（停滞或跑飞），本轮不作判分。')
+        rate = n_win / max(dur, 1e-9)
+        print(f'   （参考：窗口内换相速率仅 {rate:.0f} 次/秒；健康时 ~836/秒）')
+        return None
     print(f'   事件 {len(rows)}（开环 {int((stg==1).sum())} / stage0 {int((stg==0).sum())}）')
     print(f'   判分窗口 = 锚定闭环：{n_win} 条事件 / {dur:.2f}s'
           f'（占"被驱动时间" {100.0*anch.sum()/max(1,drv.sum()):.0f}%）')
