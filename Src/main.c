@@ -817,6 +817,8 @@ volatile int16_t  ao_off[7]  = {0,0,0,0,0,0,0};   /* 每步当前偏移（码）
 volatile uint16_t ao_chg[7]  = {0,0,0,0,0,0,0};   /* 每步偏移被改过几次（★收敛判据） */
 volatile uint16_t ao_nozc[7] = {0,0,0,0,0,0,0};   /* 每步"整段无过零"次数（可见性判据） */
 volatile int16_t  ao_err[7]  = {0,0,0,0,0,0,0};   /* 最近一次误差（拍，正=过零偏晚） */
+volatile uint16_t ao_big[7]  = {0,0,0,0,0,0,0};   /* ★ >30% ci 的超窗次数（这部分该交给 waitTime） */
+volatile uint16_t ao_clip[7] = {0,0,0,0,0,0,0};   /* ★ 被每步动态限幅挡住的次数 */
 #endif
 
 volatile uint16_t bemf_zc_time = 0;
@@ -2620,24 +2622,33 @@ void interruptRoutine()
      *   ⇒ runaway ⇒ 永久丢锁（22.5ms 兜底硬踹 ⇒ ~43 RPM 慢抖）。 */
     thiszctime = bemf_zc_time;
 #if RM2027_AO_ADAPT
-    /* ★★ 自适应电压偏移：误差 = 换相→过零延迟 / ci − 0.5（0.5 = 步正中 = 理想）★★
-     *   bemf_zc_time 就是【换相→过零】的拍数（定时器每次换相清零）⇒ 直接可用。
-     *   调的是【过零所在那一步】的偏移（bemf_zc_step），不是"接下来要换到的那一步"。
-     *   方向：交点 d = −o/g ⇒ 提前检测：偶步(过零上升) o 增、奇步(过零下降) o 减。 */
+    /* ★★ 自适应电压偏移 第2版：误差 = bemf_zc_time − ci/2（拍，正=过零偏晚）★★
+     *   三档：≤10%ci 不动 / 10~30%ci 按比例修 / >30%ci 只记账（交给 waitTime）
+     *   方向：交点 d=−o/g ⇒ 提前检测：偶步(过零上升) o 增、奇步(过零下降) o 减
+     *   限幅：每步动态 = 0.8×A_s（超过 A_s 交点出弧线 ⇒ 丢反馈 ⇒ 必然跑飞）*/
     {
+        static const int16_t as_tab[7] = RM2027_AO_AS;
         uint8_t zs = bemf_zc_step;
         if (zs >= 1u && zs <= 6u) {
             int32_t err = (int32_t)bemf_zc_time - ((int32_t)commutation_interval >> 1);
+            int32_t win = ((int32_t)commutation_interval * RM2027_AO_WIN_PCT) / 1000;
+            int32_t big = ((int32_t)commutation_interval * RM2027_AO_BIG_PCT) / 1000;
             ao_err[zs] = (int16_t)(err > 32767 ? 32767 : (err < -32768 ? -32768 : err));
-            if (err > RM2027_AO_DEAD || err < -RM2027_AO_DEAD) {
-                int32_t sgn = (zs & 1u) ? -1 : +1;
-                int32_t d = (sgn * (int32_t)RM2027_AO_K * err) / 1000;
-                if (d >  RM2027_AO_STEPMAX) d =  RM2027_AO_STEPMAX;
-                if (d < -RM2027_AO_STEPMAX) d = -RM2027_AO_STEPMAX;
-                int32_t nv = (int32_t)ao_off[zs] + d;
-                if (nv >  RM2027_AO_CLAMP) nv =  RM2027_AO_CLAMP;
-                if (nv < -RM2027_AO_CLAMP) nv = -RM2027_AO_CLAMP;
-                if ((int16_t)nv != ao_off[zs]) { ao_off[zs] = (int16_t)nv; ao_chg[zs]++; }
+            if (err > win || err < -win) {
+                if (err > big || err < -big) {
+                    ao_big[zs]++;                       /* 超窗太大：只记账 */
+                } else {
+                    int32_t sgn = (zs & 1u) ? -1 : +1;
+                    int32_t lim = ((int32_t)as_tab[zs] * 8) / 10;
+                    if (lim > RM2027_AO_CLAMP) lim = RM2027_AO_CLAMP;
+                    int32_t d = (sgn * (int32_t)RM2027_AO_K * err) / 1000;
+                    if (d >  RM2027_AO_STEPMAX) d =  RM2027_AO_STEPMAX;
+                    if (d < -RM2027_AO_STEPMAX) d = -RM2027_AO_STEPMAX;
+                    int32_t nv = (int32_t)ao_off[zs] + d;
+                    if (nv >  lim) { nv =  lim; ao_clip[zs]++; }
+                    if (nv < -lim) { nv = -lim; ao_clip[zs]++; }
+                    if ((int16_t)nv != ao_off[zs]) { ao_off[zs] = (int16_t)nv; ao_chg[zs]++; }
+                }
             }
         }
     }

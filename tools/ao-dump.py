@@ -58,8 +58,13 @@ off = s16(rd('ao_off', 4))[:7]
 chg = u16(rd('ao_chg', 4))[:7]
 noz = u16(rd('ao_nozc', 4))[:7]
 err = s16(rd('ao_err', 4))[:7]
+try:
+    big = u16(rd('ao_big', 4))[:7]
+    clip = u16(rd('ao_clip', 4))[:7]
+except Exception:
+    big = clip = [0] * 7
 print(f'=== 自适应电压偏移状态 {TAG} ===')
-print(f'{"step":>5}{"ao_off(码)":>12}{"改过几次":>10}{"无过零次数":>11}{"最近误差(拍)":>13}')
+print(f'{"step":>5}{"ao_off(码)":>12}{"改动":>6}{"无过零":>8}{"超窗>30%ci":>11}{"限幅次数":>9}{"最近误差(拍)":>13}')
 for s in range(1, 7):
-    print(f'{s:5d}{off[s]:12d}{chg[s]:10d}{noz[s]:11d}{err[s]:13d}')
-print(f'  合计：改动 {sum(chg[1:7])} 次   无过零 {sum(noz[1:7])} 次')
+    print(f'{s:5d}{off[s]:12d}{chg[s]:6d}{noz[s]:8d}{big[s]:11d}{clip[s]:9d}{err[s]:13d}')
+print(f'  合计：改动 {sum(chg[1:7])}   无过零 {sum(noz[1:7])}   超窗 {sum(big[1:7])}   限幅 {sum(clip[1:7])}')
