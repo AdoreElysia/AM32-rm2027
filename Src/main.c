@@ -526,15 +526,7 @@ volatile uint8_t  ccm_step[CCM_N];
                                   *   [44..45] input（速度环输入）
                                   *   [46..47] stall_protection_adjust(低16)
                                   *   [48] crc8(前 48 字节) */
-/* ★★ xien/n2：事件环形缓冲 1024 -> 4096 字节 ★★ 2026-10-14
- *  为什么必须扩（这是"开窗口流就丢事件"的直接机理）：
- *    · 一包事件 49 B ⇒ 1024 B 只能存 **20 个事件**（≈20 ms @1000 次/s）。
- *    · 而窗口流一包是 6156 B 一次性交给 DMA，**DMA 被占住 61.6 ms（1 Mbaud）/ 30.8 ms（2 Mbaud）**
- *      期间 evt_pump 只能 `return`（tx_ready 假）⇒ 期间产生的换相事件全塞进这个环，
- *      1 Mbaud 下 61.6 ms × 1000 次/s ≈ 62 个事件 > 20 ⇒ **每发一窗就丢 ~40 个事件**。
- *    · 4096 B = 83 个事件 ≈ 83 ms @1000 次/s ⇒ 覆盖 2 Mbaud 的一次窗口发送（30.8 ms）绰绰有余。
- *  ⚠ RAM 代价 3 KB（本芯片 16 KB，且有 64KB 宏的坑，改大前先看 targets.h 的注释）。 */
-#define EVT_BUF_N   4096
+#define EVT_BUF_N   1024
 #define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
 volatile uint16_t evt_head;
@@ -696,6 +688,15 @@ uint32_t total = 0;
 uint16_t readings[50];
 
 uint8_t bemf_timeout_happened = 0;
+/* ★★ 2026-10-14 丢过零滤波（RM2027_ZCL_FILTER）的运行时状态与观测 ★★
+ *   全部放 RAM、走 SWD 读（tools/zcl-dump.py），不占串口带宽（p[] 49 字节已满）。
+ *   逻辑见：超时分支（tenKhzRoutine 里"丢过零兜底"处）、interruptRoutine（清计数）、
+ *   PeriodElapsedCallback（刷新 zcl_pred）。 */
+volatile uint16_t zcl_pred = 0;      /* 超时阈值附加项：正常换相后=本步 waitTime；超时换相后=0 */
+volatile uint8_t  zcl_miss = 0;      /* 连续丢失计数：真过零被接受时清 0，超时兜底时 +1 */
+volatile uint16_t zcl_hold_n = 0;    /* 观测：丢 1~2 个（惯性按原节拍走）的步数累计 */
+volatile uint16_t zcl_slow_n = 0;    /* 观测：连续丢 ≥3 后降频的步数累计 */
+volatile uint8_t  zcl_miss_max = 0;  /* 观测：最长连续丢失纪录 */
 uint8_t changeover_step = 5;
 uint8_t filter_level = 5;
 uint8_t running = 0;
@@ -850,7 +851,27 @@ volatile uint8_t  bemf_zc_step = 0;
  *   ⇒ 下一步方向（不再是改这张表）：让换相时刻**由转速推算的时序**决定，检测只用来**慢环校正转速/相位**
  *      —— 这样 δ 的抖动就不进相位；或先把 δ 测出来再从 waitTime 里减掉。
  *   恢复旧表（= 开环那套好相位的载体，转速的来源）： */
-static const uint16_t wt_num[6] = { 314u, 359u, 269u, 359u, 47u, 423u };  /* ÷1000 */
+/* ★★★ 2026-10-15 六步常数化（test-12 第 2 步）：W ≡ 295‰ ★★★
+ *   依据（今天的实测，evt_run_20261015_202541 / _203047 两份一致）：
+ *     · 换相间隔六步 875/542/625/625/667/417 拍（极差 73%）；
+ *       而【过零间隔六步只差 10.8%】（1463~1627 拍）⇒ 转子的每步物理时间是均匀的
+ *       ⇒ "六步不均"不是转子的错，是【换相时刻】不均。
+ *     · 换相时刻不均只可能来自本表：W 的六步值 47~423‰（相邻差 ±0.376×ci）。
+ *       用表项的相邻差预测换相间隔：极差 68.8%、且六个间隔值的集合与实测一一对应 ✓
+ *       （用户现场观察"卡顿/像变转向"的定量来源：每步"过零→换相"延迟在 47~423‰
+ *         之间跳 ⇒ 相位六步间摆 ±19°E ⇒ 转矩一拍重一拍轻；step 序列无倒退，
+ *         转向不可能反——数据已证。）
+ *   数学：换相间隔(s) = 过零间隔 + W(s+1) − W(s) ⇒ W ≡ 常数 ⇔ 间隔 = 过零间隔（均匀）✓
+ *   取 295‰ = 旧表均值（(314+359+269+359+47+423)/6 ≈ 295）⇒【总提前量水平不变】，
+ *   只把六步的错配掰正。
+ *   ★ 与 2026-10-12 那次"迭代到六步均匀"（见下方注释块）的区别：那次用
+ *     ratio×(T̄/T_s) 迭代、"符号不自洽"而失败，并据此推断"六步不均是转子/磁路的
+ *     固有不对称"——但那个推断【已被今天的过零间隔数据推翻】（转子侧是均匀的）。
+ *     且那次很可能是被【索引错位一档】干扰：今天从事件流实测 wait/ci = wt_num[step−2]
+ *     （§3 悬案的实测佐证）⇒ 迭代法调的那一项可能不是生效的那一项。
+ *     常数表【天然免疫索引错位】（拿哪一项都一样）⇒ 这次的判读比那次干净。
+ *   ★ 若常数化后六步仍不均 ⇒ 才轮到"转子/磁路固有不对称"的假说重新上台。 */
+static const uint16_t wt_num[6] = { 285u, 285u, 285u, 285u, 285u, 285u };  /* ÷1000 */
 /* ★★ 2026-10-12 试过"迭代到六步均匀"，失败并撤回 ★★
  *   想法：先按 ratio_s <- ratio_s × (T̄/T_s) 迭代一轮（T=实测六步时长），指望六步时长拉齐。
  *   实测（同一台架、同样 6 秒）：
@@ -1596,6 +1617,11 @@ static void olStartupTick(void)
         /* 定时器【不再重设】：它一直按开环的节奏在走，保持相位连续。
          * （原来 SET_INTERVAL_TIMER_COUNT(ci>>1) 会把相位强行挪到半步处。） */
         ol_meas_gap_used = waitTime;
+#if RM2027_ZCL_FILTER
+        /* ★ 2026-10-14 丢过零滤波：交棒后第一拍的超时阈值基准 = 本次相位连续的 waitTime。
+         *   （之后每次正常换相由 PeriodElapsedCallback 刷新；超时换相后清 0。） */
+        zcl_pred = waitTime;
+#endif
         /* ★ 交棒后第一帧也屏蔽掉：交棒点落在一个步长的中途，这一帧的 delta 同样
          *   不能代表"新的悬空相"（悬空相还没换，但定时基准刚被重置），
          *   顺手丢弃它的边沿，避免又给正反馈送第一脚。 */
@@ -2094,13 +2120,6 @@ volatile uint8_t  win_enable = 1;   /* ★ 运行时开关：0 = 停发窗口流
                                      *   （跑"全变量"那轮用它；SWD 写 0/1 即可，不用重编译）*/
 static uint8_t    win_pkt[WIN_TOTAL];    /* ★ 整包组好后一次性交给 DMA（见 win_pump）*/
 
-/* ★★ xien/n2：窗口流降采样倍数（运行时可变，SWD 直接写，不用重编译）★★
- *   1 = 每窗都发（上游行为）；N = 每 N 个窗只发 1 个。**窗内仍是 512 点全速**，
- *   N 只影响"多久拿一窗"，不影响窗内时间分辨率。
- *   建议扫：1 / 2 / 4 / 8 / 16 / 32，每次同时看 bemf_timeout 增量与 evt_drop。
- *   写：tools/esc-dbg.sh poke16 win_every_n <N>   （或 mwh 直接写地址）*/
-volatile uint16_t win_every_n = RM2027_WIN_EVERY_N;
-
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
 void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_t st)
 {
@@ -2147,17 +2166,20 @@ void win_pump(void)
     }
     if (!tx_ready()) { return; }            /* 串口忙（可能事件流在用）⇒ 等下一轮 */
     if (win_state != 1u) { return; }        /* 只有"采满待发"才动 */
-    /* ★★ xien/n2 降采样：非采样窗在【组包之前】就丢掉（组包 512 次循环也是扰动源）★★
-     *   win_seq 照旧 +1（主机端能从 seq 空档看出被降采样），win_sent 不加。*/
-    if (win_every_n > 1u) {
+#if RM2027_WIN_EVERY_N > 1
+    /* ★ 窗口流降采样：只发每 N 个窗中的一个。其余在【组包之前】就丢掉
+     *   —— 组包本身要跑 512 次循环、发送要占 DMA，两者都是扰动的来源。
+     *   win_seq 照旧 +1（主机端可从 seq 空档看出降采样），win_sent 不加。 */
+    {
         static uint16_t win_skip = 0;
         if (win_skip) {
             win_skip--;
             win_n = 0; win_state = 0u; win_seq++;
             return;
         }
-        win_skip = (uint16_t)(win_every_n - 1u);
+        win_skip = (RM2027_WIN_EVERY_N - 1);
     }
+#endif
 
     /* 组包（此时 ISR 已停写：win_state != 0 时 win_push 直接返回）*/
     win_pkt[0] = 0xA5; win_pkt[1] = 0x5A; win_pkt[2] = 0xA5; win_pkt[3] = 0x5A;
@@ -2543,6 +2565,12 @@ void PeriodElapsedCallback()
         uint8_t _s = (step >= 1 && step <= 6) ? (uint8_t)(step - 1u) : 0u;
         waitTime = (uint16_t)(((uint32_t)commutation_interval * (uint32_t)wt_num[_s]) / 1000u);
     }
+#if RM2027_ZCL_FILTER
+    /* ★ 2026-10-14 丢过零滤波：正常换相后刷新阈值基准（在 waitTime 刚算好之后）。
+     *   下次过零丢失时，超时阈值 = ci + zcl_pred + 余量
+     *   ⇒ 触发点落在"虚拟过零 + 本步预计延迟" = 本该换相的时刻（保持原节拍）。 */
+    zcl_pred = waitTime;
+#endif
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt
     }
@@ -2615,6 +2643,11 @@ void interruptRoutine()
         ol_trace_n++;
     }
 
+#if RM2027_ZCL_FILTER
+    /* ★ 2026-10-14 丢过零滤波：真过零被接受 ⇒ 连续丢失计数清零
+     *   （退出降频/惯性模式，回到正常闭环；ci 由六步环 + ±1/64 限速自然收敛）。 */
+    zcl_miss = 0;
+#endif
     __disable_irq();
     maskPhaseInterrupts();
     lastzctime = thiszctime;
@@ -4519,8 +4552,18 @@ if(zero_crosses < 5){
              *     卡顿从 18ms 缩到约 3.75ms；认到过零时照旧用真过零定相位。
              *   注意：这里必须仍走 commutate() 而不是 zcfoundroutine()
              *   （后者会把这个"超时时刻"当成过零时刻写进 thiszctime ⇒ 污染 ci）。 */
+#if RM2027_ZCL_FILTER
+            /* ★ 2026-10-14 丢过零滤波：阈值从"死等 1.5×ci"改成 "ci + zcl_pred + ci>>5"。
+             *   zcl_pred = 正常换相后记下的本步 waitTime（虚拟过零→换相的预计延迟）、
+             *   超时换相后清 0 ⇒ 触发点 = 本该换相的时刻 ⇒ 丢过零那一步的换相间隔 ≈ ci
+             *   （原节拍），不再被拉长到 1.05~1.45×ci。余量 ci>>5 防抢在正常过零前触发。 */
+            if (!RM2027_OL_ARM_ONLY && !OL_STARTUP_ACTIVE() &&
+                INTERVAL_TIMER_COUNT > ((uint32_t)commutation_interval + (uint32_t)zcl_pred
+                                        + ((uint32_t)commutation_interval >> RM2027_ZCL_MARGIN_SHIFT))) {
+#else
             if (!RM2027_OL_ARM_ONLY && !OL_STARTUP_ACTIVE() &&
                 INTERVAL_TIMER_COUNT > (commutation_interval + (commutation_interval >> 1))) {
+#endif
               zero_throttle_brake_active = 0;   // reset zero throttle brake on back emf timeout (rotation stop)
               if(running){
                 bemf_timeout_happened++;
@@ -4572,6 +4615,26 @@ if(zero_crosses < 5){
                 tm_total++;
                 commutate();
                 SET_INTERVAL_TIMER_COUNT(0);
+#if RM2027_ZCL_FILTER
+                /* ★ 2026-10-14 丢过零滤波：连续丢失计数 + 限速降频 + 基准复位。
+                 *   丢 1~2 个：只计数（惯性按原节拍走，不降频）；
+                 *   连续丢 > RM2027_ZCL_SLOW_AFTER 个（即第 3 个起）：每步把周期拉长
+                 *     ci>>RM2027_ZCL_SLOW_SHIFT（≈1.56%/步，降速限幅），等重新捕获过零；
+                 *   真过零一被认到（interruptRoutine 里 zcl_miss 清 0）即恢复。
+                 *   zcl_pred = 0：基准从"虚拟过零"变成"换相点本身"⇒ 下一步若还丢，
+                 *   阈值 = ci + 0 + 余量 ⇒ 换相间隔≈ci，节拍保持原频率附近。 */
+                if (zcl_miss < 255u) { zcl_miss++; }
+                if (zcl_miss > zcl_miss_max) { zcl_miss_max = zcl_miss; }
+                if (zcl_miss > RM2027_ZCL_SLOW_AFTER) {
+                    uint32_t zcl_inc = (uint32_t)commutation_interval >> RM2027_ZCL_SLOW_SHIFT;
+                    if (zcl_inc < 1u) { zcl_inc = 1u; }
+                    commutation_interval += zcl_inc;
+                    if (zcl_slow_n < 60000u) { zcl_slow_n++; }
+                } else {
+                    if (zcl_hold_n < 60000u) { zcl_hold_n++; }
+                }
+                zcl_pred = 0;
+#endif
 #endif
 #if !RM2027_OL_ARM_ONLY
                 /* 硬踹完立刻把过零判据交还给中断闭环，否则下一次过零照样认不出来。
