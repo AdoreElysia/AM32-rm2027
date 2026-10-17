@@ -2172,7 +2172,7 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
     win_vc[i]   = vc;
     win_v0[i]   = v0;
     win_cur[i]  = cu;
-    win_step[i] = st;
+    win_step[i] = (uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));   /* 高2位=采样顺序 */
     {
         /* 未钳制的步内时间：距上次换相过了多少个 ADC 帧（1 帧 = 41.67µs = 83.33 拍）*/
         extern volatile uint16_t adc_frame_cnt;
@@ -2249,6 +2249,11 @@ void win_pump(void)
 
     win_seq++;
     win_sent++;
+    /* ★ xien/n3e：每 5 个发送窗（≈1s @N=8）轮转一次 A/B/C/V0 的 rank 顺序 */
+    if (adc_order_auto) {
+        /* 每个发送窗都轮转一次 ⇒ 4 个 order 在 ~4 个窗内交替，尽量贴同一工况 */
+        adc_order_pending = (uint8_t)((adc_order + 1u) & 3u);
+    }
     win_n = 0;
     win_state = 0u;                         /* 立刻开新一轮采集（DMA 在后台自己发）*/
     evt_send((uint8_t *)win_pkt, WIN_TOTAL);

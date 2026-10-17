@@ -36,6 +36,37 @@ void adc_set_first_rank(uint32_t channel)
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, channel);
 }
 
+/* ★★★ xien/n3e：A/B/C/V0 在 rank1..4 的运行时轮转 ★★★
+ *   order 0: rank1..4 = A,B,C,V0
+ *   order 1: B,C,V0,A
+ *   order 2: C,V0,A,B
+ *   order 3: V0,A,B,C
+ *   四个 order 轮完，每个通道在每个 rank 上各出现一次 ⇒ 两/四序平均可消 rank 误差。
+ *   只影响采样顺序，不影响换相时基；闭环判据不能这样交替（会注入交替偏置）。 */
+volatile uint8_t adc_order = 0;
+volatile uint8_t adc_order_auto = 1;
+volatile uint8_t adc_order_pending = 0;
+volatile uint8_t adc_frame_order = 0;
+
+void adc_apply_order(uint8_t o)
+{
+    static const uint32_t ch[4][4] = {
+        { BEMF_ADC_PHASE_A_CH, BEMF_ADC_PHASE_B_CH, BEMF_ADC_PHASE_C_CH, BEMF_ADC_NEUTRAL_CH },
+        { BEMF_ADC_PHASE_B_CH, BEMF_ADC_PHASE_C_CH, BEMF_ADC_NEUTRAL_CH, BEMF_ADC_PHASE_A_CH },
+        { BEMF_ADC_PHASE_C_CH, BEMF_ADC_NEUTRAL_CH, BEMF_ADC_PHASE_A_CH, BEMF_ADC_PHASE_B_CH },
+        { BEMF_ADC_NEUTRAL_CH, BEMF_ADC_PHASE_A_CH, BEMF_ADC_PHASE_B_CH, BEMF_ADC_PHASE_C_CH },
+    };
+    static const uint32_t ranks[4] = {
+        LL_ADC_REG_RANK_1, LL_ADC_REG_RANK_2, LL_ADC_REG_RANK_3, LL_ADC_REG_RANK_4
+    };
+    o &= 3u;
+    for (uint8_t i = 0; i < 4u; i++) {
+        LL_ADC_REG_SetSequencerRanks(ADC1, ranks[i], ch[o][i]);
+        LL_ADC_SetChannelSamplingTime(ADC1, ch[o][i], LL_ADC_SAMPLINGTIME_COMMON_1);
+    }
+    adc_order = o;
+}
+
 void ADC_DMA_Callback()
 { // read dma buffer and set extern variables
 
@@ -78,18 +109,24 @@ void ADC_DMA_Callback()
         adc_capture_sample(ADCDataDMA[0], ADCDataDMA[1]);   /* ★ 抓 A、B 两路 */
     }
 #else
-    /* ★ 2026-10-12 四路电压版：rank1~4 = VA/VB/VC/V0，悬空相【软件选】 */
-#if RM2027_ADC_AC_SWAP
-    /* ★ rank1=VC / rank3=VA ⇒ 槽位映射反过来，保证 va/vb/vc 仍是"引脚"语义 */
-    bemf_adc_vc = ADCDataDMA[0];
-    bemf_adc_vb = ADCDataDMA[1];
-    bemf_adc_va = ADCDataDMA[2];
-#else
-    bemf_adc_va = ADCDataDMA[0];
-    bemf_adc_vb = ADCDataDMA[1];
-    bemf_adc_vc = ADCDataDMA[2];
-#endif
-    bemf_adc_v0_hw = ADCDataDMA[3];    /* ★ 硬件 V0 原值：永远记它（日志语义不变） */
+    /* ★ 2026-10-12 四路电压版：rank1~4 = VA/VB/VC/V0，悬空相【软件选】
+     * ★ xien/n3e：按 adc_order 运行时反解 rank→物理通道，保证 va/vb/vc/v0 仍是引脚语义。 */
+    {
+        uint16_t s0 = ADCDataDMA[0], s1 = ADCDataDMA[1], s2 = ADCDataDMA[2], s3 = ADCDataDMA[3];
+        uint8_t _cur_order = (uint8_t)(adc_order & 3u);
+        adc_frame_order = _cur_order;   /* 本帧数据实际用的顺序 */
+        switch (_cur_order) {
+        case 0: bemf_adc_va = s0; bemf_adc_vb = s1; bemf_adc_vc = s2; bemf_adc_v0_hw = s3; break;
+        case 1: bemf_adc_vb = s0; bemf_adc_vc = s1; bemf_adc_v0_hw = s2; bemf_adc_va = s3; break;
+        case 2: bemf_adc_vc = s0; bemf_adc_v0_hw = s1; bemf_adc_va = s2; bemf_adc_vb = s3; break;
+        default: bemf_adc_v0_hw = s0; bemf_adc_va = s1; bemf_adc_vb = s2; bemf_adc_vc = s3; break;
+        }
+    }
+    /* ★ 在 ADC-TC 中断里、当前帧映射完成后再切换下一帧的 rank 顺序；
+     *   绝不能在主循环里直接改 ADC 序列寄存器（会切坏正在转换的序列）。 */
+    if (adc_order_pending != adc_order) {
+        adc_apply_order(adc_order_pending);
+    }
     bemf_adc_v0    = bemf_adc_v0_hw;
 #if RM2027_V0_SOFTMEAN
     /* ★★★ 2026-10-13：V0 改用【三相平均】★★★
@@ -435,6 +472,7 @@ void ADC_Init(void)
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR,
         LL_ADC_SAMPLINGTIME_COMMON_2);
 #endif
+    adc_apply_order(0);   /* ★ 初始顺序：A,B,C,V0 */
 #else
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, CURRENT_ADC_CHANNEL);
     LL_ADC_SetChannelSamplingTime(ADC1, CURRENT_ADC_CHANNEL,
