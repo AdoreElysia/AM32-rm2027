@@ -538,6 +538,14 @@ volatile uint16_t evt_head;
 volatile uint16_t evt_tail;
 volatile uint32_t evt_total;     /* 打包过的事件数 */
 volatile uint32_t evt_drop;      /* 缓冲满而丢弃的 */
+/* ★ xien/n1 试验：事件流总开关（运行时 SWD 可写）
+ *   0 = 完全不组事件包、不发事件帧（只看窗口流/卡顿）；
+ *   1 = 恢复原有 49 B/换相事件流。
+ *   编译默认值来自 targets.h 的 RM2027_EVT_STREAM（本分支=0）。 */
+#ifndef RM2027_EVT_STREAM
+#define RM2027_EVT_STREAM 1
+#endif
+volatile uint8_t  evt_enable = RM2027_EVT_STREAM;
 volatile uint8_t  evt_tx[EVT_BATCH];
 volatile uint32_t adc_frame_total;   /* 24kHz 总帧数（u32，不会回绕）*/
 
@@ -2232,6 +2240,7 @@ void win_pump(void)
 static void evt_push(void)
 {
     extern volatile uint8_t ol_startup_arm;   /* 定义在别处 */
+    if (!evt_enable) { return; }              /* ★ 事件流关闭：直接不组包 */
     uint16_t nxt = (uint16_t)((evt_head + EVT_FRAME) & (EVT_BUF_N - 1u));
     if (nxt == evt_tail) { evt_drop++; return; }
     uint8_t *p = (uint8_t *)&evt_buf[evt_head];
@@ -2300,6 +2309,8 @@ static void evt_push(void)
 /* 主循环调用：攒够一批就用 DMA 发（不在中断里做）*/
 void evt_pump(void)
 {
+    /* ★ xien/n1：事件流关闭时丢弃已排队事件，彻底让出串口给窗口流 */
+    if (!evt_enable) { evt_tail = evt_head; return; }
     /* ★ 与窗口流共用一条 DMA ⇒ 串口忙就等下一轮（原来是私有 busy，见 evt_send 上方说明）*/
     if (!tx_ready()) { return; }
     uint16_t avail = (uint16_t)((evt_head - evt_tail) & (EVT_BUF_N - 1u));

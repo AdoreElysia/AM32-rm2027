@@ -38,6 +38,11 @@
 #ifndef XIEN_OL_STEP_DIV
 #define XIEN_OL_STEP_DIV   17      /* 本轮扫描点：开环步长 */
 #endif
+/* ★ xien/n1 当前试验：默认关事件流，只留窗口流，看“串口发送是否造成卡顿”。
+ *   运行时可经 SWD 写回：tools/esc-dbg.sh poke evt_enable 1（开）/ 0（关）。 */
+#ifndef RM2027_EVT_STREAM
+#define RM2027_EVT_STREAM  0
+#endif
 #ifndef OL_HOLD_OPENLOOP
 #if XIEN_OL_SCAN_MODE
 #define OL_HOLD_OPENLOOP 1

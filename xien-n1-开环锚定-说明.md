@@ -119,3 +119,25 @@ f_comm_hz / rpm_median / ESC_DUTY / ESC_STEP_DIV / ESC_TAG`
 - 单点开环 8s 上限（固件既有 `OL_STARTUP_TICKS_MAX`），采集建议 6s；
 - 一点一冷却，不要连续猛跑；
 - 出现异常立即 F1 收油/断电；过流跳闸后要人工干预才恢复。
+
+
+---
+
+## 7. 事件流已关闭（当前试验）
+
+为了判断“串口发送本身是否造成卡顿”，本分支默认把事件流整体关掉：
+
+- `Inc/targets.h` 里 `RM2027_EVT_STREAM=0`；
+- 固件运行时变量 `evt_enable`（默认 0）：0 = 不组事件包、不发事件帧，只留窗口流；
+- 想临时恢复事件流（不用重编译）：
+  ```bash
+  ./tools/esc-dbg.sh poke evt_enable 1     # 开
+  ./tools/esc-dbg.sh poke evt_enable 0     # 关
+  ```
+- 关掉后 `cap-evt.py` 收不到事件是正常的；只要窗口包 >0，就按“仅窗口流”成功处理，不再报错。
+- 想进一步判断“窗口流本身是否卡顿”：
+  ```bash
+  ./tools/esc-dbg.sh poke win_every_n 1    # 窗口流拉到最满
+  ./tools/esc-dbg.sh poke win_enable 0     # 窗口流也关掉
+  ```
+  对比同一 `input/step_div` 下三种情况：事件+窗口 / 仅窗口 / 全关。

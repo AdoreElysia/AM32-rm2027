@@ -298,7 +298,10 @@ def save_run(buf, secs=0.0, outd=OUTD_DEF):
         print(f'  （四路电压+电流版：VA/VB/VC/V0/电流 各 512 点）')
         print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
     if not rows:
-        print('❌ 一个事件都没收到 —— 检查 12V(母线电压) / F1 油门'); sys.exit(1)
+        if wins:
+            print('⚠ 事件流为空（当前可能 evt_enable=0），但收到了窗口包 → 按“仅窗口流”成功处理')
+            return
+        print('❌ 既没有事件也没有窗口 —— 检查 12V(母线电压) / F1 油门 / 串口'); sys.exit(1)
     make_plot(rows, secs, csvp.rsplit('.', 1)[0] + '.png')
 
     # ---- ★ 跑完立刻 dump【换相埋点 OL_CM_*】（RAM 易失，必须趁有电）----
