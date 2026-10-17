@@ -31,6 +31,9 @@ plt.rcParams['axes.unicode_minus'] = False
 PORT = __import__('os').environ.get('ESC_SERIAL', '/dev/ttyUSB0')
 BAUD = int(__import__('os').environ.get('ESC_BAUD', '1500000'))     # 要跟固件 ADC_CAP_BAUD 一致
 OUTD_DEF = __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027'))
+# ADC 触发是 24kHz，但 DMA-TC 重武装漏触发 ⇒ 实际有效帧率约 17~20kHz，且随 ISR 负载变。
+# 绝对时间轴只能用“本轮有效帧周期”近似；相位/ci 比值不受影响。
+FRAME_US = float(__import__('os').environ.get('ESC_FRAME_US', '50.0'))  # n1 默认 50µs/帧
 PLOT_ONLY = None
 RAW = None
 if len(sys.argv) > 1 and sys.argv[1].startswith('--raw'):
@@ -153,7 +156,7 @@ def make_plot(rows, secs, pngp):
     t_all = np.arange(len(rows), dtype=float)
     ts0 = ts[0]
     m = (np.diff(seq) == 1) & (np.diff(ts) > 0) & (np.diff(ts) < 24000)
-    iv = np.diff(ts)[m] / 20.0   # ADC/窗口采样=20kHz（PWM 载波才是24kHz）
+    iv = np.diff(ts)[m] * (FRAME_US / 1000.0)   # 帧→ms；默认 50µs/帧（n1 有效 20kHz）
     tt = np.arange(1, len(rows), dtype=float)[m]
     ol = int(np.sum(stg == 1))
     if iv.size:
@@ -259,6 +262,7 @@ def _write_meta(csvp, buf, rows, wins, nfake, secs):
     meta['ESC_DUTY'] = os.environ.get('ESC_DUTY', '')
     meta['ESC_STEP_DIV'] = os.environ.get('ESC_STEP_DIV', '')
     meta['ESC_TAG'] = os.environ.get('ESC_TAG', '')
+    meta['ESC_FRAME_US'] = f'{FRAME_US:.2f}'
     if duty:
         meta['duty_median'] = f'{float(np.median(duty)):.1f}'
     if ci:
