@@ -21,6 +21,7 @@
 #   tools/esc-dbg.sh poke <名> <val>  写 8 位
 #   tools/esc-dbg.sh poke16 <名> <val> 写 16 位
 #   tools/esc-dbg.sh poke32 <名> <val> 写 32 位（细粒度目标 ol_ci_tgt 用这个）
+#   tools/esc-dbg.sh ccr4 <val>       写 TIM1->CCR4（ADC 触发点，CCR4 扫描用）
 #   tools/esc-dbg.sh clear           清捕获状态（跑前先清，避免读到上一轮残留）
 #   tools/esc-dbg.sh settrig <帧数>   设"交棒后多少帧"触发点（1 帧 = 41.67µs；1500ms => 36000）
 #   tools/esc-dbg.sh arm [<帧数>]     clear + settrig 一步到位（跑前）
@@ -103,6 +104,15 @@ case "$cmd" in
     run_oc -c "mww $a $3" >/dev/null
     v=$(rd32 "$a")
     echo "$2 @ $a ← $3   （回读 0x$v）"
+    ;;
+
+  ccr4)
+    # ccr4 <val> —— 写 TIM1->CCR4（0x40012C40），只改 ADC 触发点，不改固件。
+    #   tools/esc-dbg.sh ccr4 200 / 180 / 160 ...
+    [ $# -ge 2 ] || { echo "用法: esc-dbg.sh ccr4 <0..65535>"; exit 1; }
+    run_oc -c "mwh 0x40012c40 $2" >/dev/null
+    v=$(rd32 0x40012c40)
+    echo "TIM1->CCR4 @ 0x40012C40 ← $2   （回读 0x$v，低16位 = $(( 16#${v: -4} )))"
     ;;
 
   ramcheck)

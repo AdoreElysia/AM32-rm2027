@@ -313,6 +313,13 @@ main_menu() {
 #   esc-lab.sh cap <秒>          只采集（cap-evt.py：给油→采→收油→存 CSV+NPZ+图）
 #   esc-lab.sh flash-cap <秒> [固件]  ★ 采集顺道烧录：先开串口 spool → 烧录 → 给油采 → 解析
 #   esc-lab.sh judge <秒> [标签]  计数轮判分（关窗口流）
+# 可选：ESC_CCR4=<val> 时，在烧录复位后、给油前写 TIM1->CCR4（CCR4 扫描用）
+apply_ccr4() {
+    [ -n "${ESC_CCR4:-}" ] || return 0
+    echo "→ 设置 ADC 触发点 TIM1->CCR4=$ESC_CCR4"
+    "$ESC_DBG" ccr4 "$ESC_CCR4"
+}
+
 cmd_flash() { echo "== 当前分支：$(git rev-parse --abbrev-ref HEAD) =="; f1_throttle 1 || { echo "❌ F1 收油失败，拒绝烧录"; return 1; }; core_build_flash "${1:-}"; }
 
 # build-only：只编译+归档+写 meta，不烧录、不碰串口/电机。
@@ -331,6 +338,7 @@ cmd_cap() {
     echo "== 窗口流采集 ${secs}s（cap-evt.py）=="
     echo "   当前分支：$(git rev-parse --abbrev-ref HEAD)"
     echo "   串口 $SERIAL @ $ESC_BAUD（必须跟固件 ADC_CAP_BAUD 一致）"
+    apply_ccr4
     ( cd "$REPO" && python3 tools/cap-evt.py "$secs" )
 }
 # ★ xien/n2 收尾：采集顺道烧录 —— 先开串口 spool，再烧录复位，再给油采。
@@ -348,6 +356,9 @@ cmd_flash_cap() {
     f1_throttle 1
     if ! core_build_flash "$target"; then
         echo "❌ 烧录失败，停止采集"; kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; rm -f "$raw"; return 1
+    fi
+    if ! apply_ccr4; then
+        echo "❌ 写 TIM1->CCR4 失败"; kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; rm -f "$raw"; return 1
     fi
     echo "← 唤醒：先收油并等 ESC armed"; f1_throttle 1 || { echo "❌ F1 收油失败"; kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; rm -f "$raw"; return 1; }
     wait_esc_armed || true

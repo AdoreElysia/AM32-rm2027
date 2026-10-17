@@ -281,6 +281,7 @@ def _write_meta(csvp, buf, rows, wins, nfake, secs):
     meta['ESC_DUTY'] = os.environ.get('ESC_DUTY', '')
     meta['ESC_STEP_DIV'] = os.environ.get('ESC_STEP_DIV', '')
     meta['ESC_TAG'] = os.environ.get('ESC_TAG', '')
+    meta['ESC_CCR4'] = os.environ.get('ESC_CCR4', '')
     meta['ESC_FRAME_US'] = f'{FRAME_US:.2f}'
     L = _estimate_step_frames(wins)
     if L:
