@@ -189,3 +189,9 @@ f_comm_hz / rpm_median / ESC_DUTY / ESC_STEP_DIV / ESC_TAG`
   相位、ci、L 比值是帧率无关量，不受影响。
 - 过零相位：340/17 约 0.65，345/350/355 约 0.66~0.67；test-12 好闭环 ~0.70。
   **不要用 0.5 当硬目标**。
+- 历史 61 轮窗口普查：有效采样率 **16.3~23.3kHz，中位≈21.3kHz**（漏触发 8~32%），不是固定值；
+  ⇒ 每轮必须用 `有效帧周期 = ci×0.5µs / L` 标定。
+- `cap-evt.py` 现在支持 `ESC_CI_TGT=<目标ci拍>`，会自动在 meta 写
+  `L_median_frames / effective_frame_us / effective_sample_hz`。
+- 漏触发主因是 **ADC-DMA-TC 里重武装被更高优先级中断/临界区拖延**，不是 UART DMA；
+  事件流开关只影响约 2.6 个百分点（19.4k→20.0k）。

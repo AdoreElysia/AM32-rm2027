@@ -34,6 +34,7 @@ OUTD_DEF = __import__('os').environ.get('RM2027_DATA', __import__('os').path.exp
 # ADC 触发是 24kHz，但 DMA-TC 重武装漏触发 ⇒ 实际有效帧率约 17~20kHz，且随 ISR 负载变。
 # 绝对时间轴只能用“本轮有效帧周期”近似；相位/ci 比值不受影响。
 FRAME_US = float(__import__('os').environ.get('ESC_FRAME_US', '50.0'))  # n1 默认 50µs/帧
+CI_TGT = float(__import__('os').environ.get('ESC_CI_TGT', '0'))          # 本轮目标 ci（拍）；用于反推有效采样率
 PLOT_ONLY = None
 RAW = None
 if len(sys.argv) > 1 and sys.argv[1].startswith('--raw'):
@@ -241,6 +242,24 @@ def _bin_info():
     return os.path.basename(p), h.hexdigest()
 
 
+def _estimate_step_frames(wins):
+    """从每个窗口的 step 跳变 / dbg 锯齿估计 L（ADC 帧/换相）。
+    只收 5~255 帧的间隔，滤掉 1 采样毛刺/窗口边界。"""
+    Ls = []
+    for w in wins:
+        st = np.asarray(w[7]).astype(int)
+        dg = np.asarray(w[8]).astype(int)
+        ch = np.where(np.diff(st) != 0)[0] + 1
+        if len(ch) >= 2:
+            d = np.diff(ch)
+            Ls.extend(d[(d >= 5) & (d <= 60)].tolist())
+        res = np.where(np.diff(dg) < 0)[0] + 1
+        if len(res) >= 2:
+            d = np.diff(res)
+            Ls.extend(d[(d >= 5) & (d <= 60)].tolist())
+    return float(np.median(Ls)) if Ls else None
+
+
 def _write_meta(csvp, buf, rows, wins, nfake, secs):
     branch = _branch_name()
     binname, binsha = _bin_info()
@@ -263,6 +282,14 @@ def _write_meta(csvp, buf, rows, wins, nfake, secs):
     meta['ESC_STEP_DIV'] = os.environ.get('ESC_STEP_DIV', '')
     meta['ESC_TAG'] = os.environ.get('ESC_TAG', '')
     meta['ESC_FRAME_US'] = f'{FRAME_US:.2f}'
+    L = _estimate_step_frames(wins)
+    if L:
+        meta['L_median_frames'] = f'{L:.2f}'
+        if CI_TGT > 0:
+            fus = CI_TGT * 0.5 / L
+            meta['ci_tgt_ticks'] = f'{CI_TGT:.1f}'
+            meta['effective_frame_us'] = f'{fus:.2f}'
+            meta['effective_sample_hz'] = f'{1e6/fus:.0f}'
     if duty:
         meta['duty_median'] = f'{float(np.median(duty)):.1f}'
     if ci:
