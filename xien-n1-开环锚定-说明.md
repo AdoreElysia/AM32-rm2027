@@ -175,3 +175,14 @@ f_comm_hz / rpm_median / ESC_DUTY / ESC_STEP_DIV / ESC_TAG`
 - 目标可在运行中改：`ol_freq_q` 会按 `ol_freq_slope` 从当前频率平滑升/降到新目标，`ol_input_cur` 同步平滑过渡。
 - `ol_freq_slope` 本身也可 SWD 调（一般不建议动，默认 554）：`poke16 ol_freq_slope 554`。
 
+
+---
+
+## 9. 采样率口径（2026-10-17 队友复核）
+
+- **PWM 载波 = 24kHz**（TIM1 ARR=2665）；
+- **ADC/窗口采样 = 20kHz**（1 帧 = 50µs；`LOOP_FREQUENCY_HZ=20000`）；
+- 开环 `ci=1700 拍 × 0.5µs = 850µs`，正好 17 个采样帧 ⇒ **1961 rpm 成立**；
+- `cap-evt.py` 的帧→时间换算已从 24kHz 改为 20kHz；其它历史脚本里仍有 24kHz 硬编码，分析时注意；
+- 过零相位是帧率无关的比例量：340/17 约 0.65，345/350/355 约 0.66~0.67；
+  **不要用 0.5 当硬目标**——test-12 好闭环本身也在 ~0.70。

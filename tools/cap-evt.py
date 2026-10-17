@@ -153,7 +153,7 @@ def make_plot(rows, secs, pngp):
     t_all = np.arange(len(rows), dtype=float)
     ts0 = ts[0]
     m = (np.diff(seq) == 1) & (np.diff(ts) > 0) & (np.diff(ts) < 24000)
-    iv = np.diff(ts)[m] / 24.0
+    iv = np.diff(ts)[m] / 20.0   # ADC/窗口采样=20kHz（PWM 载波才是24kHz）
     tt = np.arange(1, len(rows), dtype=float)[m]
     ol = int(np.sum(stg == 1))
     if iv.size:
@@ -296,7 +296,7 @@ def save_run(buf, secs=0.0, outd=OUTD_DEF):
                  cur=np.array([w[6] for w in wins]), step=np.array([w[7] for w in wins]),
                  dbg=np.array([w[8] for w in wins]))   # ★ dbg = 未钳制的步内时间(ADC 帧, 饱和 255)
         print(f'  （四路电压+电流版：VA/VB/VC/V0/电流 各 512 点）')
-        print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
+        print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @20kHz)')
     if not rows:
         if wins:
             print('⚠ 事件流为空（当前可能 evt_enable=0），但收到了窗口包 → 按“仅窗口流”成功处理')
