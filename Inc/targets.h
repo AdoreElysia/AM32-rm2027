@@ -3181,7 +3181,34 @@
 #define ADC_CAP_CH2  BEMF_ADC_PHASE_B_CH    /* 第 1 列 = VB (PA4) */
 #endif
 #ifndef ADC_CAP_BAUD
-#define ADC_CAP_BAUD     1000000   /* 1 Mbaud */
+/* ★★ xien/n2：串口波特率（1 Mbaud -> 2 Mbaud）★★ 2026-10-14
+ *  为什么可以提：
+ *    · MCU 侧上限 = PCLK/16 = 64MHz/16 = **4 Mbaud**（16 倍过采样；MCU_G071 主频 64MHz）
+ *      ⇒ 2 Mbaud 的 USARTDIV = 32.0（整数，零误差）；3 Mbaud = 21.3125，误差 0.1%，也可用。
+ *    · 真正的瓶颈是 **USB-TTL 那颗芯片**：CH340/CP2102 一般到 2 Mbaud，FT232 到 3 Mbaud，
+ *      CH343 能到 6 Mbaud。⇒ 先按 2 Mbaud 试，不通再降到 1.5M / 1M。
+ *  为什么值得提（带宽账，1 Mbaud = 100 kB/s）：
+ *    · 事件流 49 B/换相：@1000 次/s = 49 kB/s(49%)；@3400rpm(2220 次/s) = 109 kB/s ⇒ **已超**。
+ *    · 窗口流 6156 B/包：1 Mbaud 下发一包要 61.6 ms，2 Mbaud 只要 30.8 ms ⇒ 对控制逻辑的
+ *      阻塞时间**直接减半**（这正是"开采样就乱"的主因）。
+ *  ⇒ 2 Mbaud 后：事件流上限 ~4000 次/s（≈6700 rpm），窗口包阻塞 30.8 ms。 */
+#define ADC_CAP_BAUD     2000000
+#endif
+
+/* ★★ xien/n2：窗口流降采样（每 N 个窗只发 1 个）★★ 2026-10-14
+ *  窗内**仍然是 512 点全速**（21.3 ms 连续，不抽点）—— 只减少"多久拿一窗"。
+ *  抛掉发生在【组包之前】（组包的 512 次循环本身也是扰动源）。
+ *  这一个宏只是【上电初值】；运行时可经 SWD 直接改 `win_every_n`（16 位），
+ *  不用重编译 ⇒ 一次烧录就能扫 N。见 Src/main.c 的 win_every_n 与 tools/esc-dbg.sh poke16。
+ *  周期账（PCLK 无关，只看波特率）：
+ *      一轮 = N × 21.3ms(采) + T_send(发一包)
+ *      T_send = 6156 B / (波特率/10)   ⇒ 1 Mbaud: 61.6ms / 2 Mbaud: 30.8ms
+ *      DMA 占用率 = T_send / 一轮；交付窗率 = 1 / 一轮
+ *      1 Mbaud:  N=1→74%, 12.1窗/s | N=8→27%, 4.3窗/s | N=16→15%, 2.5窗/s
+ *      2 Mbaud:  N=1→59%, 19.4窗/s | N=8→15%, 6.5窗/s | N=16→8%, 3.9窗/s
+ *  ⇒ 起点取 8（约占 1/4~1/6 带宽），扫 1/2/4/8/16/32 看 bemf_timeout 与 evt_drop。 */
+#ifndef RM2027_WIN_EVERY_N
+#define RM2027_WIN_EVERY_N  1      /* 1 = 上游行为（每窗都发）；扫 N 时改这里或运行时写 win_every_n */
 #endif
 
 #define USE_SERIAL_TELEMETRY

@@ -53,7 +53,9 @@ void telem_UART_Init()
 #if ADC_CAPTURE_MODE
     USART_InitStruct.BaudRate = ADC_CAP_BAUD;   /* ★ 捕获模式：1 Mbaud */
 #else
-    USART_InitStruct.BaudRate = 1000000;   /* ★ 2026-10-11 1 Mbaud：事件流需要 ~10KB/s */
+    USART_InitStruct.BaudRate = ADC_CAP_BAUD;  /* ★★ xien/n2：原来硬编码 1000000；
+                                                *   改成统一的 ADC_CAP_BAUD（见 Inc/targets.h 的带宽账）。
+                                                *   事件流 49B/换相：1Mbaud 下 3400rpm 就爆，2Mbaud 抬到 ~6700rpm。*/
 #endif
     USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits = LL_USART_STOPBITS_1;

@@ -58,7 +58,9 @@ def link_bytes(secs=3.0):
     except Exception:
         return -1
     try:
-        sp = serial.Serial('/dev/ttyUSB0', 1000000, timeout=0.5)
+        # ★ xien/n2：波特率跟固件 ADC_CAP_BAUD 走；2 Mbaud 时用 ESC_BAUD=2000000 调本脚本
+        import os as _os
+        sp = serial.Serial('/dev/ttyUSB0', int(_os.environ.get('ESC_BAUD', '1000000')), timeout=0.5)
         sp.reset_input_buffer()
         n, t0 = 0, time.time()
         while time.time() - t0 < secs:

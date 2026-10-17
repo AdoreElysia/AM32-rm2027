@@ -77,6 +77,19 @@ case "$cmd" in
     echo "$2 @ $a ← $3   （回读 0x$v，低字节 = $(( 16#${v: -2} )))"
     ;;
 
+  poke16)
+    # poke16 <符号名> <值> —— 写【16 位】(mwh)。给"窗口流降采样倍数 win_every_n"用：
+    #   tools/esc-dbg.sh poke16 win_every_n 8    → 每 8 个窗只发 1 个（窗内仍 512 点全速）
+    #   tools/esc-dbg.sh poke16 win_every_n 1    → 恢复上游行为（每窗都发）
+    # ★ 为什么用 16 位而不是 8 位：N 要能取到 1~255 之间的任意值做扫描，
+    #   而且 win_every_n 在固件里就是 uint16_t（见 Src/main.c）。
+    [ $# -ge 3 ] || { echo "用法: esc-dbg.sh poke16 <符号名> <0..65535>"; exit 1; }
+    a=$(need "$2")
+    run_oc -c "mwh $a $3" >/dev/null
+    v=$(rd32 "$a")
+    echo "$2 @ $a ← $3   （回读 0x$v，低 16 位 = $(( 16#${v: -4} )))"
+    ;;
+
   ramcheck)
     # ★ 改链接脚本（RAM 16K→36K）之后必跑一次：往 16K 之外写魔数再读回。
     #   0x20003FFC = 旧上限（16K 边界），0x20008800 = 36K 区靠顶（避开栈顶 0x20009000）。
