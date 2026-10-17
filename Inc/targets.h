@@ -66,7 +66,7 @@
  *   2=同一相连续采两次（VA/VA, VB/VB, VC/VC, V0）。
  *   只改 ADC 扫描序列，不驱动电机；F1 保持收油。 */
 #ifndef ADC_STATIC_TEST
-#define ADC_STATIC_TEST     1
+#define ADC_STATIC_TEST     3
 #endif
 #ifndef OL_HOLD_OPENLOOP
 #if XIEN_OL_SCAN_MODE
