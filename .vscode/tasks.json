@@ -17,47 +17,98 @@
       "id": "baud",
       "type": "pickString",
       "description": "串口波特率（必须与固件 Inc/targets.h 的 ADC_CAP_BAUD 一致）",
-      "options": ["1000000", "1500000", "2000000", "3000000"],
+      "options": [
+        "1000000",
+        "1500000",
+        "2000000",
+        "3000000"
+      ],
       "default": "2000000"
+    },
+    {
+      "id": "fw",
+      "type": "promptString",
+      "description": "要烧录的固件（留空=当前分支即时编译；也可填已归档分支名或 bin 路径）",
+      "default": ""
     }
   ],
   "tasks": [
     {
       "label": "ESC 1 · 编译 + 烧录（纯烧录，不动串口）",
-      "detail": "esc-lab.sh flash：make → 归档 firmware/<分支>.bin → F1 收油 → openocd 烧 0x08001000 → 校验 → reset run。烧录走 ST-Link(SWD)，与串口是两个 USB 设备，互不冲突。",
+      "detail": "esc-lab.sh flash：当前分支 make → 归档 firmware/<分支名>.bin（/ 映射成 __）→ F1 收油 → openocd 烧 0x08001000 → 校验 → reset run。",
       "type": "shell",
       "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash",
       "options": {
         "cwd": "${workspaceFolder}",
-        "env": { "ESC_YES": "1" }
+        "env": {
+          "ESC_YES": "1"
+        }
       },
       "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
-      "group": { "kind": "build", "isDefault": true }
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "ESC 1b · 烧录指定固件（按分支名归档的 bin）",
+      "detail": "esc-lab.sh flash '<分支名>|<bin路径>'：跳过编译，直接烧 firmware/<分支名>.bin（/ 映射成 __）或指定 bin。用于'同代码多轮采集'或回烧历史固件。",
+      "type": "shell",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash '${input:fw}'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "ESC_YES": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     },
     {
       "label": "ESC 2 · 烧录 + 窗口流采集（★ 主用）",
-      "detail": "esc-lab.sh flash-cap <秒>：先烧录复位、再跑 cap-evt.py（给油→采→收油→存 CSV+NPZ+图）。顺序关键：先烧录后采集，才不漏掉重启后第一段。",
+      "detail": "esc-lab.sh flash-cap <秒> [固件]：★ 采集顺道烧录 —— 先开串口 spool，再烧录复位，再收油唤醒→给油采 N 秒→解析落盘。不会漏掉复位后第一段。",
       "type": "shell",
-      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-cap '${input:secs}'",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-cap '${input:secs}' '${input:fw}'",
       "options": {
         "cwd": "${workspaceFolder}",
-        "env": { "ESC_YES": "1", "ESC_BAUD": "${input:baud}" }
+        "env": {
+          "ESC_YES": "1",
+          "ESC_BAUD": "${input:baud}"
+        }
       },
       "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     },
     {
       "label": "ESC 3 · 只采集（不烧录，窗口流）",
-      "detail": "esc-lab.sh cap <秒>：不编译不烧录，直接采一段（窗口流 + 事件流同时落盘）。",
+      "detail": "esc-lab.sh cap <秒>：先开串口直接采一段（cap-evt.py：给油→采→收油→存 CSV+NPZ+图），不烧录。",
       "type": "shell",
       "command": "bash '${workspaceFolder}/tools/esc-lab.sh' cap '${input:secs}'",
       "options": {
         "cwd": "${workspaceFolder}",
-        "env": { "ESC_BAUD": "${input:baud}" }
+        "env": {
+          "ESC_BAUD": "${input:baud}"
+        }
       },
       "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     },
     {
       "label": "ESC 4 · 计数轮判分（关窗口流：漏过零/六步极差/节拍）",
@@ -66,19 +117,31 @@
       "command": "bash '${workspaceFolder}/tools/esc-lab.sh' judge '${input:secs}'",
       "options": {
         "cwd": "${workspaceFolder}",
-        "env": { "ESC_BAUD": "${input:baud}" }
+        "env": {
+          "ESC_BAUD": "${input:baud}"
+        }
       },
       "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     },
     {
       "label": "ESC 5 · 设置窗口流降采样 N（SWD 写，无需重编译）",
       "detail": "esc-dbg.sh poke16 win_every_n <N>。一次烧录就能扫 N=1/2/4/8/16/32，每档配合 ESC 3 采一轮对比 evt_drop 与 bemf_timeout。",
       "type": "shell",
       "command": "bash '${workspaceFolder}/tools/esc-dbg.sh' poke16 win_every_n '${input:N}'",
-      "options": { "cwd": "${workspaceFolder}" },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     },
     {
       "label": "ESC 6 · 串口自检（3 秒字节数 + 帧头）",
@@ -87,10 +150,16 @@
       "command": "python3 '${workspaceFolder}/tools/serial-check.py' 3",
       "options": {
         "cwd": "${workspaceFolder}",
-        "env": { "ESC_BAUD": "${input:baud}" }
+        "env": {
+          "ESC_BAUD": "${input:baud}"
+        }
       },
       "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     },
     {
       "label": "ESC 0 · 交互菜单（上游唯一入口，保留）",
@@ -99,10 +168,16 @@
       "command": "bash '${workspaceFolder}/tools/esc-lab.sh'",
       "options": {
         "cwd": "${workspaceFolder}",
-        "env": { "ESC_BAUD": "${input:baud}" }
+        "env": {
+          "ESC_BAUD": "${input:baud}"
+        }
       },
       "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     }
   ]
 }

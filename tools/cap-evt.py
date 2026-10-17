@@ -29,10 +29,14 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ★ xien/n2：路径/串口/波特率全部走环境变量（见 tools/_env.sh），不再硬编码用户名
 PORT = __import__('os').environ.get('ESC_SERIAL', '/dev/ttyUSB0')
-BAUD = int(__import__('os').environ.get('ESC_BAUD', '1000000'))     # 要跟固件 ADC_CAP_BAUD 一致
+BAUD = int(__import__('os').environ.get('ESC_BAUD', '2000000'))     # 要跟固件 ADC_CAP_BAUD 一致
 OUTD_DEF = __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027'))
 PLOT_ONLY = None
-if len(sys.argv) > 1 and sys.argv[1].startswith('--plot'):
+RAW = None
+if len(sys.argv) > 1 and sys.argv[1].startswith('--raw'):
+    RAW = sys.argv[1].split('=', 1)[-1]
+    SECS, OUTD = 0.0, OUTD_DEF
+elif len(sys.argv) > 1 and sys.argv[1].startswith('--plot'):
     PLOT_ONLY = sys.argv[1].split('=', 1)[-1]
     SECS, OUTD = 0.0, OUTD_DEF
 else:
@@ -196,6 +200,97 @@ if PLOT_ONLY:
     make_plot(rows, 0, PLOT_ONLY.rsplit('.', 1)[0] + '.png')
     sys.exit(0)
 
+# ---------------- 输出/落盘：原始字节 -> CSV + NPZ + 图 + 换相埋点 ----------------
+def save_run(buf, secs=0.0, outd=OUTD_DEF):
+    """把一段原始串口字节解析并落盘。raw 模式与在线采集共用。"""
+    rows, wins, nfake = parse(buf)
+    stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    csvp = os.path.join(outd, f'evt_run_{stamp}.csv')
+    with open(csvp, 'w', newline='') as f:
+        w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci','thiszctime','lastzctime','average_interval','advance','duty_setpoint','duty_max','bemf_timeout','zc_reject','input','stall_adj','desync'])
+        w.writerows(rows)
+    rate = f'{len(buf)/secs/1000:.1f} KB/s' if secs else '—'
+    print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {len(wins)}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
+    print(f'CSV → {csvp}  ({os.path.getsize(csvp)} 字节)')
+    if wins:
+        npzp = csvp.replace('.csv', '_win.npz')
+        np.savez(npzp, seq=np.array([w[0] for w in wins]),
+                 ts=np.array([w[1] for w in wins]),
+                 va=np.array([w[2] for w in wins]), vb=np.array([w[3] for w in wins]),
+                 vc=np.array([w[4] for w in wins]), v0=np.array([w[5] for w in wins]),
+                 cur=np.array([w[6] for w in wins]), step=np.array([w[7] for w in wins]),
+                 dbg=np.array([w[8] for w in wins]))   # ★ dbg = 未钳制的步内时间(ADC 帧, 饱和 255)
+        print(f'  （四路电压+电流版：VA/VB/VC/V0/电流 各 512 点）')
+        print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
+    if not rows:
+        print('❌ 一个事件都没收到 —— 检查 12V(母线电压) / F1 油门'); sys.exit(1)
+    make_plot(rows, secs, csvp.rsplit('.', 1)[0] + '.png')
+
+    # ---- ★ 跑完立刻 dump【换相埋点 OL_CM_*】（RAM 易失，必须趁有电）----
+    #   代码自己的注释：它"直接回答换相落在反电势周期的哪个位置"——闭环相位的唯一直接证据。
+    try:
+        import subprocess as _sp
+        _nm = _sp.run(['/usr/bin/arm-none-eabi-nm','-S','obj/AM32_RM2027_ESC_G071_2.21.elf'],
+                      capture_output=True,text=True).stdout
+        _sym = {}
+        for _l in _nm.splitlines():
+            _f=_l.split()
+            if len(_f)==4: _sym[_f[3]]=int(_f[0],16)
+        def _rd(name, words):
+            _o=_sp.run(['openocd','-f','interface/stlink.cfg','-f','target/stm32g0x.cfg',
+                '-c','adapter speed 1800','-c','init','-c','halt','-c','mww 0x40003000 0xAAAA',
+                '-c',f'mdw {_sym[name]:#x} {words}','-c','mww 0x40003000 0xAAAA','-c','resume','-c','shutdown'],
+                capture_output=True,text=True)
+            # ★ openocd 把 `mdw` 的数据行写在 **stderr** 上（stdout 是空的）⇒ 必须两边都扫。
+            #   只扫 stdout 会得到空列表，接着就是 "list index out of range"（2026-10-13 踩到）。
+            _v=[]
+            for _l in (_o.stdout + _o.stderr).splitlines():
+                _m=re.match(r'^0x[0-9a-fA-F]+:\s*(.*)$',_l)
+                if _m: _v += [int(x,16) for x in _m.group(1).split()]
+            return _v
+        # ★ 字宽必须按声明来（2026-10-13 修）：mdw 一次读的是【32 位字】，
+        #   OL_CM_D 是 int16[32] ⇒ 只占 64 字节 = 16 个字，每个字里塞着 2 个 int16；
+        #   OL_CM_S 是 uint8[32] ⇒ 8 个字，每字 4 个 uint8。
+        #   原来 `_rd('OL_CM_D',32)` 读了 32 个字（= 把隔壁 OL_CM_T 也读进来当 D），
+        #   又不拆半字 ⇒ 表里印出一堆 16 位巨数（实测 1258289370058217 之类）。
+        _D=_rd('OL_CM_D',16); _T=_rd('OL_CM_T',16); _W=_rd('OL_CM_W',16); _S=_rd('OL_CM_S',8)
+        _n=_rd('ol_cm_n',1); _i=_rd('ol_cm_idx',1)
+        def _u16(ws):
+            out=[]
+            for x in ws: out += [x & 0xFFFF, (x >> 16) & 0xFFFF]
+            return out
+        def _i16(x): return x-0x10000 if x & 0x8000 else x
+        _ds=[_i16(x) for x in _u16(_D)][:32]
+        _T=_u16(_T)[:32]; _W=_u16(_W)[:32]
+        _ss=[(_S[k//4]>>((k%4)*8))&0xFF for k in range(32)]
+        # ol_cm_idx 指向"下一个要写的槽"⇒ 它是环形缓冲里最老的一条，按它起绕才是时间顺序
+        _idx=_i[0] if _i else 0
+        _ord=[(_idx+k) & 31 for k in range(32)]
+        print(f'\n★ 换相埋点（最近 32 次换相；累计 {_n[0] if _n else "?"} 次）—— 已按时间顺序排列')
+        print(f'{"序":>4}{"step":>5}{"delta(悬空相-V0)":>17}{"CNT(拍)":>9}{"waitTime":>10}')
+        for k,p in enumerate(_ord):
+            print(f'{k:4d}{_ss[p]:5d}{_ds[p]:17d}{_T[p]:9d}{_W[p]:10d}')
+        _abs=[abs(x) for x in _ds if x!=0]
+        if _abs:
+            print(f'  ⇒ |delta| 中位 {np.median(_abs):.0f} 码  最小 {min(_abs)}  最大 {max(_abs)}')
+            print(f'  ⇒ 判读：Phase 对 ⇒ 换相时 delta 应在"刚离零点、往平台走"（约幅值 1/2~1）')
+            print(f'          Phase 错（在过零点上换相）⇒ delta ≈ 0')
+        np.savez(csvp.replace('.csv','_cm.npz'), D=np.array(_ds), T=np.array(_T), W=np.array(_W), S=np.array(_ss))
+        print(f'  埋点已存 → {csvp.replace(".csv","_cm.npz")}')
+    except Exception as _e:
+        print(f'（换相埋点 dump 失败：{_e}）')
+
+
+# ---------------- --raw 模式：先开串口 spool、再烧录时用 ----------------
+#   cap-evt.py --raw=<raw.bin>：只解析已落盘的原始字节，不碰串口、不驱动电机。
+if RAW:
+    with open(RAW, "rb") as _f:
+        _buf = _f.read()
+    print(f"（raw 模式）读入 {len(_buf)} 字节：{RAW}")
+    save_run(_buf, 0.0, OUTD_DEF)
+    sys.exit(0)
+
+# ---------------- 正式采集（直接开串口 + 给油） ----------------
 # ---------------- 正式采集 ----------------
 oc(['-c', 'mww 0x40021060 0x01000000'])          # 清 RCC 复位标志
 print('跑前 RCC_CSR :', resets(rd32(0x40021060)))
@@ -211,79 +306,5 @@ while time.time() - t0 < SECS:
 f1(1); s.close(); print('← 收油')
 print('跑后 RCC_CSR :', resets(rd32(0x40021060)), ' ← 出现 IWDG/POR 说明跑中复位了')
 
-rows, wins, nfake = parse(buf)
-stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-csvp = os.path.join(OUTD, f'evt_run_{stamp}.csv')
-with open(csvp, 'w', newline='') as f:
-    w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci','thiszctime','lastzctime','average_interval','advance','duty_setpoint','duty_max','bemf_timeout','zc_reject','input','stall_adj','desync'])
-    w.writerows(rows)
-rate = f'{len(buf)/SECS/1000:.1f} KB/s' if SECS else '—'
-print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {len(wins)}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
-print(f'CSV → {csvp}  ({os.path.getsize(csvp)} 字节)')
-if wins:
-    npzp = csvp.replace('.csv', '_win.npz')
-    np.savez(npzp, seq=np.array([w[0] for w in wins]),
-             ts=np.array([w[1] for w in wins]),
-             va=np.array([w[2] for w in wins]), vb=np.array([w[3] for w in wins]),
-             vc=np.array([w[4] for w in wins]), v0=np.array([w[5] for w in wins]),
-             cur=np.array([w[6] for w in wins]), step=np.array([w[7] for w in wins]),
-             dbg=np.array([w[8] for w in wins]))   # ★ dbg = 未钳制的步内时间(ADC 帧, 饱和 255)
-    print(f'  （四路电压+电流版：VA/VB/VC/V0/电流 各 512 点）')
-    print(f'窗口载荷 → {npzp}  ({os.path.getsize(npzp)} 字节；{len(wins)} 片 x 512 点 @24kHz)')
-if not rows:
-    print('❌ 一个事件都没收到 —— 检查 12V(母线电压) / F1 油门'); sys.exit(1)
-make_plot(rows, SECS, csvp.rsplit('.', 1)[0] + '.png')
 
-# ---- ★ 跑完立刻 dump【换相埋点 OL_CM_*】（RAM 易失，必须趁有电）----
-#   代码自己的注释：它"直接回答换相落在反电势周期的哪个位置"——闭环相位的唯一直接证据。
-try:
-    import subprocess as _sp
-    _nm = _sp.run(['/usr/bin/arm-none-eabi-nm','-S','obj/AM32_RM2027_ESC_G071_2.21.elf'],
-                  capture_output=True,text=True).stdout
-    _sym = {}
-    for _l in _nm.splitlines():
-        _f=_l.split()
-        if len(_f)==4: _sym[_f[3]]=int(_f[0],16)
-    def _rd(name, words):
-        _o=_sp.run(['openocd','-f','interface/stlink.cfg','-f','target/stm32g0x.cfg',
-            '-c','adapter speed 1800','-c','init','-c','halt','-c','mww 0x40003000 0xAAAA',
-            '-c',f'mdw {_sym[name]:#x} {words}','-c','mww 0x40003000 0xAAAA','-c','resume','-c','shutdown'],
-            capture_output=True,text=True)
-        # ★ openocd 把 `mdw` 的数据行写在 **stderr** 上（stdout 是空的）⇒ 必须两边都扫。
-        #   只扫 stdout 会得到空列表，接着就是 "list index out of range"（2026-10-13 踩到）。
-        _v=[]
-        for _l in (_o.stdout + _o.stderr).splitlines():
-            _m=re.match(r'^0x[0-9a-fA-F]+:\s*(.*)$',_l)
-            if _m: _v += [int(x,16) for x in _m.group(1).split()]
-        return _v
-    # ★ 字宽必须按声明来（2026-10-13 修）：mdw 一次读的是【32 位字】，
-    #   OL_CM_D 是 int16[32] ⇒ 只占 64 字节 = 16 个字，每个字里塞着 2 个 int16；
-    #   OL_CM_S 是 uint8[32] ⇒ 8 个字，每字 4 个 uint8。
-    #   原来 `_rd('OL_CM_D',32)` 读了 32 个字（= 把隔壁 OL_CM_T 也读进来当 D），
-    #   又不拆半字 ⇒ 表里印出一堆 16 位巨数（实测 1258289370058217 之类）。
-    _D=_rd('OL_CM_D',16); _T=_rd('OL_CM_T',16); _W=_rd('OL_CM_W',16); _S=_rd('OL_CM_S',8)
-    _n=_rd('ol_cm_n',1); _i=_rd('ol_cm_idx',1)
-    def _u16(ws):
-        out=[]
-        for x in ws: out += [x & 0xFFFF, (x >> 16) & 0xFFFF]
-        return out
-    def _i16(x): return x-0x10000 if x & 0x8000 else x
-    _ds=[_i16(x) for x in _u16(_D)][:32]
-    _T=_u16(_T)[:32]; _W=_u16(_W)[:32]
-    _ss=[(_S[k//4]>>((k%4)*8))&0xFF for k in range(32)]
-    # ol_cm_idx 指向"下一个要写的槽"⇒ 它是环形缓冲里最老的一条，按它起绕才是时间顺序
-    _idx=_i[0] if _i else 0
-    _ord=[(_idx+k) & 31 for k in range(32)]
-    print(f'\n★ 换相埋点（最近 32 次换相；累计 {_n[0] if _n else "?"} 次）—— 已按时间顺序排列')
-    print(f'{"序":>4}{"step":>5}{"delta(悬空相-V0)":>17}{"CNT(拍)":>9}{"waitTime":>10}')
-    for k,p in enumerate(_ord):
-        print(f'{k:4d}{_ss[p]:5d}{_ds[p]:17d}{_T[p]:9d}{_W[p]:10d}')
-    _abs=[abs(x) for x in _ds if x!=0]
-    if _abs:
-        print(f'  ⇒ |delta| 中位 {np.median(_abs):.0f} 码  最小 {min(_abs)}  最大 {max(_abs)}')
-        print(f'  ⇒ 判读：Phase 对 ⇒ 换相时 delta 应在"刚离零点、往平台走"（约幅值 1/2~1）')
-        print(f'          Phase 错（在过零点上换相）⇒ delta ≈ 0')
-    np.savez(csvp.replace('.csv','_cm.npz'), D=np.array(_ds), T=np.array(_T), W=np.array(_W), S=np.array(_ss))
-    print(f'  埋点已存 → {csvp.replace(".csv","_cm.npz")}')
-except Exception as _e:
-    print(f'（换相埋点 dump 失败：{_e}）')
+save_run(buf, SECS, OUTD_DEF)

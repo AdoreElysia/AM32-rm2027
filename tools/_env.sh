@@ -29,14 +29,20 @@ fi
 # PC 侧临时脚本目录：队友机是 <root>/rm2027-drone/work；本机可能放在数据仓或 shared 工作区
 if [ -z "${RM2027_WORK:-}" ]; then
     for _w in "$RM2027_ROOT/rm2027-drone/work" \
+               "$RM2027_ROOT/RM2027-data/rm2027-drone/work" \
                "$RM2027_ROOT/RM2027-data/drone/work" \
                "/mnt/h/AI/shared/projects/competition/rm2027-drone/work" \
                "$RM2027_ROOT/work"; do
-        [ -d "$_w" ] && { RM2027_WORK="$_w"; break; }
+        # 优先选真正带 PC 侧采集脚本的目录（避免落到空的同名目录）
+        [ -d "$_w" ] || continue
+        if [ -f "$_w/evt-dump.py" ] || [ -f "$_w/win-dump.py" ] || [ -f "$_w/zcw-dump.py" ]; then
+            RM2027_WORK="$_w"; break
+        fi
+        [ -z "${RM2027_WORK:-}" ] && RM2027_WORK="$_w"
     done
 fi
 : "${RM2027_WORK:=$RM2027_ROOT/rm2027-drone/work}"
 : "${ESC_SERIAL:=/dev/ttyUSB0}"
-: "${ESC_BAUD:=1000000}"
+: "${ESC_BAUD:=2000000}"
 
 export RM2027_ROOT RM2027_REPO RM2027_DATA RM2027_WORK ESC_SERIAL ESC_BAUD

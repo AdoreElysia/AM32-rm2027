@@ -39,11 +39,57 @@ hr() { echo "=================================================="; }
 pause() { read -rp "   (回车继续)" _; }
 
 # ---------------------------------------------------------------- 核心：编译+烧录
-core_build_flash() {
-    local BRANCH COMMIT SZ MAKE_LOG OUT
+# ★ xien/n2 收尾：分支名稳定映射成文件名（分支含 "/" 时不再 cp 到不存在的子目录），
+#   并支持"烧录已有固件"传参：esc-lab.sh flash [<分支名>|<bin路径>]
+safe_fw_name() { printf '%s' "${1:-}" | sed 's#/#__#g'; }
+
+flash_bin() {
+    local BIN="$1" SZ TRY OUT
+    [ -f "$BIN" ] || { echo "❌❌ 找不到要烧录的固件：$BIN"; return 1; }
+    SZ=$(stat -c%s "$BIN")
+    echo "→ 烧录文件：$BIN（$SZ 字节）"
+    if [ "$SZ" -gt "$MAX_SIZE" ]; then
+        echo "❌ bin $SZ > app 上限 $MAX_SIZE —— 会越界写到 EEPROM，拒绝烧录"; return 1
+    fi
+
+    echo
+    echo "---- 烧录 ----"
+    echo "⚠ 烧录【不需要 12V】：电调逻辑由 ST-Link 的 3.3V 供电就够。"
+    echo "   反过来说，开着 12V + F1 还给着油，会让 AM32 引导程序认定"
+    echo "   '信号持续高 ⇒ 进固件升级模式' 而不跳 app（实测 PC 停在 0x08000104），"
+    echo "   此时写 flash 会随机报 'block write failed'。"
+    echo "   ⇒ 请先【让 F1 收油】（额外拓展任务 [5]），最好再把 12V 关掉。"
+    # ★ xien/n2：支持非交互（VSCode 任务 / ssh）。ESC_YES=1 或 stdin 不是终端 ⇒ 直接继续
+    if [ "${ESC_YES:-0}" = "1" ] || [ ! -t 0 ]; then
+        echo "   （非交互模式：跳过回车确认）"
+    else
+        read -rp "   准备好后按回车继续（Ctrl-C 取消）" _ || { echo "❌ 没读到回车（EOF/管道）⇒ 取消烧录，安全第一"; return 1; }
+    fi
+
+    # ★ 重试 3 次：'block write failed' 大多数是瞬时（信号/电源抖动、引导程序状态）
+    for TRY in 1 2 3; do
+        OUT=$(timeout 300 openocd -f interface/stlink.cfg -f target/stm32g0x.cfg \
+            -c "adapter speed 500" -c "init" -c "reset halt" \
+            -c "flash write_image erase $BIN $APP_ADDR" \
+            -c "verify_image $BIN $APP_ADDR" \
+            -c "reset run" -c "shutdown" 2>&1)
+        echo "$OUT" | grep -aiE "wrote|verified|flash size|RDP level|block write failed|Error" | sed 's/^/  /'
+        if echo "$OUT" | grep -qai "verified"; then
+            echo "✅ 烧录完成并校验通过（第 $TRY 次尝试；只写 app 段 $APP_ADDR）"
+            return 0
+        fi
+        echo "  ⚠ 第 $TRY 次失败 —— 常见原因：① F1 还在给油（引导程序停在升级模式）② USB/ST-Link 抖动"
+        [ "$TRY" -lt 3 ] && sleep 2
+    done
+    echo "❌ 连续 3 次失败。请依次：① 让 F1 收油 ② 关掉 12V ③ 拔插一次 ST-Link 再试"
+    return 1
+}
+
+build_current() {
+    local BRANCH COMMIT SZ MAKE_LOG SAFE_BRANCH BRANCHES DEL=0 f bn
     BRANCH=$(git rev-parse --abbrev-ref HEAD)
     COMMIT=$(git rev-parse --short HEAD)
-    echo "→ 分支：$BRANCH    提交：$COMMIT"
+    echo "→ 当前分支：$BRANCH    提交：$COMMIT"
 
     echo "---- 编译 ----"
     rm -f "$BIN"
@@ -63,12 +109,12 @@ core_build_flash() {
     fi
 
     mkdir -p "$FW_DIR"
-    cp "$BIN" "$FW_DIR/$BRANCH.bin"
-    echo "→ 已固化：firmware/$BRANCH.bin"
+    SAFE_BRANCH=$(safe_fw_name "$BRANCH")
+    cp "$BIN" "$FW_DIR/$SAFE_BRANCH.bin"
+    echo "→ 已固化：firmware/$SAFE_BRANCH.bin（分支 $BRANCH）"
 
-    # 清孤儿固件（分支已不存在的）
-    local BRANCHES DEL=0
-    BRANCHES=$(git branch --format='%(refname:short)')
+    # 清孤儿固件（分支已不存在的；文件名已把 / 映射成 __）
+    BRANCHES=$(git branch --format='%(refname:short)' | while IFS= read -r b; do safe_fw_name "$b"; echo; done)
     for f in "$FW_DIR"/*.bin; do
         [ -e "$f" ] || continue
         bn=$(basename "$f" .bin)
@@ -77,39 +123,32 @@ core_build_flash() {
         fi
     done
     echo "→ 归档 $(ls -1 "$FW_DIR"/*.bin 2>/dev/null | wc -l) 个；本次删孤儿 $DEL 个"
+}
 
-    echo
-    echo "---- 烧录 ----"
-    echo "⚠ 烧录【不需要 12V】：电调逻辑由 ST-Link 的 3.3V 供电就够。"
-    echo "   反过来说，开着 12V + F1 还给着油，会让 AM32 引导程序认定"
-    echo "   '信号持续高 ⇒ 进固件升级模式' 而不跳 app（实测 PC 停在 0x08000104），"
-    echo "   此时写 flash 会随机报 'block write failed'。"
-    echo "   ⇒ 请先【让 F1 收油】（额外拓展任务 [5]），最好再把 12V 关掉。"
-    # ★ xien/n2：支持非交互（VSCode 任务 / ssh）。ESC_YES=1 或 stdin 不是终端 ⇒ 直接继续
-    if [ "${ESC_YES:-0}" = "1" ] || [ ! -t 0 ]; then
-        echo "   （非交互模式：跳过回车确认）"
-    else
-    read -rp "   准备好后按回车继续（Ctrl-C 取消）" _ || { echo "❌ 没读到回车（EOF/管道）⇒ 取消烧录，安全第一"; return 1; }
-    fi
-
-    # ★ 重试 3 次：'block write failed' 大多数是瞬时（信号/电源抖动、引导程序状态）
-    local try OUT
-    for try in 1 2 3; do
-        OUT=$(timeout 300 openocd -f interface/stlink.cfg -f target/stm32g0x.cfg \
-            -c "adapter speed 500" -c "init" -c "reset halt" \
-            -c "flash write_image erase $BIN $APP_ADDR" \
-            -c "verify_image $BIN $APP_ADDR" \
-            -c "reset run" -c "shutdown" 2>&1)
-        echo "$OUT" | grep -aiE "wrote|verified|flash size|RDP level|block write failed|Error" | sed 's/^/  /'
-        if echo "$OUT" | grep -qai "verified"; then
-            echo "✅ 烧录完成并校验通过（第 $try 次尝试；只写 app 段 $APP_ADDR）"
-            return 0
+core_build_flash() {
+    local TARGET="${1:-}"
+    if [ -n "$TARGET" ]; then
+        if [ -f "$TARGET" ]; then
+            BIN="$TARGET"
+        else
+            local SAFE; SAFE=$(safe_fw_name "$TARGET")
+            if [ -f "$FW_DIR/$SAFE.bin" ]; then
+                BIN="$FW_DIR/$SAFE.bin"
+            elif [ -f "$FW_DIR/$TARGET.bin" ]; then
+                BIN="$FW_DIR/$TARGET.bin"
+            else
+                echo "❌ 指定的固件不存在：$TARGET"
+                echo "   可用：esc-lab.sh flash <分支名>  （读 firmware/<分支名>.bin，/ 会映射成 __）"
+                echo "         或 esc-lab.sh flash <bin 路径>"
+                echo "   当前已归档："; ls -1 "$FW_DIR"/*.bin 2>/dev/null | sed 's#^#     #' || true
+                return 1
+            fi
         fi
-        echo "  ⚠ 第 $try 次失败 —— 常见原因：① F1 还在给油（引导程序停在升级模式）② USB/ST-Link 抖动"
-        [ "$try" -lt 3 ] && sleep 2
-    done
-    echo "❌ 连续 3 次失败。请依次：① 让 F1 收油 ② 关掉 12V ③ 拔插一次 ST-Link 再试"
-    return 1
+        echo "→ 指定固件模式（跳过编译）：$TARGET"
+    else
+        build_current || return 1
+    fi
+    flash_bin "$BIN"
 }
 
 # ---------------------------------------------------------------- F1 油门
@@ -195,14 +234,40 @@ main_menu() {
 # 给 VSCode tasks.json / ssh 用：不弹菜单、不等回车。
 #   esc-lab.sh flash            编译+归档+烧录（先 F1 收油）
 #   esc-lab.sh cap <秒>          只采集（cap-evt.py：给油→采→收油→存 CSV+NPZ+图）
-#   esc-lab.sh flash-cap <秒>    flash + cap（★ 先烧录复位，再采集）
+#   esc-lab.sh flash-cap <秒> [固件]  ★ 采集顺道烧录：先开串口 spool → 烧录 → 给油采 → 解析
 #   esc-lab.sh judge <秒> [标签]  计数轮判分（关窗口流）
-cmd_flash() { f1_throttle 1; core_build_flash; }
+cmd_flash() { f1_throttle 1; core_build_flash "${1:-}"; }
 cmd_cap() {
     local secs="${1:-8}"
     echo "== 窗口流采集 ${secs}s（cap-evt.py）=="
     echo "   串口 $SERIAL @ $ESC_BAUD（必须跟固件 ADC_CAP_BAUD 一致）"
     ( cd "$REPO" && python3 tools/cap-evt.py "$secs" )
+}
+# ★ xien/n2 收尾：采集顺道烧录 —— 先开串口 spool，再烧录复位，再给油采。
+#   这样不会漏掉"烧录复位 → 交棒"这段最关键的数据。烧录走 ST-Link，串口走 USB-TTL，不冲突。
+cmd_flash_cap() {
+    local secs="${1:-8}" target="${2:-}" raw spid
+    raw=$(mktemp /tmp/rm2027_spool_XXXXXX.bin)
+    export ESC_YES=1
+    echo "== 采集顺道烧录 ${secs}s：先开串口 spool → 烧录 → 收油唤醒 → 给油采 → 解析 =="
+    echo "   raw: $raw   串口: $SERIAL @ $ESC_BAUD"
+    python3 tools/serial-spool.py "$raw" &
+    spid=$!
+    sleep 0.3
+    f1_throttle 1
+    if ! core_build_flash "$target"; then
+        echo "❌ 烧录失败，停止采集"; kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; rm -f "$raw"; return 1
+    fi
+    echo "← 唤醒：先收油 1s"; f1_throttle 1; sleep 1
+    echo "→ 给油，采 ${secs}s"; f1_throttle 0
+    sleep "$secs"
+    echo "← 收油"; f1_throttle 1
+    kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null
+    echo "→ 解析 raw 并落盘（不重复驱动电机）"
+    if ! ( cd "$REPO" && python3 tools/cap-evt.py --raw="$raw" ); then
+        echo "❌ raw 解析失败；raw 保留在 $raw（可手动重跑）"; return 1
+    fi
+    rm -f "$raw"
 }
 cmd_judge() {
     local secs="${1:-11}"
@@ -213,11 +278,11 @@ if [ $# -ge 1 ]; then
     case "$1" in
       1) core_build_flash ;;
       2) core_build_flash && extra_menu ;;
-      flash)     shift; cmd_flash ;;
+      flash)     shift; cmd_flash "${1:-}" ;;
       cap)       shift; cmd_cap "${1:-8}" ;;
-      flash-cap) shift; cmd_flash && cmd_cap "${1:-8}" ;;
+      flash-cap) shift; cmd_flash_cap "${1:-8}" "${2:-}" ;;
       judge)     shift; cmd_judge "${1:-11}" "${2:-}" ;;
-      *) echo "用法: esc-lab.sh [1|2|flash|cap <秒>|flash-cap <秒>|judge <秒> <标签>]"; exit 1 ;;
+      *) echo "用法: esc-lab.sh [1|2|flash [<分支>|<bin>]|cap <秒>|flash-cap <秒> [<分支>|<bin>]|judge <秒> <标签>]"; exit 1 ;;
     esac
 else
     while :; do main_menu; done
