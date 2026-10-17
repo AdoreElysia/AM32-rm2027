@@ -199,9 +199,39 @@ core_build_flash() {
 }
 
 # ---------------------------------------------------------------- F1 油门
-f1_throttle() {   # $1 = 0 给油 / 1 收油
-    timeout 25 openocd -f interface/jlink.cfg -c "transport select swd" -f target/stm32f1x.cfg \
-        -c "adapter speed 500" -c "init" -c "halt" -c "mwb 0x20000274 $1" -c "resume" -c "shutdown" >/dev/null 2>&1
+# wait_esc_armed：等 ESC 的 AM32 走完"连续零油门约 1s"的解锁窗口。
+#   重烧/复位 ESC 后，必须给它一段真正为 0 的 DShot；只睡 1s 常常不够（实测）。
+#   这里用 SWD 读 ESC 的 armed（只读，不扰时序），最多等 ~6s。
+wait_esc_armed() {
+    local i
+    for i in $(seq 1 12); do
+        if timeout 10 "$REPO/tools/esc-dbg.sh" peek armed 2>/dev/null | grep -q '= 0x00000001'; then
+            echo "   ESC 已 armed（等待 ${i} 拍）"
+            return 0
+        fi
+        sleep 0.4
+    done
+    echo "   ⚠ 等待 ~6s 后 ESC 仍未 armed —— 继续给油，但可能起不来"
+    return 1
+}
+
+f1_throttle() {   # $1 = 0 给油 / 1 收油；写后 mdb 回读确认，失败重试 3 次
+    local val="${1:-1}" hex try out rb
+    printf -v hex '%02x' "$val"
+    for try in 1 2 3; do
+        out=$(timeout 25 openocd -f interface/jlink.cfg -c "transport select swd" -f target/stm32f1x.cfg \
+            -c "adapter speed 500" -c "init" -c "halt" -c "mwb 0x20000274 $val" \
+            -c "mdb 0x20000274 1" -c "resume" -c "shutdown" 2>&1)
+        rb=$(printf '%s\n' "$out" | sed -n 's/^0x20000274: \([0-9a-fA-F][0-9a-fA-F]\).*/\1/p' | tail -1)
+        if [ "$rb" = "$hex" ]; then
+            return 0
+        fi
+        echo "  ⚠ F1 油门写 $val 回读异常（try=$try，回读='${rb:-无}'）"
+        sleep 0.2
+    done
+    echo "❌ F1 油门写 $val 连续失败；最后输出："
+    printf '%s\n' "$out" | tail -6 | sed 's/^/    /'
+    return 1
 }
 
 # ---------------------------------------------------------------- 一条龙
@@ -283,7 +313,7 @@ main_menu() {
 #   esc-lab.sh cap <秒>          只采集（cap-evt.py：给油→采→收油→存 CSV+NPZ+图）
 #   esc-lab.sh flash-cap <秒> [固件]  ★ 采集顺道烧录：先开串口 spool → 烧录 → 给油采 → 解析
 #   esc-lab.sh judge <秒> [标签]  计数轮判分（关窗口流）
-cmd_flash() { f1_throttle 1; core_build_flash "${1:-}"; }
+cmd_flash() { echo "== 当前分支：$(git rev-parse --abbrev-ref HEAD) =="; f1_throttle 1 || { echo "❌ F1 收油失败，拒绝烧录"; return 1; }; core_build_flash "${1:-}"; }
 
 # build-only：只编译+归档+写 meta，不烧录、不碰串口/电机。
 cmd_build() { build_current; }
@@ -299,6 +329,7 @@ cmd_reuse_check() {
 cmd_cap() {
     local secs="${1:-8}"
     echo "== 窗口流采集 ${secs}s（cap-evt.py）=="
+    echo "   当前分支：$(git rev-parse --abbrev-ref HEAD)"
     echo "   串口 $SERIAL @ $ESC_BAUD（必须跟固件 ADC_CAP_BAUD 一致）"
     ( cd "$REPO" && python3 tools/cap-evt.py "$secs" )
 }
@@ -309,6 +340,7 @@ cmd_flash_cap() {
     raw=$(mktemp /tmp/rm2027_spool_XXXXXX.bin)
     export ESC_YES=1
     echo "== 采集顺道烧录 ${secs}s：先开串口 spool → 烧录 → 收油唤醒 → 给油采 → 解析 =="
+    echo "   当前分支：$(git rev-parse --abbrev-ref HEAD)"
     echo "   raw: $raw   串口: $SERIAL @ $ESC_BAUD"
     python3 tools/serial-spool.py "$raw" &
     spid=$!
@@ -317,10 +349,11 @@ cmd_flash_cap() {
     if ! core_build_flash "$target"; then
         echo "❌ 烧录失败，停止采集"; kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; rm -f "$raw"; return 1
     fi
-    echo "← 唤醒：先收油 1s"; f1_throttle 1; sleep 1
-    echo "→ 给油，采 ${secs}s"; f1_throttle 0
+    echo "← 唤醒：先收油并等 ESC armed"; f1_throttle 1 || { echo "❌ F1 收油失败"; kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; rm -f "$raw"; return 1; }
+    wait_esc_armed || true
+    echo "→ 给油，采 ${secs}s"; f1_throttle 0 || { echo "❌ F1 给油失败"; kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; rm -f "$raw"; return 1; }
     sleep "$secs"
-    echo "← 收油"; f1_throttle 1
+    echo "← 收油"; f1_throttle 1 || echo "⚠ F1 收油写失败，请手动收油/断电"
     kill -INT "$spid" 2>/dev/null; wait "$spid" 2>/dev/null
     echo "→ 解析 raw 并落盘（不重复驱动电机）"
     if ! ( cd "$REPO" && python3 tools/cap-evt.py --raw="$raw" ); then
@@ -331,6 +364,7 @@ cmd_flash_cap() {
 cmd_judge() {
     local secs="${1:-11}"
     echo "== 计数轮判分 ${secs}s（关窗口流）=="
+    echo "   当前分支：$(git rev-parse --abbrev-ref HEAD)"
     ( cd "$REPO" && python3 tools/count-run.py "$secs" "${2:-}" )
 }
 if [ $# -ge 1 ]; then

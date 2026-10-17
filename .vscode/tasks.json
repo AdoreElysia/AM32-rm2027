@@ -1,13 +1,6 @@
 {
   "version": "2.0.0",
-  "inputs": [
-    {
-      "id": "secs",
-      "type": "promptString",
-      "description": "接收/采集秒数（闭环单次 ≤7s 是发热硬上限；开环可 4~8）",
-      "default": "8"
-    }
-  ],
+  "inputs": [],
   "tasks": [
     {
       "label": "ESC 1 · 正常编译烧录（产物按分支名归档，不转电机）",
@@ -32,10 +25,10 @@
       }
     },
     {
-      "label": "ESC 2 · 编译烧录 + 接收准备（★ 当前调试主流）",
-      "detail": "esc-lab.sh flash-cap <秒>：先开串口 spool 接收 → 检查归档产物/按需编译烧录并复位（ESC_REUSE=1 安全复用） → 收油唤醒 → 给油采 N 秒 → 收油 → cap-evt.py --raw 解析落 CSV/NPZ/图。顺序关键：接收先于烧录，才不漏复位后第一段。⚠ 本任务会转电机，必须无桨/固定/限流。",
+      "label": "ESC 2 · 编译烧录 + 接收准备（固定采 7s，★ 当前调试主流）",
+      "detail": "esc-lab.sh flash-cap 7：先开串口 spool 接收 → 编译（源码改了自动重编）/安全复用 → 烧录复位 → 等 ESC armed → 给油采 7s → 收油 → cap-evt.py --raw 解析落 CSV/NPZ/图。固定 7s，不再需要单独输入秒数；固件开环安全上限仍是 8s。⚠ 会转电机，必须无桨/固定/限流。",
       "type": "shell",
-      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-cap '${input:secs}'",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-cap 7",
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {

@@ -19,13 +19,15 @@
  *   XIEN_OL_INPUT   ：油门刻度（不是最终 duty！最终 duty 看 CSV 的 duty 列）。
  *                     参考：旧交棒点 OL_INPUT_RUN=340 ⇒ 实测 duty≈290；
  *                     想要 duty≈300，可先从 347~350 试，再按 CSV 实测微调。
- *   XIEN_OL_STEP_DIV：开环步长，命令 ci = 本值 × 100 拍（TIM2 拍=0.5µs）。
+ *   XIEN_OL_STEP_DIV：开环步长终点，命令 ci = 本值 × 100 拍（TIM2 拍=0.5µs）。
  *                     17 → 1700 拍 → ≈1961 rpm（慢档，对照旧锚点）
  *                     13 → 1300 拍 → ≈2564 rpm
  *                     11 → 1100 拍 → ≈3030 rpm（贴近好闭环 1000~1083）
  *                     10 → 1000 拍 → ≈3333 rpm（好闭环最快档）
  *
- *   ⚠ 纯开环下转子必须自己跟得上；一有堵转/电流爬升立即 F1 收油。
+ *   ★ 保留已知好开环链：起点固定 OL_STEP_DIV_START=5000、OL_INPUT_START=400，
+ *     仍走"对齐 200ms → 斜坡 ~3.2s → 恒速 → 不交棒"；你改的只是斜坡【终点】。
+ *     ⚠ 纯开环下转子必须自己跟得上；一有堵转/电流爬升立即 F1 收油。
  * ========================================================================== */
 #ifndef XIEN_OL_SCAN_MODE
 #define XIEN_OL_SCAN_MODE   1
@@ -3166,7 +3168,7 @@
 #endif
 
 #if XIEN_OL_SCAN_MODE
-#define OL_STEP_DIV_START  XIEN_OL_STEP_DIV
+#define OL_STEP_DIV_START  5000    /* ★ 保留已知好斜坡起点：5000 拍=250ms/步（不再跟着目标改） */
 #else
 #define OL_STEP_DIV_START  5000    /* 斜坡起点（还原归档值）：5000 拍=250ms/步 ⇒ 约 6.7 机械 RPM */
 #endif
@@ -3251,7 +3253,7 @@
  *   ⇒ 还原。F1 侧 APP_ESC_TEST_RAMP_TARGET 也同步回 400 ⇒ 交棒前后都是 duty 351，无台阶。
  *   （之前改成 750 的动机是"低 KV 电机需要更高电压"，但那让开环偏离了验证过的工况。） */
 #if XIEN_OL_SCAN_MODE
-#define OL_INPUT_START     XIEN_OL_INPUT
+#define OL_INPUT_START     400     /* ★ 保留已知好起步油门：400（档值）；扫描只改 OL_INPUT_RUN */
 #else
 #define OL_INPUT_START     400     /* 回归档值（同上）*/
 #endif
