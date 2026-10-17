@@ -3247,7 +3247,13 @@
 #define ADC_CAP_CH2  BEMF_ADC_PHASE_B_CH    /* 第 1 列 = VB (PA4) */
 #endif
 #ifndef ADC_CAP_BAUD
-#define ADC_CAP_BAUD     1000000   /* 1 Mbaud */
+/* ★★ xien/n2b：波特率 1 Mbaud -> 2 Mbaud（与 xien/n2 串口收尾一致）★★
+ *   MCU G071 @64MHz、USART 16 倍过采样：上限 = 64M/16 = 4 Mbaud；
+ *   2 Mbaud 的 USARTDIV=32（整数、零误差）。真正瓶颈是 USB-TTL 芯片：
+ *   CH340/CP2102 一般 2M，FT232 3M，CH343 6M。
+ *   窗口包 6156 B 的 DMA 占用从 61.6ms 降到 30.8ms，事件流上限从 ~3400rpm 抬到 ~6700rpm。 */
+#define ADC_CAP_BAUD     2000000
+
 #endif
 
 #define USE_SERIAL_TELEMETRY

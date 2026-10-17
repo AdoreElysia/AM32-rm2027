@@ -526,7 +526,12 @@ volatile uint8_t  ccm_step[CCM_N];
                                   *   [44..45] input（速度环输入）
                                   *   [46..47] stall_protection_adjust(低16)
                                   *   [48] crc8(前 48 字节) */
-#define EVT_BUF_N   1024
+/* ★★ xien/n2b：事件环形缓冲 1024 -> 4096 字节 ★★
+ *   窗口包 6156 B 一次性交给 DMA 期间，事件只能进这个环；1024 B 只装 20 个事件，
+ *   1 Mbaud 下发一窗 61.6ms @1000 次/s ≈ 62 个事件 ⇒ 每发一窗丢 ~40 个。
+ *   4096 B = 83 个事件 ≈ 83ms，覆盖 2 Mbaud 的一次窗口发送（30.8ms）绰绰有余。
+ *   ⚠ RAM +3KB（本芯片 16KB，注意 targets.h 里 64KB 宏的坑）。 */
+#define EVT_BUF_N   4096
 #define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
 volatile uint16_t evt_head;
@@ -2116,8 +2121,12 @@ volatile uint32_t win_seq;
 volatile uint32_t win_ts;
 volatile uint32_t win_sent;      /* 已发出的窗口数 —— 没增长就说明卡住了 */
 volatile uint8_t  win_tx[200];
-volatile uint8_t  win_enable = 1;   /* ★ 运行时开关：0 = 停发窗口流，把 1Mbaud 全给事件流
+volatile uint8_t  win_enable = 1;   /* ★ 运行时开关：0 = 停发窗口流，把带宽全给事件流
                                      *   （跑"全变量"那轮用它；SWD 写 0/1 即可，不用重编译）*/
+/* ★★ xien/n2b：窗口流降采样倍数（运行时可经 SWD 写，不用重编译）★★
+ *   1 = 每窗都发；N = 每 N 个窗只发 1 个。窗内仍 512 点全速，N 只改"多久拿一窗"。
+ *   写：tools/esc-dbg.sh poke16 win_every_n <N>；上电初值 = targets.h 的 RM2027_WIN_EVERY_N。 */
+volatile uint16_t win_every_n = RM2027_WIN_EVERY_N;
 static uint8_t    win_pkt[WIN_TOTAL];    /* ★ 整包组好后一次性交给 DMA（见 win_pump）*/
 
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
@@ -2166,20 +2175,18 @@ void win_pump(void)
     }
     if (!tx_ready()) { return; }            /* 串口忙（可能事件流在用）⇒ 等下一轮 */
     if (win_state != 1u) { return; }        /* 只有"采满待发"才动 */
-#if RM2027_WIN_EVERY_N > 1
-    /* ★ 窗口流降采样：只发每 N 个窗中的一个。其余在【组包之前】就丢掉
-     *   —— 组包本身要跑 512 次循环、发送要占 DMA，两者都是扰动的来源。
-     *   win_seq 照旧 +1（主机端可从 seq 空档看出降采样），win_sent 不加。 */
-    {
+    /* ★★ xien/n2b：窗口流降采样（运行时变量 win_every_n）★★
+     *   非采样窗在【组包之前】就丢掉 —— 组包本身要跑 512 次循环、发送要占 DMA，
+     *   两者都是扰动的来源。win_seq 照旧 +1（主机端从 seq 空档看出降采样），win_sent 不加。 */
+    if (win_every_n > 1u) {
         static uint16_t win_skip = 0;
         if (win_skip) {
             win_skip--;
             win_n = 0; win_state = 0u; win_seq++;
             return;
         }
-        win_skip = (RM2027_WIN_EVERY_N - 1);
+        win_skip = (uint16_t)(win_every_n - 1u);
     }
-#endif
 
     /* 组包（此时 ISR 已停写：win_state != 0 时 win_push 直接返回）*/
     win_pkt[0] = 0xA5; win_pkt[1] = 0x5A; win_pkt[2] = 0xA5; win_pkt[3] = 0x5A;

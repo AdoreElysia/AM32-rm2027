@@ -53,7 +53,8 @@ void telem_UART_Init()
 #if ADC_CAPTURE_MODE
     USART_InitStruct.BaudRate = ADC_CAP_BAUD;   /* ★ 捕获模式：1 Mbaud */
 #else
-    USART_InitStruct.BaudRate = 1000000;   /* ★ 2026-10-11 1 Mbaud：事件流需要 ~10KB/s */
+    USART_InitStruct.BaudRate = ADC_CAP_BAUD;  /* ★★ xien/n2b：统一走 ADC_CAP_BAUD（默认 2 Mbaud）
+                                                *   原来硬编码 1000000 会让 targets.h 里的波特率宏失效。 */
 #endif
     USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
