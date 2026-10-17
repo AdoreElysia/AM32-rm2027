@@ -58,9 +58,10 @@ def segments_from_window(win, min_len=8):
         m = (t >= 0.20 * (n - 1)) & (t <= 0.80 * (n - 1))
         if m.sum() < 4:
             continue
-        amp = float(np.percentile(y, 97) - np.percentile(y, 3))
-        off = float(np.median(y[m]))
+        # ★ 只用中段线性拟合的“整步变化量”当幅值，避免换相尖峰污染 P97-P3。
         k, b0 = np.polyfit(t[m], y[m], 1)
+        amp = float(abs(k) * (n - 1))
+        off = float(k * (n - 1) / 2.0 + b0)          # 拟合线在中点的值
         resid = float(np.sqrt(np.mean((y[m] - (k * t[m] + b0)) ** 2)))
         phase = float((-b0 / k) / (n - 1)) if abs(k) > 1e-12 else None
         out.append(dict(step=s, i0=int(a), i1=int(b - 1), n=int(n),
