@@ -15,9 +15,21 @@
 #define XIEN_OL_STEP_DIV   17      // 斜坡【终点】开环步长；命令 ci = 本值 × 100 拍
 ```
 
-> ★ 启动链保持 test-12 验证过的写法：
-> 对齐 200ms → 斜坡 ~3.2s（`OL_STEP_DIV_START=5000`、`OL_INPUT_START=400`）→ 恒速 → **不交棒**。
-> 你改的只是斜坡终点，不再跳过斜坡。
+> ★ 启动链保持 test-12 原样：
+> 5000 起 → 554 Hz/s 连续升频 → `OL_INPUT_START=400` → 恒速 → **不交棒**；
+> 8s 安全上限、事件流关闭。
+>
+> ★ 终点现在是**细粒度 ci（0.5µs 拍）**，不是整数 step_div：
+> ```c
+> XIEN_OL_CI_TGT     // 目标换相间隔（拍），1 拍分辨率
+> XIEN_OL_INPUT_TGT  // 目标运行油门
+> ```
+> 运行时直接改，不用重编译：
+> ```bash
+> ./tools/esc-dbg.sh poke32 ol_ci_tgt 1650      # 目标 ci=1650 拍（≈1212Hz / 2020rpm）
+> ./tools/esc-dbg.sh poke16 ol_input_tgt 345    # 目标油门刻度
+> ```
+> 改目标后实际频率按 554Hz/s 平滑跟随（升/降都限速），不会跳变。
 
 | `XIEN_OL_STEP_DIV` | 命令 ci（拍） | 目标 rpm | 用途 |
 |---|---|---|---|
@@ -145,23 +157,21 @@ f_comm_hz / rpm_median / ESC_DUTY / ESC_STEP_DIV / ESC_TAG`
 
 ---
 
-## 8. 连续升频参数（本次修正）
+## 8. 连续升频 / 细粒度终点（按用户要求）
 
-现在的开环斜坡是**恒定斜率连续升频**：`f(t)` 以 `ol_freq_slope` Hz/s 从起点频率升到目标；
-每个换相步只增加很小的频率增量，不是阶跃跳变。
-
-本分支默认：
-
-```c
-#define XIEN_OL_FREQ_SLOPE 400   // Hz/s（比原来的 554 更缓、更连续）
-#define XIEN_OL_RUN_MS     10000 // 开环总时长上限 10s（原 8s）
-```
-
-- 想更连续/更缓：把 `XIEN_OL_FREQ_SLOPE` 改成 300 或更低；
-- 想更快：改大（例如 554/700），但丢步风险变大；
-- **运行时可经 SWD 改，不用重编译**：
+- 启动链完全按 test-12：`OL_STEP_DIV_START=5000`、`OL_INPUT_START=400`、`ol_freq_slope=554 Hz/s`、8s 上限。
+- 升频是恒定斜率连续变化，不是阶跃。
+- **终点细粒度**：`ol_ci_tgt` 是目标 ci（0.5µs 拍），1 拍分辨率；不再是整数 step_div。
   ```bash
-  ./tools/esc-dbg.sh poke16 ol_freq_slope 300
-  ./tools/esc-dbg.sh poke16 ol_freq_slope 554
+  ./tools/esc-dbg.sh poke32 ol_ci_tgt 1700   # 1176.5Hz ≈1961rpm
+  ./tools/esc-dbg.sh poke32 ol_ci_tgt 1650   # ≈1212Hz ≈2020rpm
+  ./tools/esc-dbg.sh poke32 ol_ci_tgt 1600   # ≈1250Hz ≈2083rpm
   ```
-- 目标频率仍然由 `XIEN_OL_STEP_DIV` 决定；`ol_freq_slope` 只决定“多快爬到目标”。
+- 终点油门：
+  ```bash
+  ./tools/esc-dbg.sh poke16 ol_input_tgt 340 # duty≈290
+  ./tools/esc-dbg.sh poke16 ol_input_tgt 345 # duty≈295
+  ```
+- 目标可在运行中改：`ol_freq_q` 会按 `ol_freq_slope` 从当前频率平滑升/降到新目标，`ol_input_cur` 同步平滑过渡。
+- `ol_freq_slope` 本身也可 SWD 调（一般不建议动，默认 554）：`poke16 ol_freq_slope 554`。
+

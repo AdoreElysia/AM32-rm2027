@@ -726,6 +726,20 @@ uint16_t ol_step_current[6];                /* 观测：六步各自的反推相
 uint8_t  ol_state = 0;                      /* 0 空闲 / 1 对齐 / 2 斜坡 / 3 恒速 */
 uint16_t ol_input_cur = OL_INPUT_RUN;       /* 当前实际用的油门刻度（状态机维护）*/
 uint16_t ol_step_div_cur = OL_STEP_DIV;     /* 当前实际步长（斜坡中变化；单位 20kHz 拍）*/
+/* ★★★ 细粒度开环目标（xien/n1）★★★
+ *   ol_ci_tgt   : 目标换相间隔，单位 0.5µs 拍（不是整数 step_div），可 SWD poke32 微调；
+ *   ol_input_tgt: 目标运行油门刻度，可 SWD poke16 微调；
+ *   ol_ci_cur   : 当前实际换相间隔（细粒度），用于生成 commutation_interval。 */
+#ifndef XIEN_OL_CI_TGT
+#define XIEN_OL_CI_TGT ((uint32_t)OL_STEP_DIV * 100UL)
+#endif
+#ifndef XIEN_OL_INPUT_TGT
+#define XIEN_OL_INPUT_TGT OL_INPUT_RUN
+#endif
+volatile uint32_t ol_ci_tgt = XIEN_OL_CI_TGT;
+volatile uint16_t ol_input_tgt = XIEN_OL_INPUT_TGT;
+volatile uint32_t ol_ci_cur = 500000UL;     /* 起步 ci：OL_STEP_DIV_START*100，startMotor 会覆盖 */
+volatile uint8_t  ol_tgt_armed = 0;         /* 目标首次到达时只武装一次捕获环 */
 uint16_t ol_trip_count = 0;                 /* 观测：过流连续超限计数 */
 uint32_t ol_trips = 0;                      /* 观测：累计过流跳闸次数 */
 uint32_t ol_iphase_last = 0;                /* 观测：最近反推出来的相电流（厘安）*/
@@ -1354,8 +1368,9 @@ static void olStartupTick(void)
         return;
     }
 
-    /* 期望间隔换算成 0.5µs 单位（TIM2 的拍），既当时间基准又给遥测算 eRPM */
-    commutation_interval = (uint32_t)ol_step_div_cur * 100;
+    /* 期望间隔：与 test-12 原链一致，直接使用当前细粒度 ci；
+     * 起步时 ol_ci_cur = OL_STEP_DIV_START*100 = 500000，对齐后进入斜坡。 */
+    commutation_interval = ol_ci_cur;
 
     /* ---- 阶段推进 ---- */
     if (ol_startup_stage == OL_STARTUP_ALIGN) {
@@ -1381,55 +1396,50 @@ static void olStartupTick(void)
              *     第 1 步 250ms（4.0 步/秒）→ 第 2 步直接跳到 142.5 步/秒（7ms/步）
              *     → 之后近似线性爬升 → 第 2965 步 / 3.27 秒 到 1818 步/秒。
              *   （指数版 OL_RAMP_UP_Q 的定义保留但不再使用。） */
-            if (ol_freq_q < ol_freq_tgt_q) {
-                ol_freq_q += ((uint32_t)ol_freq_slope * 65536UL) / ol_freq_q;
-                if (ol_freq_q <= 0UL) { ol_freq_q = 1UL; }   /* 防 0 起步卡死 */
+            /* ★ 运行时目标：允许 SWD 改 ol_ci_tgt，实际 f 按 ol_freq_slope 平滑跟随，
+             *   上升/下降都限速，不会阶跃。 */
+            if (ol_ci_tgt < 100UL) { ol_ci_tgt = 100UL; }
+            ol_freq_tgt_q = 512000000UL / ol_ci_tgt;
+            {
+                uint32_t inc = ((uint32_t)ol_freq_slope * 65536UL) / ol_freq_q;
+                if (inc < 1UL) { inc = 1UL; }
+                if (ol_freq_q < ol_freq_tgt_q) {
+                    ol_freq_q += inc;
+                    if (ol_freq_q > ol_freq_tgt_q) { ol_freq_q = ol_freq_tgt_q; }
+                } else if (ol_freq_q > ol_freq_tgt_q) {
+                    if (ol_freq_q > ol_freq_tgt_q + inc) { ol_freq_q -= inc; }
+                    else { ol_freq_q = ol_freq_tgt_q; }
+                }
 
-                /* ★★★ 2026-10-11 新增 V/f：占空比跟着频率一起升 ★★★
-                 *   业界做法（乐鑫 esp_sensorless_bldc_control 的强拖参数有【两套】：
-                 *   频率 RAMP_TIM_* 与占空比 RAMP_DUTY_*）——他们让占空比随频率一起升。
-                 *   我们原来全程恒定 OL_INPUT_*（400）⇒ 低速段电压远超反电势
-                 *   （电流白烧、发热），高速段又正好相反。
-                 *   ★ 对【低惯量 + 齿槽明显】的电机，这条尤其要紧：
-                 *     低速段需要足够电压"冲过齿槽坡"（本分支注释：约 900RPM 以上动量才够），
-                 *     过了门槛再把这部分电压收回来，电流才不会白烧。
-                 *   实现：把 ol_input_cur 从 OL_INPUT_START（斜坡起点，高）
-                 *   线性插到 OL_INPUT_RUN（斜坡终点，低），按频率比例。
-                 *   ⇒ f = f0 时 = START；f = f_tgt 时 = RUN。 */
+                /* V/f：油门从 OL_INPUT_START 按频率比例插到 ol_input_tgt */
                 {
-                    uint32_t f0 = (20000UL * 256UL) / (uint32_t)OL_STEP_DIV_START;
+                    uint32_t f0 = 512000000UL / ((uint32_t)OL_STEP_DIV_START * 100UL);
                     uint32_t ft = ol_freq_tgt_q;
-                    if (ft > f0 && OL_INPUT_START > OL_INPUT_RUN) {
+                    if (ft > f0) {
                         uint32_t num = (ol_freq_q > f0) ? (ol_freq_q - f0) : 0u;
                         uint32_t den = ft - f0;
                         if (num > den) { num = den; }
-                        ol_input_cur = (uint16_t)((uint32_t)OL_INPUT_START
-                            - ((uint32_t)(OL_INPUT_START - OL_INPUT_RUN) * num) / den);
+                        {
+                            int32_t in0 = (int32_t)OL_INPUT_START;
+                            int32_t in1 = (int32_t)ol_input_tgt;
+                            ol_input_cur = (uint16_t)(in0 + ((in1 - in0) * (int32_t)num) / (int32_t)den);
+                        }
                     }
                 }
+
                 if (ol_freq_q >= ol_freq_tgt_q) {
                     ol_freq_q = ol_freq_tgt_q;
-                    ol_step_div_cur = OL_STEP_DIV;
-                    /* ★★★ 2026-10-11 武装点从"交棒处"提前到"斜坡跑完处" ★★★
-                     *   教训：原来在交棒处武装 ⇒ 环刚开始滚动就被触发了
-                     *   （实测 trig_idx=4）⇒ 窗口里"触发前 10.7ms"是上一轮的旧数据。
-                     *   这里提前约 1 秒武装（斜坡完 ⇒ 热身 1s ⇒ 交棒）⇒ 滚动环填满，
-                     *   触发点落在"转速一开始掉"那一刻 ⇒ 窗口 = 开环尾段 + 开始变慢过程。
-                     *   阈值取"目标步长 x 1.125"：开环时步长恒 = OL_STEP_DIV x 100，
-                     *   一旦闭环接管后转速掉，步长就会超过它 ⇒ 正好是"开始变慢"的时刻。 */
-                    /* ★ 本轮实验：改用"油门切 0（开始滑行）"触发，所以 ci 阈值给成
-                     *   永不触发（0xFFFFFFFF）—— 但要保留这次 arm（它负责清环形缓冲）。*/
-                    ol_hold_ms = ms10k_cnt;   /* ★ 纯开环计时从这里开始 */
-                    adc_zc_wave_arm(0xFFFFFFFFu);
+                    ol_ci_cur = ol_ci_tgt;                 /* 细粒度终点：1 拍分辨率 */
+                    ol_step_div_cur = (uint16_t)(ol_ci_tgt / 100UL);
+                    ol_input_cur = ol_input_tgt;
+                    if (!ol_tgt_armed) {
+                        ol_tgt_armed = 1;
+                        ol_hold_ms = ms10k_cnt;
+                        adc_zc_wave_arm(0xFFFFFFFFu);
+                    }
                 } else {
-                    uint32_t d = (20000UL * 256UL) / ol_freq_q;
-                    if (d > 0xFFFFu) {
-                        d = 0xFFFFu;
-                    }
-                    if (d < (uint32_t)OL_STEP_DIV) {
-                        d = (uint32_t)OL_STEP_DIV;
-                    }
-                    ol_step_div_cur = (uint16_t)d;
+                    ol_ci_cur = 512000000UL / ol_freq_q;
+                    ol_step_div_cur = (uint16_t)(ol_ci_cur / 100UL);
                 }
             }
         }
@@ -1446,7 +1456,7 @@ static void olStartupTick(void)
      *   rising 与实际边沿方向的对应关系一旦反了，就【一个都数不到】⇒ 永远不交棒，
      *   表现出来就只是"电机在慢慢爬坡"（正是用户说的"缓慢抖动"）。 */
     {
-        if (ol_step_div_cur <= OL_STEP_DIV) {
+        if (ol_freq_q >= ol_freq_tgt_q) {
             /* 只有斜坡已经跑到终点（= 交棒转速 2222RPM）之后才开始数：
              * 之前的转速低、反电势小，数出来的都不是可靠的过零。 */
             int16_t d = adc_bemf_get_delta();
@@ -1492,13 +1502,13 @@ static void olStartupTick(void)
     ol_steps_show = ol_steps;
 
     /* ---- 交棒 ----
-     * 条件：斜坡已跑到底（ol_step_div_cur <= OL_STEP_DIV ⇒ 转速就是交棒转速）
+     * 条件：斜坡已跑到底（ol_freq_q >= ol_freq_tgt_q ⇒ 转速就是交棒转速）
      *       且认到 OL_STARTUP_ZC_NEED 次过零（说明反电势确实出来了、转子在跟着转）。
      * 为什么必须"斜坡跑到底"：只认过零不看斜坡 ⇒ 起步早期（div 还很大、转子几乎没转）
      *   会被噪声骗去交棒，实测只走 3 步就交棒、之后闭环不换相、steps 冻住。 */
     /* ---- 交棒前先"验证"：开环继续驱动，只在旁边核对闭环认到的过零速率 ---- */
     ol_verify_ok_show = ol_verify_ok;
-    if (ol_step_div_cur <= OL_STEP_DIV) {
+    if (ol_freq_q >= ol_freq_tgt_q) {
         /* ★★★ 2026-10-10 先恒速热身 OL_SOAK_TICKS 拍，再开始验证计数 ★★★
          *   用户指出："你开环压根没到匀速转的时候"。原来斜坡一跑到底、验证窗一达标
          *   （3×100ms）就交棒 ⇒ 开环全程约 0.5 秒，电机从没在恒定转速上稳过
@@ -1510,7 +1520,7 @@ static void olStartupTick(void)
         if (ol_soak_ticks < OL_SOAK_TICKS) {
             ol_soak_ticks++;              /* 恒速热身中：只跑、不判 */
         } else if (++ol_verify_ticks >= OL_VERIFY_WIN) {
-            uint16_t expect = (uint16_t)(OL_VERIFY_WIN / OL_STEP_DIV);
+            uint16_t expect = (uint16_t)(((uint32_t)OL_VERIFY_WIN * 100UL) / ol_ci_tgt);
             ol_verify_ticks = 0;
             if (ol_startup_zc >= (uint16_t)(expect - (expect / 3))) {
                 if (ol_verify_ok < 250) { ol_verify_ok++; }
@@ -1523,7 +1533,7 @@ static void olStartupTick(void)
     }
 
     /* ★★★ 2026-10-11 关键修复⑩：交棒块必须【锁存】—— 只执行一次 ★★★
-     *   原条件 `!OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS`
+     *   原条件 `!OL_HOLD_OPENLOOP && ol_freq_q >= ol_freq_tgt_q && OL_VERIFY_PASS`
      *   在交棒之后【仍然成立】：
      *     · ol_step_div_cur 停在 OL_STEP_DIV 不再变；
      *     · ol_verify_ok 只在开环 tick 里更新，而交棒后开环 tick 不再跑 ⇒ 它保持
@@ -1535,7 +1545,7 @@ static void olStartupTick(void)
      *   实测铁证：闭环波形捕获的触发次数 = 8000 次（应为 1 次）—— 因为每次跑这段
      *   都会调 adc_zc_wave_arm() 把捕获重新武装。
      *   ⇒ 加 ol_startup_arm 作锁存（本块自己会清它）⇒ 保证只执行一次。 */
-    if (ol_startup_arm && !OL_HOLD_OPENLOOP && ol_step_div_cur <= OL_STEP_DIV && OL_VERIFY_PASS) {
+    if (ol_startup_arm && !OL_HOLD_OPENLOOP && ol_freq_q >= ol_freq_tgt_q && OL_VERIFY_PASS) {
         ol_startup_arm = 0;          /* 退出开环：此后换相交给过零中断闭环 */
         /* ★ 闭环自动停机的计时起点：以"交棒这一刻"为 0（见主循环里的到点检查）*/
         cl_run_start = adc_frame_total;
@@ -2713,10 +2723,15 @@ void startMotor()
         ol_startup_zc    = 0;
         ol_startup_ticks = 0;
         ol_startup_trip  = 0;
-        ol_step_div_cur  = (OL_STEP_DIV_START > OL_STEP_DIV) ? OL_STEP_DIV_START : OL_STEP_DIV;
-        /* ★ 恒定斜率升频初始化：起点频率、终点频率（f = 20000/div 步/秒，×256 定点） */
-        ol_freq_q     = (20000UL * 256UL) / (uint32_t)ol_step_div_cur;
-        ol_freq_tgt_q = (20000UL * 256UL) / (uint32_t)OL_STEP_DIV;
+        /* ★ 细粒度目标：ol_ci_tgt 是目标 ci 拍；起点仍 5000；
+         *   f_q = 512000000 / ci（2MHz × 256）⇒ 目标频率可以精确到 1 拍。 */
+        if (ol_ci_tgt < 100UL) { ol_ci_tgt = 100UL; }   /* 防 0/负目标 */
+        ol_step_div_cur  = (OL_STEP_DIV_START > (uint16_t)(ol_ci_tgt / 100UL))
+                           ? OL_STEP_DIV_START : (uint16_t)(ol_ci_tgt / 100UL);
+        ol_ci_cur = (uint32_t)ol_step_div_cur * 100UL;
+        ol_tgt_armed = 0;
+        ol_freq_q     = 512000000UL / ol_ci_cur;
+        ol_freq_tgt_q = 512000000UL / ol_ci_tgt;
         ol_input_cur     = OL_INPUT_START;
         commutation_interval = (uint32_t)OL_ALIGN_TICKS * 100;   /* 0.5µs 单位 ⇒ 对齐时长 */
         SET_INTERVAL_TIMER_COUNT(0);

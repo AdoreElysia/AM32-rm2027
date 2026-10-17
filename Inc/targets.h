@@ -43,15 +43,23 @@
 #ifndef RM2027_EVT_STREAM
 #define RM2027_EVT_STREAM  0
 #endif
-/* ★ 连续升频参数：ol_freq_slope = 加速度（Hz/s）。当前 554 改到 400：
- *   更缓 => 每换相频率增量更小 => 更连续；同时 10s 运行上限保证高目标也能到。
- *   运行时可经 SWD 再调：tools/esc-dbg.sh poke16 ol_freq_slope 300（不用重编译）。 */
+/* ★ 连续升频参数：按 test-12 原样 554 Hz/s；启动链保持原样。
+ *   运行时可经 SWD 再调：tools/esc-dbg.sh poke16 ol_freq_slope 400/300。 */
 #ifndef XIEN_OL_FREQ_SLOPE
-#define XIEN_OL_FREQ_SLOPE 400
+#define XIEN_OL_FREQ_SLOPE 554
 #endif
-/* ★ 开环总时长上限（ms）：默认 10000 = 10s（斜坡 400Hz/s 到 ~2000Hz 需约 5s，留 5s 稳态）。 */
+/* ★ 开环总时长上限（ms）：按 test-12 原样 8s；8/10 不影响本次试验。 */
 #ifndef XIEN_OL_RUN_MS
-#define XIEN_OL_RUN_MS     10000
+#define XIEN_OL_RUN_MS     8000
+#endif
+/* ★ 细粒度终点：直接给“换相间隔 ci（0.5µs 拍）”，不是整数 step_div。
+ *   例：1700、1650、1600、1550 ... 每 1 拍都有效（1700 处约 0.06% 分辨率）。
+ *   默认仍从 XIEN_OL_STEP_DIV*100 来；运行时 poke32 ol_ci_tgt <ticks> 可改。 */
+#ifndef XIEN_OL_CI_TGT
+#define XIEN_OL_CI_TGT     ((uint32_t)XIEN_OL_STEP_DIV * 100UL)
+#endif
+#ifndef XIEN_OL_INPUT_TGT
+#define XIEN_OL_INPUT_TGT  XIEN_OL_INPUT
 #endif
 #ifndef OL_HOLD_OPENLOOP
 #if XIEN_OL_SCAN_MODE

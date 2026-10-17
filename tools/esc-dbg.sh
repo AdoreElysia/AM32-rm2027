@@ -18,6 +18,9 @@
 #   tools/esc-dbg.sh ramcheck        验证 16K 之外真的有 RAM（改链接脚本后跑一次）
 #   tools/esc-dbg.sh addr <符号名>    打印某符号的当前地址
 #   tools/esc-dbg.sh peek <符号名>    读一个变量（u32）
+#   tools/esc-dbg.sh poke <名> <val>  写 8 位
+#   tools/esc-dbg.sh poke16 <名> <val> 写 16 位
+#   tools/esc-dbg.sh poke32 <名> <val> 写 32 位（细粒度目标 ol_ci_tgt 用这个）
 #   tools/esc-dbg.sh clear           清捕获状态（跑前先清，避免读到上一轮残留）
 #   tools/esc-dbg.sh settrig <帧数>   设"交棒后多少帧"触发点（1 帧 = 41.67µs；1500ms => 36000）
 #   tools/esc-dbg.sh arm [<帧数>]     clear + settrig 一步到位（跑前）
@@ -90,6 +93,16 @@ case "$cmd" in
     run_oc -c "mwh $a $3" >/dev/null
     v=$(rd32 "$a")
     echo "$2 @ $a ← $3   （回读 0x$v，低 16 位 = $(( 16#${v: -4} )))"
+    ;;
+
+  poke32)
+    # poke32 <符号名> <值> —— 写【32 位】(mww)。给细粒度目标 ci 用：
+    #   tools/esc-dbg.sh poke32 ol_ci_tgt 1700   → 目标换相间隔 1700 拍（1 拍分辨率）
+    [ $# -ge 3 ] || { echo "用法: esc-dbg.sh poke32 <符号名> <0..4294967295>"; exit 1; }
+    a=$(need "$2")
+    run_oc -c "mww $a $3" >/dev/null
+    v=$(rd32 "$a")
+    echo "$2 @ $a ← $3   （回读 0x$v）"
     ;;
 
   ramcheck)
