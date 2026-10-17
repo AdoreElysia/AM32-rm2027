@@ -1,21 +1,108 @@
 {
   "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "secs",
+      "type": "promptString",
+      "description": "采集秒数（闭环单次 ≤7s 是发热硬上限；闭环判分建议 6~11，开环可 4~8）",
+      "default": "10"
+    },
+    {
+      "id": "N",
+      "type": "promptString",
+      "description": "窗口流降采样倍数 N（1=每窗都发；窗内始终 512 点全速。2Mbaud 下 N=8 约占 15% 带宽）",
+      "default": "8"
+    },
+    {
+      "id": "baud",
+      "type": "pickString",
+      "description": "串口波特率（必须与固件 Inc/targets.h 的 ADC_CAP_BAUD 一致）",
+      "options": ["1000000", "1500000", "2000000", "3000000"],
+      "default": "2000000"
+    }
+  ],
   "tasks": [
     {
-      "label": "ESC-Lab：电调实验唯一入口（编译 → 改名 → 烧录 → 采集）",
-      "detail": "菜单：1=编译当前分支→固件改名→烧录；2=1+额外拓展任务（窗口采样/跑前arm/跑后dump/给油收油/一条龙）。全部动作见 tools/esc-lab.sh",
+      "label": "ESC 1 · 编译 + 烧录（纯烧录，不动串口）",
+      "detail": "esc-lab.sh flash：make → 归档 firmware/<分支>.bin → F1 收油 → openocd 烧 0x08001000 → 校验 → reset run。烧录走 ST-Link(SWD)，与串口是两个 USB 设备，互不冲突。",
       "type": "shell",
-      "command": "bash /home/lpl/桌面/RM2027/AM32-rm2027/tools/esc-lab.sh",
-      "problemMatcher": [],
-      "group": {
-        "kind": "build",
-        "isDefault": true
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "ESC_YES": "1" }
       },
-      "presentation": {
-        "reveal": "always",
-        "panel": "shared",
-        "clear": true
-      }
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "ESC 2 · 烧录 + 窗口流采集（★ 主用）",
+      "detail": "esc-lab.sh flash-cap <秒>：先烧录复位、再跑 cap-evt.py（给油→采→收油→存 CSV+NPZ+图）。顺序关键：先烧录后采集，才不漏掉重启后第一段。",
+      "type": "shell",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-cap '${input:secs}'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "ESC_YES": "1", "ESC_BAUD": "${input:baud}" }
+      },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "ESC 3 · 只采集（不烧录，窗口流）",
+      "detail": "esc-lab.sh cap <秒>：不编译不烧录，直接采一段（窗口流 + 事件流同时落盘）。",
+      "type": "shell",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' cap '${input:secs}'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "ESC_BAUD": "${input:baud}" }
+      },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "ESC 4 · 计数轮判分（关窗口流：漏过零/六步极差/节拍）",
+      "detail": "esc-lab.sh judge <秒> [标签]：跑前三道闸（串口存活/母线≥10V/窗口≥0.8s），跑完自动写 _meta.txt。判闭环只看这个。",
+      "type": "shell",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' judge '${input:secs}'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "ESC_BAUD": "${input:baud}" }
+      },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "ESC 5 · 设置窗口流降采样 N（SWD 写，无需重编译）",
+      "detail": "esc-dbg.sh poke16 win_every_n <N>。一次烧录就能扫 N=1/2/4/8/16/32，每档配合 ESC 3 采一轮对比 evt_drop 与 bemf_timeout。",
+      "type": "shell",
+      "command": "bash '${workspaceFolder}/tools/esc-dbg.sh' poke16 win_every_n '${input:N}'",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "ESC 6 · 串口自检（3 秒字节数 + 帧头）",
+      "detail": "3 秒 <5000 字节 ⇒ 发送侧停摆；有字节但无帧头 ⇒ 波特率不匹配。跑实验前先点一下。",
+      "type": "shell",
+      "command": "python3 '${workspaceFolder}/tools/serial-check.py' 3",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "ESC_BAUD": "${input:baud}" }
+      },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "ESC 0 · 交互菜单（上游唯一入口，保留）",
+      "detail": "原菜单：1=编译+改名+烧录；2=1+拓展（窗口采样/arm/dump/给油收油/一条龙）。需要在终端里按回车。",
+      "type": "shell",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "ESC_BAUD": "${input:baud}" }
+      },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
     }
   ]
 }

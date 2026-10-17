@@ -27,7 +27,10 @@ for _f in ('Noto Sans CJK SC', 'Noto Sans CJK JP'):
         plt.rcParams['font.family'] = _f; break
 plt.rcParams['axes.unicode_minus'] = False
 
-PORT, BAUD, OUTD_DEF = '/dev/ttyUSB0', int(__import__('os').environ.get('ESC_BAUD', '1000000')), '/home/lpl/桌面/RM2027'   # ★ xien/n2：ESC_BAUD 环境变量覆盖（固件侧 ADC_CAP_BAUD 要同步）
+# ★ xien/n2：路径/串口/波特率全部走环境变量（见 tools/_env.sh），不再硬编码用户名
+PORT = __import__('os').environ.get('ESC_SERIAL', '/dev/ttyUSB0')
+BAUD = int(__import__('os').environ.get('ESC_BAUD', '1000000'))     # 要跟固件 ADC_CAP_BAUD 一致
+OUTD_DEF = __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027'))
 PLOT_ONLY = None
 if len(sys.argv) > 1 and sys.argv[1].startswith('--plot'):
     PLOT_ONLY = sys.argv[1].split('=', 1)[-1]

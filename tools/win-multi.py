@@ -39,7 +39,7 @@ DT_MS = 1000.0 / FS              # 每点毫秒 (41.667µs)
 FLOAT_PHASE = {1: 'C', 2: 'A', 3: 'B', 4: 'C', 5: 'A', 6: 'B'}   # 源: Mcu/g071/Src/ADC.c:90-92
 STEP_COLOR = {1: '#c0392b', 2: '#d35400', 3: '#b7950b', 4: '#27ae60', 5: '#8e44ad', 6: '#2471a3'}
 
-NPZ = sys.argv[1] if len(sys.argv) > 1 else '/home/lpl/桌面/RM2027/evt_run_win.npz'
+NPZ = sys.argv[1] if len(sys.argv) > 1 else __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027')) + '/evt_run_win.npz'
 NWIN = int(sys.argv[2]) if len(sys.argv) > 2 else 6
 OUT = sys.argv[3] if len(sys.argv) > 3 else NPZ.replace('.npz', '_多窗口.png')
 LO = int(sys.argv[4]) if len(sys.argv) > 4 else 0

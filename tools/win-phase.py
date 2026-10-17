@@ -12,7 +12,7 @@ for _f in ('Noto Sans CJK SC','Noto Sans CJK JP'):
     if any(_f in f.name for f in font_manager.fontManager.ttflist):
         plt.rcParams['font.family']=_f; break
 plt.rcParams['axes.unicode_minus']=False
-NPZ=sys.argv[1]; OUTD=sys.argv[2] if len(sys.argv)>2 else '/home/lpl/桌面/RM2027'
+NPZ=sys.argv[1]; OUTD=sys.argv[2] if len(sys.argv)>2 else __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027'))
 z=np.load(NPZ); n=len(z['seq']); FS=24.0
 va,vb,vc,v0,step=z['va'],z['vb'],z['vc'],z['v0'],z['step']
 rows=[]

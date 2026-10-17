@@ -27,7 +27,7 @@ import sys, os, csv, subprocess, time, struct, re, glob
 import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = '/home/lpl/桌面/RM2027'
+DATA = __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027'))
 STAMP = '/tmp/esc_last_run'
 GAP_S = 60.0
 

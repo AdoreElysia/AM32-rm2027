@@ -129,3 +129,44 @@ VECTAB: 188 B / 192 B = 97.92%       ⚠ 只有 4 字节余量，别加中断向
 - [ ] **事件帧分级**：正常只发 seq/ts/delta/step 的短帧（~14 B），调试才发 49 B 长帧
       ⇒ 1 Mbaud 下换相率上限从 2040 抬到 ~7000 次/s
 - [ ] 触发式窗口抓取（取代等间隔降采样）——`zcw-dump.py` 的 SWD 版本已在做，可搬到串口
+
+---
+
+## 7. VSCode 任务链（`Ctrl+Shift+P → Tasks: Run Task`）
+
+`.vscode/tasks.json` 已重写（7 条）。**重点：命令里用 `${workspaceFolder}`，不再写死 `/home/lpl/...`**，
+所以在你本机和队友机上都能直接用；脚本内部的路径由 `tools/_env.sh` 解析。
+
+| 任务 | 命令 | 说明 |
+|---|---|---|
+| **ESC 1 · 编译+烧录**（默认 build 任务） | `esc-lab.sh flash` | 纯烧录，不碰串口。先 F1 收油 → make → 归档 bin → 烧 0x08001000 → 校验 → reset run |
+| **ESC 2 · 烧录+窗口流采集** ★ | `esc-lab.sh flash-cap <秒>` | **先烧录复位、再采集**（不漏重启后第一段） |
+| ESC 3 · 只采集 | `esc-lab.sh cap <秒>` | 不烧录，跑 `cap-evt.py`（给油→采→收油→存 CSV+NPZ+图） |
+| ESC 4 · 计数轮判分 | `esc-lab.sh judge <秒> [标签]` | 关窗口流，三闸 + 漏过零/六步极差/节拍 + 自动写 `_meta.txt` |
+| ESC 5 · 设降采样 N | `esc-dbg.sh poke16 win_every_n <N>` | SWD 写，**不用重编译**，一次烧录扫 1/2/4/8/16/32 |
+| ESC 6 · 串口自检 | `serial-check.py 3` | 3s <5000B ⇒ 发送侧停摆；有字节无帧头 ⇒ 波特率不匹配 |
+| ESC 0 · 交互菜单 | `esc-lab.sh` | 保留上游菜单（要在终端里按回车） |
+
+三个 `inputs` 会在按下任务时弹框：**秒数 / N / 波特率**（1000000·1500000·2000000·3000000）。
+
+### 非交互子命令（给 ssh / 脚本用）
+
+```bash
+./tools/esc-lab.sh flash
+./tools/esc-lab.sh cap 10
+./tools/esc-lab.sh flash-cap 10
+./tools/esc-lab.sh judge 11 "标签"
+ESC_YES=1 ./tools/esc-lab.sh flash          # 无 tty 时本来就会自动跳过回车
+```
+
+### 路径真源 `tools/_env.sh`
+
+| 变量 | 默认解析 | 覆盖 |
+|---|---|---|
+| `RM2027_ROOT` | `~/桌面/RM2027` → `~/RM2027` → `~/Desktop/RM2027` | 环境变量 |
+| `RM2027_REPO` | 脚本所在仓库根 | 环境变量 |
+| `RM2027_DATA` | `=` ROOT（新采的 `evt_run_*` 落这里） | 环境变量 |
+| `RM2027_WORK` | ROOT/rm2027-drone/work → 数据仓 drone/work → shared 工作区 | 环境变量 |
+| `ESC_SERIAL` / `ESC_BAUD` | `/dev/ttyUSB0` / `1000000` | 环境变量 |
+
+> ⚠ `ESC_BAUD` 必须和固件 `Inc/targets.h` 的 `ADC_CAP_BAUD` 一致（本分支默认 **2 Mbaud**）。

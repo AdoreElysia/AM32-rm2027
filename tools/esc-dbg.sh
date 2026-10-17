@@ -24,7 +24,9 @@
 #   tools/esc-dbg.sh snap            转调 esc-snap.sh 快照
 set -u
 
-ELF=/home/lpl/桌面/RM2027/AM32-rm2027/obj/AM32_RM2027_ESC_G071_2.21.elf
+ELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$ELF_DIR/_env.sh"
+ELF="$RM2027_REPO/obj/AM32_RM2027_ESC_G071_2.21.elf"
 NM=/usr/bin/arm-none-eabi-nm
 OCD_IF=interface/stlink.cfg
 OCD_TG=target/stm32g0x.cfg
@@ -140,7 +142,7 @@ case "$cmd" in
     ;;
 
   snap)
-    bash /home/lpl/桌面/RM2027/rm2027-drone/work/esc-snap.sh
+    bash "$RM2027_WORK/esc-snap.sh"
     ;;
 
   help|*)

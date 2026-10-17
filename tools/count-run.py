@@ -26,8 +26,11 @@ count-run.py —— 【计数轮】判分器：关掉窗口流 → 跑一轮 →
 import sys, os, re, csv, time, glob, subprocess
 import numpy as np
 
-REPO = '/home/lpl/桌面/RM2027/AM32-rm2027'
-OUTD = '/home/lpl/桌面/RM2027'
+# ★ xien/n2：路径走环境变量（见 tools/_env.sh）
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+REPO = _os.environ.get('RM2027_REPO', _os.path.dirname(_HERE))
+OUTD = _os.environ.get('RM2027_DATA', _os.path.expanduser('~/桌面/RM2027'))
 SECS = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
 TAG = sys.argv[2] if len(sys.argv) > 2 else ''
 TICK = 2500.0 / 30.0        # 83.333 拍/ADC 帧

@@ -12,7 +12,7 @@ for _f in ('Noto Sans CJK SC','Noto Sans CJK JP'):
     if any(_f in f.name for f in font_manager.fontManager.ttflist):
         plt.rcParams['font.family']=_f; break
 plt.rcParams['axes.unicode_minus']=False
-CSVP=sys.argv[1]; OUTD=sys.argv[2] if len(sys.argv)>2 else '/home/lpl/桌面/RM2027'
+CSVP=sys.argv[1]; OUTD=sys.argv[2] if len(sys.argv)>2 else __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027'))
 A=np.array([tuple(int(x) for x in r) for r in list(csv.reader(open(CSVP)))[1:]])
 m=np.array([(1<=r[3]<=6 and 0<=r[5]<=2000 and abs(r[2])<3000 and 0<=r[6]<400) for r in A]); A=A[m]
 if A.shape[1]<12: print("❌ 这个 CSV 没有环变量列（需要 29 字节事件包的固件）"); sys.exit(1)

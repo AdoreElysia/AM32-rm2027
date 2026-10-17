@@ -21,13 +21,16 @@
 # ============================================================================
 set -u
 
-REPO="/home/lpl/桌面/RM2027/AM32-rm2027"
-WORK="/home/lpl/桌面/RM2027/rm2027-drone/work"
+# ★ xien/n2：路径不再硬编码用户名，统一由 tools/_env.sh 解析（可用环境变量覆盖）
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_env.sh"
+REPO="${RM2027_REPO}"
+WORK="${RM2027_WORK}"
+OUTD="${RM2027_DATA}"
 FW_DIR="$REPO/firmware"
 BIN="$REPO/obj/AM32_RM2027_ESC_G071_2.21.bin"
 APP_ADDR="0x08001000"
 MAX_SIZE=59392                    # app 区上限（再多就碰 EEPROM）
-SERIAL="/dev/ttyUSB0"
+SERIAL="${ESC_SERIAL}"
 ESC_DBG="$REPO/tools/esc-dbg.sh"
 
 cd "$REPO" || exit 1
@@ -82,7 +85,12 @@ core_build_flash() {
     echo "   '信号持续高 ⇒ 进固件升级模式' 而不跳 app（实测 PC 停在 0x08000104），"
     echo "   此时写 flash 会随机报 'block write failed'。"
     echo "   ⇒ 请先【让 F1 收油】（额外拓展任务 [5]），最好再把 12V 关掉。"
+    # ★ xien/n2：支持非交互（VSCode 任务 / ssh）。ESC_YES=1 或 stdin 不是终端 ⇒ 直接继续
+    if [ "${ESC_YES:-0}" = "1" ] || [ ! -t 0 ]; then
+        echo "   （非交互模式：跳过回车确认）"
+    else
     read -rp "   准备好后按回车继续（Ctrl-C 取消）" _ || { echo "❌ 没读到回车（EOF/管道）⇒ 取消烧录，安全第一"; return 1; }
+    fi
 
     # ★ 重试 3 次：'block write failed' 大多数是瞬时（信号/电源抖动、引导程序状态）
     local try OUT
@@ -183,11 +191,33 @@ main_menu() {
 }
 
 # 无交互：esc-lab.sh 1 / 2
+# ---------------------------------------------------------------- 非交互子命令（xien/n2）
+# 给 VSCode tasks.json / ssh 用：不弹菜单、不等回车。
+#   esc-lab.sh flash            编译+归档+烧录（先 F1 收油）
+#   esc-lab.sh cap <秒>          只采集（cap-evt.py：给油→采→收油→存 CSV+NPZ+图）
+#   esc-lab.sh flash-cap <秒>    flash + cap（★ 先烧录复位，再采集）
+#   esc-lab.sh judge <秒> [标签]  计数轮判分（关窗口流）
+cmd_flash() { f1_throttle 1; core_build_flash; }
+cmd_cap() {
+    local secs="${1:-8}"
+    echo "== 窗口流采集 ${secs}s（cap-evt.py）=="
+    echo "   串口 $SERIAL @ $ESC_BAUD（必须跟固件 ADC_CAP_BAUD 一致）"
+    ( cd "$REPO" && python3 tools/cap-evt.py "$secs" )
+}
+cmd_judge() {
+    local secs="${1:-11}"
+    echo "== 计数轮判分 ${secs}s（关窗口流）=="
+    ( cd "$REPO" && python3 tools/count-run.py "$secs" "${2:-}" )
+}
 if [ $# -ge 1 ]; then
     case "$1" in
       1) core_build_flash ;;
       2) core_build_flash && extra_menu ;;
-      *) echo "用法: esc-lab.sh [1|2]"; exit 1 ;;
+      flash)     shift; cmd_flash ;;
+      cap)       shift; cmd_cap "${1:-8}" ;;
+      flash-cap) shift; cmd_flash && cmd_cap "${1:-8}" ;;
+      judge)     shift; cmd_judge "${1:-11}" "${2:-}" ;;
+      *) echo "用法: esc-lab.sh [1|2|flash|cap <秒>|flash-cap <秒>|judge <秒> <标签>]"; exit 1 ;;
     esac
 else
     while :; do main_menu; done
