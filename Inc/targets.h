@@ -61,6 +61,13 @@
 #ifndef XIEN_OL_INPUT_TGT
 #define XIEN_OL_INPUT_TGT  XIEN_OL_INPUT
 #endif
+/* ★★★ xien/n3c 静态 ADC 测试（不转电机）★★★
+ *   0=正常；1=母线通道复制到多个 rank（测顺序/settling）；
+ *   2=同一相连续采两次（VA/VA, VB/VB, VC/VC, V0）。
+ *   只改 ADC 扫描序列，不驱动电机；F1 保持收油。 */
+#ifndef ADC_STATIC_TEST
+#define ADC_STATIC_TEST     1
+#endif
 #ifndef OL_HOLD_OPENLOOP
 #if XIEN_OL_SCAN_MODE
 #define OL_HOLD_OPENLOOP 1
@@ -5122,7 +5129,7 @@
  *     的诊断能力（本文件夹的全部分析都靠它）。这也是本文件早就写下的方向：
  *     "想跑更低转速，必须先缩短扫描 …，而不是动这个 CCR4"。
  */
-#define ADC_TRIGGER_CCR4 200   /* 保持 200：3.1µs 之后采，越过开关振铃（实测定案） */
+#define ADC_TRIGGER_CCR4 160   /* xien/n3c 静态 ADC 测试：按最终选定 160；200 为历史基线 */
 /* 历史记录（原样保留）：
                                 *   130 -> 200（3.1µs -> 4.8µs 之后采）。
                                 *   假设：四路 BEMF 按 rank 顺序依次采（VA/VB/VC/V0 彼此差几个
