@@ -68,7 +68,8 @@ def segments_from_window(win, min_len=8):
                         amp=amp, off=off, mean=float(np.mean(y[m])),
                         phase=phase, slope=float(k), resid=resid,
                         cur=float(np.median(cur[a:b])),
-                        dbg_max=float(np.max(win['dbg'][a:b]))))
+                        dbg_max=float(np.max(win['dbg'][a:b])),
+                        y=y.copy()))
     return out
 
 
@@ -117,23 +118,28 @@ def analyze(path, ci_tgt):
         else:
             st['gain'] = 1.0
             st['off_use'] = 0.0
-    # 重算归一化后的相位
+    # 重算归一化后的相位：y_norm = (y - offset_s) * gain_s
     for r in segs:
         g = step_stats[r['step']]['gain']; o = step_stats[r['step']]['off_use']
-        # 只对中段重新拟合：用原始 y 的解析近似不保留数组，用线性变换后的截距
-        # y_norm = (y - o) * g ⇒ 斜率 k'=k*g，截距 b'=(b0-o)*g
-        k = r['slope']; b0 = r['mean'] - k * ((r['n'] - 1) * 0.5)  # mean 在 [0.2,0.8] 近似中心
-        # 更稳：直接用 phase 的原始拟合零点 + 线性变换
-        if r['phase'] is not None and abs(k) > 1e-12:
-            t0 = r['phase'] * (r['n'] - 1)
-            y0 = k * t0 + b0
-            # 线性变换后零点： (k*t + b0 - o)*g =0 ⇒ t0' = t0 + (o - y0)/k
-            t0n = t0 - (y0 - o) / k
-            r['phase_norm'] = float(t0n / (r['n'] - 1))
+        y = r.get('y')
+        if y is not None:
+            n = r['n']; t = np.arange(n, dtype=float)
+            m = (t >= 0.20 * (n - 1)) & (t <= 0.80 * (n - 1))
+            yy = (y - o) * g
+            if m.sum() >= 4:
+                k2, b2 = np.polyfit(t[m], yy[m], 1)
+                r['phase_norm'] = float((-b2 / k2) / (n - 1)) if abs(k2) > 1e-12 else None
+            else:
+                r['phase_norm'] = None
         else:
             r['phase_norm'] = None
         r['gain'] = g; r['off_use'] = o
         r['amp_norm'] = r['amp'] * g
+    # 每步归一化后的相位中位
+    for s in range(1, 7):
+        pn = [r['phase_norm'] for r in segs if r['step'] == s and r.get('phase_norm') is not None
+              and -0.2 < r['phase_norm'] < 1.4 and not r['edge']]
+        step_stats[s]['phase_norm'] = float(np.median(pn)) if pn else float('nan')
     return segs, wins, step_stats
 
 
@@ -163,7 +169,7 @@ def main():
                         f"{st.get('amp', float('nan')) * st.get('gain', 1):.3f}",
                         f"{st.get('gain', 1):.4f}", f"{st.get('off_use', 0):.3f}",
                         f"{st.get('phase', float('nan')):.4f}",
-                        f"{st.get('phase', float('nan')):.4f}",
+                        f"{st.get('phase_norm', float('nan')):.4f}",
                         f"{st.get('p10', float('nan')):.4f}", f"{st.get('p90', float('nan')):.4f}"])
     winp = os.path.join(a.outdir, f'adc_norm_summary_{tag}.csv')
     with open(winp, 'w', newline='', encoding='utf-8') as f:
