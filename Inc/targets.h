@@ -33,7 +33,7 @@
 #define XIEN_OL_SCAN_MODE   1
 #endif
 #ifndef XIEN_OL_INPUT
-#define XIEN_OL_INPUT      340     /* 本轮扫描点：油门刻度 */
+#define XIEN_OL_INPUT      355     /* 本轮扫描点：油门刻度 */
 #endif
 #ifndef XIEN_OL_STEP_DIV
 #define XIEN_OL_STEP_DIV   17      /* 本轮扫描点：开环步长 */
