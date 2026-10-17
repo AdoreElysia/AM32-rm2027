@@ -772,7 +772,15 @@ uint32_t ol_freq_tgt_q = 0;      /* 斜坡终点频率 x 256 */
  *   转子能否跟上，看恒速段的 ol_meas_ci 偏差即可（±1% = 跟得很好）。
  *   ⚠ 顶端转速仍保持 OL_STEP_DIV=11（3030RPM）不变 —— 实测恒速段的稳定性随转速升高而变好：
  *     3030RPM 偏差仅 ±1%，而 303RPM 那版是 ±5%（低速齿槽力矩占比大）。 */
-uint16_t ol_freq_slope = 554;    /* * 归档版(开环-线性升频-可用)的值：1800 -> 554 */
+/* ★ 默认加速度（Hz/s）：普通分支=554，xien/n1 可在 targets.h 覆盖为 400 使升频更连续。
+ *   运行时可经 SWD 写：tools/esc-dbg.sh poke16 ol_freq_slope <Hz/s>。 */
+#ifndef XIEN_OL_FREQ_SLOPE
+#define XIEN_OL_FREQ_SLOPE 554
+#endif
+#ifndef XIEN_OL_RUN_MS
+#define XIEN_OL_RUN_MS     8000
+#endif
+uint16_t ol_freq_slope = XIEN_OL_FREQ_SLOPE;    /* 恒定斜率升频：df/dt = 本值 Hz/s */
 
 /* ★★★ 2026-10-11 斜坡形态改成【指数升频】= 前缓后陡 ★★★
  *   用户要求："起步阶段改成曲线增速，前缓后陡，只是别太陡"。
@@ -1165,9 +1173,9 @@ volatile uint16_t ol_olp_ci_last = 0;      /* 观测：最后一次记录时的�
  *   ⇒ 发热），连续跑 200 秒会烧电机/电调。
  *   8.0 秒 = 对齐 0.2s + 斜坡 5.2s + 稳速约 2.6s，够看完整条新曲线。
  *   真正停车的路径仍是"油门回 0"与过流跳闸。 */
-#define OL_STARTUP_TICKS_MAX 160000UL
+#define OL_STARTUP_TICKS_MAX (XIEN_OL_RUN_MS * 20UL)   /* 20kHz 拍：XIEN_OL_RUN_MS ms */
 #else
-#define OL_STARTUP_TICKS_MAX 160000UL
+#define OL_STARTUP_TICKS_MAX (XIEN_OL_RUN_MS * 20UL)
 #endif
 #define OL_STARTUP_ZC_NEED 3    /* 旧判据（已被窗口校验取代，保留以防别处引用）*/
 /* ★ 起步期间判过零用的"最小 |delta|"（ADC 码）。

@@ -141,3 +141,27 @@ f_comm_hz / rpm_median / ESC_DUTY / ESC_STEP_DIV / ESC_TAG`
   ./tools/esc-dbg.sh poke win_enable 0     # 窗口流也关掉
   ```
   对比同一 `input/step_div` 下三种情况：事件+窗口 / 仅窗口 / 全关。
+
+
+---
+
+## 8. 连续升频参数（本次修正）
+
+现在的开环斜坡是**恒定斜率连续升频**：`f(t)` 以 `ol_freq_slope` Hz/s 从起点频率升到目标；
+每个换相步只增加很小的频率增量，不是阶跃跳变。
+
+本分支默认：
+
+```c
+#define XIEN_OL_FREQ_SLOPE 400   // Hz/s（比原来的 554 更缓、更连续）
+#define XIEN_OL_RUN_MS     10000 // 开环总时长上限 10s（原 8s）
+```
+
+- 想更连续/更缓：把 `XIEN_OL_FREQ_SLOPE` 改成 300 或更低；
+- 想更快：改大（例如 554/700），但丢步风险变大；
+- **运行时可经 SWD 改，不用重编译**：
+  ```bash
+  ./tools/esc-dbg.sh poke16 ol_freq_slope 300
+  ./tools/esc-dbg.sh poke16 ol_freq_slope 554
+  ```
+- 目标频率仍然由 `XIEN_OL_STEP_DIV` 决定；`ol_freq_slope` 只决定“多快爬到目标”。

@@ -43,6 +43,16 @@
 #ifndef RM2027_EVT_STREAM
 #define RM2027_EVT_STREAM  0
 #endif
+/* ★ 连续升频参数：ol_freq_slope = 加速度（Hz/s）。当前 554 改到 400：
+ *   更缓 => 每换相频率增量更小 => 更连续；同时 10s 运行上限保证高目标也能到。
+ *   运行时可经 SWD 再调：tools/esc-dbg.sh poke16 ol_freq_slope 300（不用重编译）。 */
+#ifndef XIEN_OL_FREQ_SLOPE
+#define XIEN_OL_FREQ_SLOPE 400
+#endif
+/* ★ 开环总时长上限（ms）：默认 10000 = 10s（斜坡 400Hz/s 到 ~2000Hz 需约 5s，留 5s 稳态）。 */
+#ifndef XIEN_OL_RUN_MS
+#define XIEN_OL_RUN_MS     10000
+#endif
 #ifndef OL_HOLD_OPENLOOP
 #if XIEN_OL_SCAN_MODE
 #define OL_HOLD_OPENLOOP 1
