@@ -134,6 +134,8 @@ def analyze(path, ci_tgt):
         else:
             r['phase_norm'] = None
         r['gain'] = g; r['off_use'] = o
+        r['o_fw'] = -o * g              # 固件形式：d_norm = d*g/1000 + o_fw
+        r['g_x1000'] = g * 1000.0
         r['amp_norm'] = r['amp'] * g
     # 每步归一化后的相位中位
     for s in range(1, 7):
@@ -162,12 +164,15 @@ def main():
         w.writeheader(); w.writerows(segs)
     stepp = os.path.join(a.outdir, f'adc_norm_steps_{tag}.csv')
     with open(stepp, 'w', newline='', encoding='utf-8') as f:
-        w = csv.writer(f); w.writerow(['step', 'n', 'amp_raw', 'amp_norm', 'gain', 'offset', 'phase_raw', 'phase_norm', 'p10', 'p90'])
+        w = csv.writer(f); w.writerow(['step', 'n', 'amp_raw', 'amp_norm', 'gain', 'off_raw', 'o_fw', 'g_x1000', 'phase_raw', 'phase_norm', 'p10', 'p90'])
         for s in range(1, 7):
             st = steps[s]
+            gain = st.get('gain', 1)
+            off = st.get('off_use', 0)
+            o_fw = -off * gain
             w.writerow([s, st.get('n', 0), f"{st.get('amp', float('nan')):.3f}",
-                        f"{st.get('amp', float('nan')) * st.get('gain', 1):.3f}",
-                        f"{st.get('gain', 1):.4f}", f"{st.get('off_use', 0):.3f}",
+                        f"{st.get('amp', float('nan')) * gain:.3f}",
+                        f"{gain:.4f}", f"{off:.3f}", f"{o_fw:.2f}", f"{gain*1000:.0f}",
                         f"{st.get('phase', float('nan')):.4f}",
                         f"{st.get('phase_norm', float('nan')):.4f}",
                         f"{st.get('p10', float('nan')):.4f}", f"{st.get('p90', float('nan')):.4f}"])
@@ -181,7 +186,8 @@ def main():
     for s in range(1, 7):
         st = steps[s]
         if st.get('n'):
-            print(f"  step{s}: n={st['n']:4d} amp={st['amp']:7.1f}  g={st['gain']:.4f}  off={st['off_use']:+7.1f}  phase={st['phase']:.3f}")
+            print(f"  step{s}: n={st['n']:4d} amp={st['amp']:7.1f}  g={st['gain']:.4f}  off_raw={st['off_use']:+7.1f}  "
+                  f"g_x1000={st['gain']*1000:.0f}  o_fw={-st['off_use']*st['gain']:+.1f}  phase={st['phase']:.3f}")
     # 图
     fig, ax = plt.subplots(2, 3, figsize=(17, 9))
     sarr = np.arange(1, 7)

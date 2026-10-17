@@ -45,7 +45,16 @@ def one_point(path):
     segs = []
     for w in range(len(d['ts'])):
         win = {k: d[k][w] for k in ('va', 'vb', 'vc', 'v0', 'cur', 'step', 'dbg')}
-        segs.extend(A.segments_from_window(win))
+        ss = A.segments_from_window(win)
+        core0 = [s for s in ss if not s['edge']]
+        if len(core0) < 8:
+            continue
+        L0 = np.median([s['dbg_max'] for s in core0 if 5 <= s['dbg_max'] <= 60])
+        amp0 = np.median([s['amp'] for s in core0 if s['amp'] > 0])
+        # 只取 plateau 窗：L≈15~19 帧；避免把斜坡/起动窗算进无过零率
+        if not (15 <= L0 <= 19) or amp0 < 250:
+            continue
+        segs.extend(core0)
     core = [s for s in segs if not s['edge']]
     if not core:
         return None
