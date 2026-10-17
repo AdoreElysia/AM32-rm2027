@@ -25,3 +25,4 @@ windows-tools.zip
 .settings/
 /dist/
 /build/
+*.bin.meta

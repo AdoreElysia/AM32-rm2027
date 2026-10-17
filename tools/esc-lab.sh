@@ -43,6 +43,48 @@ pause() { read -rp "   (回车继续)" _; }
 #   并支持"烧录已有固件"传参：esc-lab.sh flash [<分支名>|<bin路径>]
 safe_fw_name() { printf '%s' "${1:-}" | sed 's#/#__#g'; }
 
+# ★ 产物 meta：记录 branch/commit/bin hash，给"安全复用已有产物"用
+meta_path() { printf '%s/%s.bin.meta' "$FW_DIR" "$(safe_fw_name "${1:-}")"; }
+
+write_meta() {
+    local BRANCH="$1" BINFILE="$2" META
+    META="$(meta_path "$BRANCH")"
+    {
+        echo "branch=$BRANCH"
+        echo "commit=$(git rev-parse HEAD)"
+        echo "sha256=$(sha256sum "$BINFILE" | awk '{print $1}')"
+        echo "size=$(stat -c%s "$BINFILE")"
+        echo "built=$(date -Iseconds)"
+    } > "$META"
+    echo "→ 已写产物 meta：${META#$REPO/}"
+}
+
+# 只在满足全部条件时复用 firmware/<分支>.bin，否则返回 1 让调用者重新编译：
+#   ① branch / commit 与当前 HEAD 完全一致；
+#   ② Inc Src Mcu/g071 Makefile 没有未提交改动（含 staged/untracked）；
+#   ③ 归档 bin 的 sha256 与 meta 一致且大小不超限。
+try_reuse_current() {
+    local BRANCH SAFE ARCH META MB MC MS CS SZ
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    SAFE=$(safe_fw_name "$BRANCH")
+    ARCH="$FW_DIR/$SAFE.bin"; META="$ARCH.meta"
+    [ -f "$ARCH" ] && [ -f "$META" ] || return 1
+    [ -f "$FW_DIR/$SAFE.bin.meta" ] || return 1
+    MB=$(sed -n 's/^branch=//p' "$META" | head -1)
+    MC=$(sed -n 's/^commit=//p' "$META" | head -1)
+    MS=$(sed -n 's/^sha256=//p' "$META" | head -1)
+    [ "$MB" = "$BRANCH" ] || return 1
+    [ "$MC" = "$(git rev-parse HEAD)" ] || return 1
+    [ -z "$(git status --porcelain -- Inc Src Mcu/g071 Makefile 2>/dev/null)" ] || return 1
+    CS=$(sha256sum "$ARCH" | awk '{print $1}')
+    [ -n "$MS" ] && [ "$MS" = "$CS" ] || return 1
+    SZ=$(stat -c%s "$ARCH")
+    [ "$SZ" -le "$MAX_SIZE" ] || return 1
+    BIN="$ARCH"
+    echo "♻ 复用已有产物：firmware/$SAFE.bin（commit ${MC:0:8}，sha ${CS:0:12}，${SZ} 字节）"
+    return 0
+}
+
 flash_bin() {
     local BIN="$1" SZ TRY OUT
     [ -f "$BIN" ] || { echo "❌❌ 找不到要烧录的固件：$BIN"; return 1; }
@@ -110,8 +152,11 @@ build_current() {
 
     mkdir -p "$FW_DIR"
     SAFE_BRANCH=$(safe_fw_name "$BRANCH")
-    cp "$BIN" "$FW_DIR/$SAFE_BRANCH.bin"
+    if ! cp "$BIN" "$FW_DIR/$SAFE_BRANCH.bin"; then
+        echo "❌❌ 归档失败：$FW_DIR/$SAFE_BRANCH.bin"; return 1
+    fi
     echo "→ 已固化：firmware/$SAFE_BRANCH.bin（分支 $BRANCH）"
+    write_meta "$BRANCH" "$FW_DIR/$SAFE_BRANCH.bin"
 
     # 清孤儿固件（分支已不存在的；文件名已把 / 映射成 __）
     BRANCHES=$(git branch --format='%(refname:short)' | while IFS= read -r b; do safe_fw_name "$b"; echo; done)
@@ -145,6 +190,8 @@ core_build_flash() {
             fi
         fi
         echo "→ 指定固件模式（跳过编译）：$TARGET"
+    elif [ "${ESC_REUSE:-0}" = "1" ] && try_reuse_current; then
+        :
     else
         build_current || return 1
     fi
@@ -237,6 +284,18 @@ main_menu() {
 #   esc-lab.sh flash-cap <秒> [固件]  ★ 采集顺道烧录：先开串口 spool → 烧录 → 给油采 → 解析
 #   esc-lab.sh judge <秒> [标签]  计数轮判分（关窗口流）
 cmd_flash() { f1_throttle 1; core_build_flash "${1:-}"; }
+
+# build-only：只编译+归档+写 meta，不烧录、不碰串口/电机。
+cmd_build() { build_current; }
+
+# reuse-check：只检查"当前分支能否安全复用归档产物"，不烧录、不驱动。
+cmd_reuse_check() {
+    if try_reuse_current; then
+        echo "✅ 结论：ESC 2 会跳过编译，直接复用上面的归档 bin"
+    else
+        echo "❌ 结论：不满足安全复用条件（branch/commit/source/hash 任一不符），ESC 2 会重新编译"
+    fi
+}
 cmd_cap() {
     local secs="${1:-8}"
     echo "== 窗口流采集 ${secs}s（cap-evt.py）=="
@@ -279,10 +338,12 @@ if [ $# -ge 1 ]; then
       1) core_build_flash ;;
       2) core_build_flash && extra_menu ;;
       flash)     shift; cmd_flash "${1:-}" ;;
+      build-only) cmd_build ;;
+      reuse-check) cmd_reuse_check ;;
       cap)       shift; cmd_cap "${1:-8}" ;;
       flash-cap) shift; cmd_flash_cap "${1:-8}" "${2:-}" ;;
       judge)     shift; cmd_judge "${1:-11}" "${2:-}" ;;
-      *) echo "用法: esc-lab.sh [1|2|flash [<分支>|<bin>]|cap <秒>|flash-cap <秒> [<分支>|<bin>]|judge <秒> <标签>]"; exit 1 ;;
+      *) echo "用法: esc-lab.sh [1|2|flash [<分支>|<bin>]|build-only|reuse-check|cap <秒>|flash-cap <秒> [<分支>|<bin>]|judge <秒> <标签>]"; exit 1 ;;
     esac
 else
     while :; do main_menu; done

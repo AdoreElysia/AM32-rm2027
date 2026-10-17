@@ -33,14 +33,15 @@
     },
     {
       "label": "ESC 2 · 编译烧录 + 接收准备（★ 当前调试主流）",
-      "detail": "esc-lab.sh flash-cap <秒>：先开串口 spool 接收 → 编译烧录并复位 → 收油唤醒 → 给油采 N 秒 → 收油 → cap-evt.py --raw 解析落 CSV/NPZ/图。顺序关键：接收先于烧录，才不漏复位后第一段。⚠ 本任务会转电机，必须无桨/固定/限流。",
+      "detail": "esc-lab.sh flash-cap <秒>：先开串口 spool 接收 → 检查归档产物/按需编译烧录并复位（ESC_REUSE=1 安全复用） → 收油唤醒 → 给油采 N 秒 → 收油 → cap-evt.py --raw 解析落 CSV/NPZ/图。顺序关键：接收先于烧录，才不漏复位后第一段。⚠ 本任务会转电机，必须无桨/固定/限流。",
       "type": "shell",
       "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-cap '${input:secs}'",
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
           "ESC_YES": "1",
-          "ESC_BAUD": "1500000"
+          "ESC_BAUD": "1500000",
+          "ESC_REUSE": "1"
         }
       },
       "problemMatcher": [],
