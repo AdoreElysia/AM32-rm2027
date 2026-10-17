@@ -11,6 +11,39 @@
 #define AM32_FLASH_SECTION(name) __attribute__((section(name)))
 #endif
 
+/* ============================================================================
+ * ★★★ xien/n1 开环锚定扫描：每次只改下面两个数 ★★★
+ *   XIEN_OL_SCAN_MODE = 1：纯开环、永不交棒、固定频率/固定油门跑满 8s。
+ *   改完直接编译烧录（VSCode ESC 1 / ESC 2），CSV 会自动按 分支+时间 命名。
+ *
+ *   XIEN_OL_INPUT   ：油门刻度（不是最终 duty！最终 duty 看 CSV 的 duty 列）。
+ *                     参考：旧交棒点 OL_INPUT_RUN=340 ⇒ 实测 duty≈290；
+ *                     想要 duty≈300，可先从 347~350 试，再按 CSV 实测微调。
+ *   XIEN_OL_STEP_DIV：开环步长，命令 ci = 本值 × 100 拍（TIM2 拍=0.5µs）。
+ *                     17 → 1700 拍 → ≈1961 rpm（慢档，对照旧锚点）
+ *                     13 → 1300 拍 → ≈2564 rpm
+ *                     11 → 1100 拍 → ≈3030 rpm（贴近好闭环 1000~1083）
+ *                     10 → 1000 拍 → ≈3333 rpm（好闭环最快档）
+ *
+ *   ⚠ 纯开环下转子必须自己跟得上；一有堵转/电流爬升立即 F1 收油。
+ * ========================================================================== */
+#ifndef XIEN_OL_SCAN_MODE
+#define XIEN_OL_SCAN_MODE   1
+#endif
+#ifndef XIEN_OL_INPUT
+#define XIEN_OL_INPUT      340     /* 本轮扫描点：油门刻度 */
+#endif
+#ifndef XIEN_OL_STEP_DIV
+#define XIEN_OL_STEP_DIV   17      /* 本轮扫描点：开环步长 */
+#endif
+#ifndef OL_HOLD_OPENLOOP
+#if XIEN_OL_SCAN_MODE
+#define OL_HOLD_OPENLOOP 1
+#else
+#define OL_HOLD_OPENLOOP 0
+#endif
+#endif
+
 #ifndef USE_MAKE
 // #define F031_DEV
 // #define FD6288_F051
@@ -2627,7 +2660,11 @@
 #endif
 
 #ifndef RM2027_NEVER_HANDOVER
+#if XIEN_OL_SCAN_MODE
+#define RM2027_NEVER_HANDOVER   1
+#else
 #define RM2027_NEVER_HANDOVER   0
+#endif
 #endif  /* 20kHz 拍：1000 = 50ms 持续才切（躲瞬时尖峰）*/
 
 /* ★★ 2026-10-12 闭环自动停机（用户要求："不只是脚本停，固件自己跑完也要停"）★★
@@ -3098,7 +3135,11 @@
  *   ★ 而且现在有个归档时代没有的好处：ci 地板已经与斜坡终点【拆开】
  *     （见 OL_CI_FLOOR_DIV）⇒ 开环可以照归档那样跑到 3030RPM，
  *     交棒后闭环依然能自由慢下来跟随转子，两个需求同时满足。 */
+#if XIEN_OL_SCAN_MODE
+#define OL_STEP_DIV        XIEN_OL_STEP_DIV
+#else
 #define OL_STEP_DIV        20      /* 低惯量电机：改回 1667RPM（约 900RPM 齿槽门槛之上）*/
+#endif
 
 /* ★★★ 2026-10-10 新增：闭环 ci 地板（与开环斜坡终点解耦）★★★
  *   用途：闭环里 commutation_interval 的上限（ci 越大 = 换相越慢）。
@@ -3124,10 +3165,18 @@
 #define OL_ZC_MIN_TICKS     150
 #endif
 
+#if XIEN_OL_SCAN_MODE
+#define OL_STEP_DIV_START  XIEN_OL_STEP_DIV
+#else
 #define OL_STEP_DIV_START  5000    /* 斜坡起点（还原归档值）：5000 拍=250ms/步 ⇒ 约 6.7 机械 RPM */
+#endif
 #define OL_RAMP_SHIFT      4       /* 每步缩 1/16 ⇒ 约 3.2 秒走完（与开环成功分支一致）*/
 #define OL_ALIGN_TICKS     4000    /* 对齐保持：4000 拍 = 200ms（先把转子拉到已知位置）*/
+#if XIEN_OL_SCAN_MODE
+#define OL_INPUT_RUN       XIEN_OL_INPUT
+#else
 #define OL_INPUT_RUN       340     /* V/f 终点：高速段把占空比收下来（400 -> 340）*/
+#endif
 /* ---- 起步占空比：台架限流 1A 的情况下【不要】加大（2026-10-07 结论，别再来回改）----
  * 为什么"加大占空比换起步扭矩"在限流电源上不成立：
  *   电源限流时，导通期相电流 ≈ 母线限流值 ÷ 占空比 ⇒ 占空比越大，相电流反而越小；
@@ -3201,7 +3250,12 @@
  *   注释还记着"5000RPM 时反电动势 1.09V、给出 2.11V ⇒ 约 1.7A"。
  *   ⇒ 还原。F1 侧 APP_ESC_TEST_RAMP_TARGET 也同步回 400 ⇒ 交棒前后都是 duty 351，无台阶。
  *   （之前改成 750 的动机是"低 KV 电机需要更高电压"，但那让开环偏离了验证过的工况。） */
+#if XIEN_OL_SCAN_MODE
+#define OL_INPUT_START     XIEN_OL_INPUT
+#else
 #define OL_INPUT_START     400     /* 回归档值（同上）*/
+#endif
+
 #define OL_RUN_LIMIT       160000  /* 运行上限：160000 拍 = 8.0 秒（斜坡本身要 ~3.3s，5s 里只剩
                                     * 1.5s 在目标转速；起步失败一次整轮就报废 ⇒ 放宽到 8s）*/
 #define OL_COOL_LIMIT      0       /* 停机后冷却拍数：0 = 不自动重跑（一次只跑一轮）*/

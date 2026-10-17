@@ -17,7 +17,7 @@ cap-evt.py —— 采串口换相事件流 → 存 CSV + 出四栏图。★ 数�
      ⇒ 必须按 evt-plot.py 的老判据过滤: step 1~6 / duty 0~2000 / |delta|<3000 / cur 0~400。
   ② 电机电源(12V)必须开着，否则电调不换相、一个字节都收不到。
 """
-import sys, os, time, struct, subprocess, re, csv, datetime
+import sys, os, time, struct, subprocess, re, csv, datetime, hashlib
 import numpy as np, serial
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -201,17 +201,92 @@ if PLOT_ONLY:
     sys.exit(0)
 
 # ---------------- 输出/落盘：原始字节 -> CSV + NPZ + 图 + 换相埋点 ----------------
+def _repo_dir():
+    r = os.environ.get('RM2027_REPO', '')
+    return r if r and os.path.isdir(r) else os.getcwd()
+
+
+def _git(args):
+    try:
+        o = subprocess.run(['git', '-C', _repo_dir()] + list(args),
+                           capture_output=True, text=True, timeout=5)
+        return o.stdout.strip()
+    except Exception:
+        return ''
+
+
+def _branch_name():
+    b = _git(['rev-parse', '--abbrev-ref', 'HEAD'])
+    return '' if b in ('', 'HEAD') else b
+
+
+def _safe_name(s):
+    s = (s or '').replace('/', '__').replace('\\', '__')
+    s = re.sub(r'[^\w.\-]+', '_', s, flags=re.UNICODE)
+    return s.strip('_')
+
+
+def _bin_info():
+    repo = _repo_dir()
+    p = os.path.join(repo, 'obj', 'AM32_RM2027_ESC_G071_2.21.bin')
+    if not os.path.isfile(p):
+        return '', ''
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return os.path.basename(p), h.hexdigest()
+
+
+def _write_meta(csvp, buf, rows, wins, nfake, secs):
+    branch = _branch_name()
+    binname, binsha = _bin_info()
+    duty = [r[5] for r in rows] if rows else []
+    ci = [r[11] for r in rows if r[11] > 0] if rows else []
+    meta = {}
+    meta['file'] = os.path.basename(csvp)
+    meta['captured_at'] = datetime.datetime.now().isoformat(timespec='seconds')
+    meta['branch'] = branch
+    meta['commit'] = _git(['rev-parse', 'HEAD'])
+    meta['binary'] = binname
+    meta['binary_sha256'] = binsha
+    meta['serial'] = f'{PORT}@{BAUD}'
+    meta['secs'] = f'{secs:.3f}'
+    meta['raw_bytes'] = str(len(buf))
+    meta['window_packets'] = str(len(wins))
+    meta['event_rows'] = str(len(rows))
+    meta['fake_frames'] = str(nfake)
+    meta['ESC_DUTY'] = os.environ.get('ESC_DUTY', '')
+    meta['ESC_STEP_DIV'] = os.environ.get('ESC_STEP_DIV', '')
+    meta['ESC_TAG'] = os.environ.get('ESC_TAG', '')
+    if duty:
+        meta['duty_median'] = f'{float(np.median(duty)):.1f}'
+    if ci:
+        meta['ci_median_ticks'] = f'{float(np.median(ci)):.1f}'
+        meta['f_comm_hz'] = f'{2e6/float(np.median(ci)):.1f}'
+        meta['rpm_median'] = f'{3.3333e6/float(np.median(ci)):.0f}'
+    metap = csvp.rsplit('.', 1)[0] + '_meta.txt'
+    with open(metap, 'w', encoding='utf-8') as f:
+        f.write(f"# 采集轮档案  {os.path.basename(csvp)}\n")
+        for k, v in meta.items():
+            f.write(f"{k}={v}\n")
+    return metap
+
 def save_run(buf, secs=0.0, outd=OUTD_DEF):
     """把一段原始串口字节解析并落盘。raw 模式与在线采集共用。"""
     rows, wins, nfake = parse(buf)
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    csvp = os.path.join(outd, f'evt_run_{stamp}.csv')
+    _br = _safe_name(_branch_name())
+    _stem = f'evt_run_{_br}_{stamp}' if _br else f'evt_run_{stamp}'
+    csvp = os.path.join(outd, _stem + '.csv')
     with open(csvp, 'w', newline='') as f:
         w = csv.writer(f); w.writerow(['seq','ts_frame','delta','step','wait','duty','cur','stage','iov','startup_max','curlim_adj','ci','thiszctime','lastzctime','average_interval','advance','duty_setpoint','duty_max','bemf_timeout','zc_reject','input','stall_adj','desync'])
         w.writerows(rows)
+    metap = _write_meta(csvp, buf, rows, wins, nfake, secs)
     rate = f'{len(buf)/secs/1000:.1f} KB/s' if secs else '—'
     print(f'\n原始字节 {len(buf)} ({rate})   窗口包 {len(wins)}   事件帧 有效 {len(rows)}（剔除假帧 {nfake}）')
     print(f'CSV → {csvp}  ({os.path.getsize(csvp)} 字节)')
+    print(f'meta → {metap}')
     if wins:
         npzp = csvp.replace('.csv', '_win.npz')
         np.savez(npzp, seq=np.array([w[0] for w in wins]),
