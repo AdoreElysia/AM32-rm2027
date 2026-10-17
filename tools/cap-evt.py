@@ -29,7 +29,7 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ★ xien/n2：路径/串口/波特率全部走环境变量（见 tools/_env.sh），不再硬编码用户名
 PORT = __import__('os').environ.get('ESC_SERIAL', '/dev/ttyUSB0')
-BAUD = int(__import__('os').environ.get('ESC_BAUD', '2000000'))     # 要跟固件 ADC_CAP_BAUD 一致
+BAUD = int(__import__('os').environ.get('ESC_BAUD', '1500000'))     # 要跟固件 ADC_CAP_BAUD 一致
 OUTD_DEF = __import__('os').environ.get('RM2027_DATA', __import__('os').path.expanduser('~/桌面/RM2027'))
 PLOT_ONLY = None
 RAW = None

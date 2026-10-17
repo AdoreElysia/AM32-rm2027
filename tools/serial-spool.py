@@ -11,7 +11,7 @@
 用法：
   python3 tools/serial-spool.py <输出.bin> [秒数=无限]
 环境：
-  ESC_SERIAL（默认 /dev/ttyUSB0）、ESC_BAUD（默认 2000000，须与固件一致）
+  ESC_SERIAL（默认 /dev/ttyUSB0）、ESC_BAUD（默认 1500000，须与固件一致）
 """
 import os
 import signal
@@ -25,7 +25,7 @@ except Exception:
     sys.exit(2)
 
 PORT = os.environ.get('ESC_SERIAL', '/dev/ttyUSB0')
-BAUD = int(os.environ.get('ESC_BAUD', '2000000'))
+BAUD = int(os.environ.get('ESC_BAUD', '1500000'))
 
 
 def main():

@@ -12,7 +12,7 @@
 #   RM2027_DATA  数据落盘目录（evt_run_*.csv / *.npz 的家，默认 = RM2027_ROOT）
 #   RM2027_WORK  PC 侧临时脚本目录（默认 = RM2027_ROOT/rm2027-drone/work）
 #   ESC_SERIAL   串口（默认 /dev/ttyUSB0）
-#   ESC_BAUD     波特率（默认 1000000，要跟固件 Inc/targets.h 的 ADC_CAP_BAUD 一致）
+#   ESC_BAUD     波特率（默认 1500000，要跟固件 Inc/targets.h 的 ADC_CAP_BAUD 一致）
 # ============================================================================
 set -u
 
@@ -43,6 +43,6 @@ if [ -z "${RM2027_WORK:-}" ]; then
 fi
 : "${RM2027_WORK:=$RM2027_ROOT/rm2027-drone/work}"
 : "${ESC_SERIAL:=/dev/ttyUSB0}"
-: "${ESC_BAUD:=2000000}"
+: "${ESC_BAUD:=1500000}"
 
 export RM2027_ROOT RM2027_REPO RM2027_DATA RM2027_WORK ESC_SERIAL ESC_BAUD

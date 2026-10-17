@@ -20,7 +20,7 @@ except Exception:
     sys.exit(2)
 
 PORT = os.environ.get('ESC_SERIAL', '/dev/ttyUSB0')
-BAUD = int(os.environ.get('ESC_BAUD', '1000000'))
+BAUD = int(os.environ.get('ESC_BAUD', '1500000'))
 SECS = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 
 try:

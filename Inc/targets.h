@@ -3247,12 +3247,15 @@
 #define ADC_CAP_CH2  BEMF_ADC_PHASE_B_CH    /* 第 1 列 = VB (PA4) */
 #endif
 #ifndef ADC_CAP_BAUD
-/* ★★ xien/n2b：波特率 1 Mbaud -> 2 Mbaud（与 xien/n2 串口收尾一致）★★
- *   MCU G071 @64MHz、USART 16 倍过采样：上限 = 64M/16 = 4 Mbaud；
- *   2 Mbaud 的 USARTDIV=32（整数、零误差）。真正瓶颈是 USB-TTL 芯片：
- *   CH340/CP2102 一般 2M，FT232 3M，CH343 6M。
- *   窗口包 6156 B 的 DMA 占用从 61.6ms 降到 30.8ms，事件流上限从 ~3400rpm 抬到 ~6700rpm。 */
-#define ADC_CAP_BAUD     2000000
+/* ★★ xien/n2b：波特率 1 Mbaud -> 1.5 Mbaud（台架实测 CH340 可靠上限）★★
+ *   MCU G071 @64MHz、USART 16 倍过采样：BRR=(64M+baud/2)/baud；1.5M -> 43（实际 1.488M，误差 0.8%）。
+ *   实测（本台架 CH340 + 现有杜邦线/开漏上拉）：
+ *     · 1.0M / 1.5M / 921600：能稳定解析出窗口包（n=512）；
+ *     · 2.0M：串口有字节但包结构全坏（pyserial 收到 33 个 A5 头，解析 0 个窗口包）；
+ *     · 3.0M / 1.152M：无有效帧头。
+ *   ⇒ 目前默认取 1.5M（比 1M 提升 50%）；换 USB-TTL 型号/短线后可再试 2M。
+ *   窗口包 6156 B 的 DMA 占用从 61.6ms 降到 ~41ms。 */
+#define ADC_CAP_BAUD     1500000
 
 #endif
 

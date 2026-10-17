@@ -16,14 +16,14 @@
     {
       "id": "baud",
       "type": "pickString",
-      "description": "串口波特率（必须与固件 Inc/targets.h 的 ADC_CAP_BAUD 一致）",
+      "description": "串口波特率（必须与固件 Inc/targets.h 的 ADC_CAP_BAUD 一致；实测本台架 CH340 1.5M 可靠、2M 误码）",
       "options": [
         "1000000",
         "1500000",
         "2000000",
         "3000000"
       ],
-      "default": "2000000"
+      "default": "1500000"
     },
     {
       "id": "fw",
