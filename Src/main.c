@@ -2064,48 +2064,144 @@ void getBemfState()
     }
 }
 
-/* ---- 串口换相事件流 ---- */
-/* ★★ 2026-10-12 串口发送【仲裁】★★
- *   只有一条 DMA（DMA1_CH3），而"换相事件流"和"窗口式全速采样"两条流都在用它。
- *   原来两边各有一个私有 busy 标志、互相不知情 ⇒ 一个会在另一个传输到一半时
- *   DisableChannel 再改地址 ⇒ 整包被腰斩 ⇒ 实测：8 秒里 3031 次错位帧、只有 14 个整窗。
- *   改成一个共享的 tx_busy：谁抢到谁发，另一个等下一轮主循环。
- *   （仲裁只保证"不互相踩"，两条流仍然共享 1 Mbaud 带宽 ⇒ 覆盖率会下降。） */
-volatile uint8_t tx_busy = 0;
+/* ---- 串口换相事件流 / 窗口流：统一发送仲裁 + proto2 + ACK/NAK/重传 ---- */
+/* ★★ 2026-10-18 xien/n4-serial-ack ★★
+ *   在 WIP(proto2 magic8+CRC16) 的包格式上重做发送侧，修掉 WIP 实测的
+ *   "tx_busy 卡 1 / tx_stuck_n 8176 / CRC 11/11 全失败 / ~25KB 1e04ac00 洪流"：
+ *     ① tx_busy 必须在 LL_DMA_EnableChannel() 【之前】置位。WIP 之后置位：
+ *        DMA 短包/TC 中断先到 ⇒ tx_busy 永远卡 1（实锤）。
+ *     ② 所有发送（窗口流 / 换相事件流 / KISS 遥测）只允许走 uart_tx_submit()
+ *        一个入口。绝不允许各流自己 DisableChannel 改地址/长度 —— 那正是 WIP
+ *        链路里"有结构假数据 / 整包腰斩"的来源（同一条 DMA1_CH3 被半途换源）。
+ *     ③ 发送前统一钉 TE=1（UT1 半双工，TE=0 时 TXE 恒 1、DMA 假装传完）。
+ *     ④ 看门狗只在"EN=1 且 CNDTR=0 持续 >5ms"或"超过按字节数算的时限"才强杀，
+ *        不把"TC 中断还没跑"的正常收尾误判成卡死（WIP tx_stuck_n 爆炸的原因）。
+ *
+ *   物理链路：PB6 单脚 + HDSEL 半双工（serial_telemetry.c 确认没有 PB7/RX 脚）。
+ *   ⇒ ESC 发送期间 PC 的命令必丢；所以每发完一个窗，等最后一 bit 移出后切 RX
+ *      开 ack_wait_ms 的"收命令窗"，PC 只能在这个窗内回 ACK/NAK/SET。
+ *
+ *   下行窗口包 proto2（PC 侧 tools/win-proto2.py 解析）：
+ *     [0..7] magic A5 5A A5 5A C3 3C 96 69
+ *     [8] ver=0x02 [9] type=0x01 [10..11] len=512*12
+ *     [12..13] seq u16 [14..17] ts u32 [18..19] n=512
+ *     [20..]   payload 512×12B（VA,VB,VC,V0,电流,step,dbg）
+ *     [..]     crc16 = CRC-16/CCITT-FALSE over [8 .. 20+len-1]
+ *   上行命令帧（PC→ESC，7B）：
+ *     C3 3C | len=3 | cmd | arg_lo | arg_hi | crc8(poly07 over len..arg)
+ *     cmd: 01=ACK(seq) 02=NAK(seq) 03=RESEND(seq) 04=SET(win_every_n)
+ *
+ *   重传：stop-and-wait。win_pkt 保留最近一窗直到 ACK；收到 NAK/RESEND 或
+ *   收窗超时 → 原样重发同一窗，最多 WIN_RETRY_MAX 次后放弃计数。重发永远
+ *   优先于新窗，且与窗口流复用同一 tx_busy 仲裁 ⇒ 不会抢同一条 DMA 半途换源。 */
+volatile uint8_t tx_busy = 0;          /* 1 = DMA1_CH3 正在发（所有流共用）*/
+static volatile uint8_t  tx_kind = 0;
+static volatile uint16_t tx_len = 0;
+static volatile uint32_t tx_start_ms = 0;   /* ms10k_cnt（0.1ms）*/
+static volatile uint32_t tx_zero_ms  = 0;
 
-/* 返回 1 = 串口空闲、可以发。忙标志在 DMA 通道被硬件关掉（传完）后自动清。 */
+/* ---- 观测计数（全部 SWD 可读：tools/esc-dbg.sh peek <名>）---- */
+volatile uint32_t tx_stuck_n     = 0;  /* EN=1/CNDTR=0 持续超时强杀次数 */
+volatile uint32_t tx_timeout_n   = 0;  /* 超过按长度算的时限强杀次数 */
+volatile uint32_t tx_te_fix_n    = 0;  /* 发送前发现 TE=0 并修回次数 */
+volatile uint32_t tx_dma_err_n   = 0;  /* DMA TE3 错误次数 */
+volatile uint32_t tx_retry_n     = 0;  /* 实际重发窗口次数 */
+volatile uint32_t win_giveup_n   = 0;  /* 重发超上限放弃的窗数 */
+volatile uint32_t pkt_crc_fail_n = 0;  /* 收到 NAK/RESEND（主机报坏包）次数 */
+volatile uint32_t win_ack_n      = 0;  /* 收到合法 ACK 的窗数 */
+volatile uint32_t rx_cmd_n       = 0;  /* 收到合法上行命令数 */
+volatile uint32_t rx_crc_fail_n  = 0;  /* 上行帧 CRC/格式错次数 */
+volatile uint32_t rx_resync_n    = 0;  /* 上行字节流重同步次数 */
+
+#define UART_KIND_NONE   0u
+#define UART_KIND_WINDOW 1u
+#define UART_KIND_EVT    2u
+#define UART_KIND_TELEM  3u
+
+/* 上行命令 */
+#define CMD_ACK     0x01u
+#define CMD_NAK     0x02u
+#define CMD_RESEND  0x03u
+#define CMD_SET     0x04u
+#define CMD_MAGIC0  0xC3u
+#define CMD_MAGIC1  0x3Cu
+
+/* ---- 窗口流协议状态 ---- */
+#define WIN_RETRY_MAX 3u
+volatile uint16_t ack_wait_ms = 8u;    /* 发窗后收命令窗长（SWD 可调，默认 8ms）*/
+volatile uint8_t  win_ack_mode = 1u;   /* 1=ACK/重传；0=长时间无主机应答时退化尽力发 */
+
+static volatile uint8_t  win_listening    = 0;
+static volatile uint32_t win_listen_until = 0;
+static volatile uint8_t  win_inflight     = 0;   /* 1 = 已发出、在等 ACK */
+static volatile uint8_t  win_retry        = 0;
+static volatile uint16_t win_inflight_seq = 0;
+static volatile uint8_t  win_retx_pending = 0;
+static volatile uint8_t  win_noack_streak = 0;
+static volatile uint16_t win_skip         = 0;   /* 还要丢几个窗（win_every_n-1）*/
+
+/* 上行接收状态机（USART1 RXNE 中断里用）。
+ * 小环缓冲：一个收窗里 PC 可以连发多条（如 SET+ACK），main 一次排空再切回 TX。*/
+#define RX_CMD_QN 4u
+static volatile uint8_t  rx_idx = 0;
+static volatile uint8_t  rx_buf[7];
+static volatile uint8_t  rxq_head = 0, rxq_tail = 0;
+static volatile uint8_t  rxq_cmd[RX_CMD_QN];
+static volatile uint16_t rxq_arg[RX_CMD_QN];
+
+/* 返回 1 = 可以发（所有流统一问这个）。忙由 TC3 中断清，看门狗兜底。*/
 static uint8_t tx_ready(void)
 {
-    if (tx_busy && !LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) {
-        tx_busy = 0;
+    if (win_listening) { return 0; }        /* 半双工收窗内，谁都不许发 */
+    if (tx_busy) {
+        if (!LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) {
+            tx_busy = 0; tx_zero_ms = 0;    /* 正常收尾：TC3 中断已关通道 */
+        } else if (LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_3) == 0u) {
+            /* CNDTR=0 但 TC 中断还没跑（正常窗口只有几 µs）⇒ 给 5ms 宽限再强杀 */
+            if (tx_zero_ms == 0u) { tx_zero_ms = ms10k_cnt | 1u; }
+            else if ((uint32_t)(ms10k_cnt - tx_zero_ms) > 50u) {
+                LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
+                tx_busy = 0; tx_zero_ms = 0; tx_stuck_n++;
+            }
+        } else {
+            tx_zero_ms = 0;
+            /* 时限 = 字节数 × 0.7 个 0.1ms（1.5M ≈ 6.7µs/B）+ 10ms 裕量 */
+            if ((uint32_t)(ms10k_cnt - tx_start_ms) >
+                ((uint32_t)tx_len * 7u / 10u + 100u)) {
+                LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
+                tx_busy = 0; tx_timeout_n++;
+            }
+        }
     }
     return (uint8_t)(!tx_busy);
 }
 
-static void evt_send(uint8_t *p, uint16_t len)
+/* 统一发送入口：调用者必须先 tx_ready()==1 */
+static void uart_tx_submit(uint8_t *p, uint16_t len, uint8_t kind)
 {
-    /* ★★ 2026-10-12 关键修复：发之前必须确保 TE=1（发送器使能）★★
-     *   现象（真板实测）：固件报"发了 14592 个事件 + 871 个窗口"，线上却只收到
-     *   19.5% 的事件帧、15.6% 的窗口包 —— 也就是绝大多数包【根本没出去】。
-     *   根因：main.c 里发 KISS 遥测时调 send_telem_DMA()，而它结尾是
-     *        LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_RX);
-     *   而 LL 的实现是 MODIFY_REG(CR1, RE|TE, dir) ⇒ **这一句把 TE 清掉了**。
-     *   TE=0 时 TXE 恒为 1 ⇒ DMA 几微秒内就"传完"，字节一个都没移位出去。
-     *   实锤：SWD 读 USART1->CR1 = 0x00000005（UE=1, RE=1, **TE=0**）。
-     *   ⇒ 每次发之前显式把方向钉回 TX。本板半双工、只发不收，可常驻发送方向。
-     *   （当年 adc_capture_drain() 就踩过同一个坑，注释还留着。） */
-    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
-    /* ★ 不再切"发/收方向"：原版每发一次就切一次（半双工），切向瞬间是
-     *   丢字节的嫌疑之一。我们只发不收，直接常驻发送方向。 */
+    if ((USART1->CR1 & USART_CR1_TE) == 0u) { tx_te_fix_n++; }
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);  /* 半双工钉死 TE=1 */
+    LL_USART_ClearFlag_TC(USART1);              /* 清上一次发送残留的 TC，否则窗口包 TC 提前触发 */
     LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
+    LL_DMA_ClearFlag_GI3(DMA1);                 /* 清残留 TC/TE 标志 */
     LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_3, (uint32_t)p);
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, len);
     LL_USART_EnableDMAReq_TX(USART1);
+    tx_kind = kind; tx_len = len;
+    tx_start_ms = ms10k_cnt; tx_zero_ms = 0;
+    tx_busy = 1;                                /* ★ 必须先置位再使能（WIP 卡死根因）*/
     LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_3);
-    tx_busy = 1;                      /* ★ 占用串口（见上面的仲裁说明）*/
 }
 
-/* CRC8（多项式 0x07，初值 0）—— 比异或强得多，错位几乎必被检出 */
+/* 给 Mcu/g071/Src/serial_telemetry.c 的 KISS 遥测统一入口 */
+uint8_t uart_tx_dma_ready(void) { return tx_ready(); }
+void    uart_tx_dma(uint8_t *p, uint16_t len)
+{
+    if (!tx_ready()) { return; }
+    uart_tx_submit(p, len, UART_KIND_TELEM);
+}
+
+/* CRC8（poly 0x07, init 0）：上行命令帧与换相事件帧共用 */
 static uint8_t evt_crc8(const uint8_t *p, uint8_t n)
 {
     uint8_t crc = 0;
@@ -2122,49 +2218,166 @@ static uint8_t evt_crc8(const uint8_t *p, uint8_t n)
     return crc;
 }
 
+/* ---- IRQ 回调（Mcu/g071/Src/stm32g0xx_it.c 调用）---- */
+
+/* DMA1_CH3 TC：一个包发完。窗口包则等最后一位移出后切 RX 开收窗。*/
+void uart_tx_tc3_isr(void)
+{
+    tx_busy = 0; tx_zero_ms = 0;
+    if (tx_kind == UART_KIND_WINDOW) {
+        if (win_ack_mode) {
+            LL_USART_EnableIT_TC(USART1);       /* 触发 USART TC 中断去切 RX */
+        } else {
+            win_inflight = 0; win_retx_pending = 0;   /* 无应答模式：直接放行下一窗 */
+        }
+    }
+}
+/* DMA1_CH3 TE：DMA 错误。释放锁并计数，避免永久卡死。*/
+void uart_tx_err_isr(void)
+{
+    tx_busy = 0; tx_zero_ms = 0; tx_dma_err_n++;
+    win_inflight = 0; win_retx_pending = 0;
+}
+
+/* USART1 TC：最后一 bit 已移出，切半双工 RX。*/
+void uart_usart_tc_isr(void)
+{
+    LL_USART_ClearFlag_TC(USART1);
+    LL_USART_DisableIT_TC(USART1);
+    if (!win_ack_mode) { return; }
+    (void)USART1->RDR;                                     /* 清 RXNE 残留 */
+    USART1->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
+    LL_USART_DisableDMAReq_TX(USART1);
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_RX);  /* RE=1, TE=0 */
+    rx_idx = 0;
+    LL_USART_EnableIT_RXNE(USART1);
+    win_listening = 1;
+    win_listen_until = ms10k_cnt + (uint32_t)ack_wait_ms * 10u;
+}
+
+/* 收窗结束：关 RXNE、切回 TX。main 上下文调用。*/
+static void win_listen_end(void)
+{
+    if (!win_listening) { return; }
+    LL_USART_DisableIT_RXNE(USART1);
+    (void)USART1->RDR;
+    USART1->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
+    win_listening = 0;
+}
+
+/* USART1 收错误（ORE 等）：清标志、重同步。*/
+void uart_rx_err_isr(void)
+{
+    (void)USART1->RDR;
+    USART1->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
+    rx_idx = 0;
+    rx_resync_n++;
+}
+
+/* USART1 RXNE：上行命令字节（半双工，只可能落在收窗内）*/
+void uart_rx_isr(uint8_t b)
+{
+    if (rx_idx == 0u) {
+        if (b == CMD_MAGIC0) { rx_buf[rx_idx++] = b; }
+        else { rx_resync_n++; }
+        return;
+    }
+    if (rx_idx == 1u) {
+        if (b == CMD_MAGIC1) { rx_buf[rx_idx++] = b; }
+        else if (b == CMD_MAGIC0) { rx_buf[0] = b; }   /* 仍是第 1 字节 */
+        else { rx_idx = 0; rx_resync_n++; }
+        return;
+    }
+    rx_buf[rx_idx++] = b;
+    if (rx_idx >= 7u) {
+        uint8_t crc = evt_crc8((const uint8_t *)rx_buf, 6u);
+        if (crc == rx_buf[6] && rx_buf[2] == 3u) {
+            uint8_t nh = (uint8_t)((rxq_head + 1u) & (RX_CMD_QN - 1u));
+            if (nh != rxq_tail) {          /* 队列满就丢最新（host 会重发命令）*/
+                rxq_cmd[rxq_head] = rx_buf[3];
+                rxq_arg[rxq_head] = (uint16_t)(rx_buf[4] | ((uint16_t)rx_buf[5] << 8));
+                rxq_head = nh;
+            }
+            rx_cmd_n++;
+        } else {
+            rx_crc_fail_n++;
+        }
+        rx_idx = 0;
+    }
+}
+
+/* CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, 不反转/不异或输出) 256 项表。
+ * 窗口包 6144B 载荷一次算完；放在组包后单趟扫描，直接表查（比 WIP 的 nibble
+ * 表快一倍）。实测约 0.5ms/窗，而一个窗周期 ~49ms ⇒ CPU 占用 ~1%。*/
+static const uint16_t crc16_tab[256] = {
+    0x0000u, 0x1021u, 0x2042u, 0x3063u, 0x4084u, 0x50A5u, 0x60C6u, 0x70E7u,
+    0x8108u, 0x9129u, 0xA14Au, 0xB16Bu, 0xC18Cu, 0xD1ADu, 0xE1CEu, 0xF1EFu,
+    0x1231u, 0x0210u, 0x3273u, 0x2252u, 0x52B5u, 0x4294u, 0x72F7u, 0x62D6u,
+    0x9339u, 0x8318u, 0xB37Bu, 0xA35Au, 0xD3BDu, 0xC39Cu, 0xF3FFu, 0xE3DEu,
+    0x2462u, 0x3443u, 0x0420u, 0x1401u, 0x64E6u, 0x74C7u, 0x44A4u, 0x5485u,
+    0xA56Au, 0xB54Bu, 0x8528u, 0x9509u, 0xE5EEu, 0xF5CFu, 0xC5ACu, 0xD58Du,
+    0x3653u, 0x2672u, 0x1611u, 0x0630u, 0x76D7u, 0x66F6u, 0x5695u, 0x46B4u,
+    0xB75Bu, 0xA77Au, 0x9719u, 0x8738u, 0xF7DFu, 0xE7FEu, 0xD79Du, 0xC7BCu,
+    0x48C4u, 0x58E5u, 0x6886u, 0x78A7u, 0x0840u, 0x1861u, 0x2802u, 0x3823u,
+    0xC9CCu, 0xD9EDu, 0xE98Eu, 0xF9AFu, 0x8948u, 0x9969u, 0xA90Au, 0xB92Bu,
+    0x5AF5u, 0x4AD4u, 0x7AB7u, 0x6A96u, 0x1A71u, 0x0A50u, 0x3A33u, 0x2A12u,
+    0xDBFDu, 0xCBDCu, 0xFBBFu, 0xEB9Eu, 0x9B79u, 0x8B58u, 0xBB3Bu, 0xAB1Au,
+    0x6CA6u, 0x7C87u, 0x4CE4u, 0x5CC5u, 0x2C22u, 0x3C03u, 0x0C60u, 0x1C41u,
+    0xEDAEu, 0xFD8Fu, 0xCDECu, 0xDDCDu, 0xAD2Au, 0xBD0Bu, 0x8D68u, 0x9D49u,
+    0x7E97u, 0x6EB6u, 0x5ED5u, 0x4EF4u, 0x3E13u, 0x2E32u, 0x1E51u, 0x0E70u,
+    0xFF9Fu, 0xEFBEu, 0xDFDDu, 0xCFFCu, 0xBF1Bu, 0xAF3Au, 0x9F59u, 0x8F78u,
+    0x9188u, 0x81A9u, 0xB1CAu, 0xA1EBu, 0xD10Cu, 0xC12Du, 0xF14Eu, 0xE16Fu,
+    0x1080u, 0x00A1u, 0x30C2u, 0x20E3u, 0x5004u, 0x4025u, 0x7046u, 0x6067u,
+    0x83B9u, 0x9398u, 0xA3FBu, 0xB3DAu, 0xC33Du, 0xD31Cu, 0xE37Fu, 0xF35Eu,
+    0x02B1u, 0x1290u, 0x22F3u, 0x32D2u, 0x4235u, 0x5214u, 0x6277u, 0x7256u,
+    0xB5EAu, 0xA5CBu, 0x95A8u, 0x8589u, 0xF56Eu, 0xE54Fu, 0xD52Cu, 0xC50Du,
+    0x34E2u, 0x24C3u, 0x14A0u, 0x0481u, 0x7466u, 0x6447u, 0x5424u, 0x4405u,
+    0xA7DBu, 0xB7FAu, 0x8799u, 0x97B8u, 0xE75Fu, 0xF77Eu, 0xC71Du, 0xD73Cu,
+    0x26D3u, 0x36F2u, 0x0691u, 0x16B0u, 0x6657u, 0x7676u, 0x4615u, 0x5634u,
+    0xD94Cu, 0xC96Du, 0xF90Eu, 0xE92Fu, 0x99C8u, 0x89E9u, 0xB98Au, 0xA9ABu,
+    0x5844u, 0x4865u, 0x7806u, 0x6827u, 0x18C0u, 0x08E1u, 0x3882u, 0x28A3u,
+    0xCB7Du, 0xDB5Cu, 0xEB3Fu, 0xFB1Eu, 0x8BF9u, 0x9BD8u, 0xABBBu, 0xBB9Au,
+    0x4A75u, 0x5A54u, 0x6A37u, 0x7A16u, 0x0AF1u, 0x1AD0u, 0x2AB3u, 0x3A92u,
+    0xFD2Eu, 0xED0Fu, 0xDD6Cu, 0xCD4Du, 0xBDAAu, 0xAD8Bu, 0x9DE8u, 0x8DC9u,
+    0x7C26u, 0x6C07u, 0x5C64u, 0x4C45u, 0x3CA2u, 0x2C83u, 0x1CE0u, 0x0CC1u,
+    0xEF1Fu, 0xFF3Eu, 0xCF5Du, 0xDF7Cu, 0xAF9Bu, 0xBFBAu, 0x8FD9u, 0x9FF8u,
+    0x6E17u, 0x7E36u, 0x4E55u, 0x5E74u, 0x2E93u, 0x3EB2u, 0x0ED1u, 0x1EF0u
+};
+static uint16_t crc16_upd(uint16_t crc, uint8_t b)
+{
+    return (uint16_t)((crc << 8) ^ crc16_tab[(uint8_t)((crc >> 8) ^ b)]);
+}
+
 /* ★★★ 2026-10-11 串口【窗口式全速采样】（串口测试分支固化）★★★
- *   用户定的方案："先把数据放到内存里，然后串口慢慢发，发完了再来一次新的
- *   全速采样覆盖" —— 采集与发送在时间上错开，采到的数据永不被自己的传输干扰。
- *   · 窗口内：24kHz 全速采 512 帧（21.3ms），存 delta(i16) + step(u8)
- *   · 窗口间：整窗用 DMA 发出去（4 + 2 + 4 + 2 + 512*3 = 1548 字节，1Mbaud ~15.5ms）
- *   ⇒ 时间覆盖率 ≈ 21.3/(21.3+15.5) ≈ 58%
- *   每窗一包：A5 5A A5 5A | win_seq u16 | ts u32 | n u16 | n*(delta i16 + step u8)
- *   （靠 4 字节独特帧头 + 长度字段同步；ts = 本窗首帧的 24kHz 总帧号）*/
+ *   窗内：24kHz 全速采 512 帧（≈21.3ms），一帧不抽；窗间：整窗 DMA 发。
+ *   proto2 包：magic8 + ver/type/len/seq/ts/n + 512×12B + crc16。 */
 #define WIN_N        512
-#define WIN_TOTAL    (12 + WIN_N * 12)    /* 头 12 字节 + 每帧 12 字节(VA/VB/VC/V0/电流 + step + 保留) */
-volatile int16_t  win_buf[WIN_N];       /* ★ 现在语义 = VA（四路电压版）*/
+#define WIN_HDR      20
+#define WIN_CRC      2
+#define WIN_TOTAL    (WIN_HDR + WIN_N * 12 + WIN_CRC)
+volatile int16_t  win_buf[WIN_N];       /* VA（四路电压版）*/
 volatile int16_t  win_vb[WIN_N];
 volatile int16_t  win_vc[WIN_N];
 volatile int16_t  win_v0[WIN_N];
-volatile int16_t  win_cur[WIN_N];      /* ★ 每帧电流（ADC 原始码）*/
+volatile int16_t  win_cur[WIN_N];       /* 每帧电流（ADC 原始码）*/
 volatile uint8_t  win_step[WIN_N];
-volatile uint8_t  win_dbg[WIN_N];        /* ★ 2026-10-13 未钳制的步内时间（ADC 帧，饱和 255）
-                                          *   必须【采集时逐点存】，不能在打包时用实时计数器算 ——
-                                          *   打包发生在发送前，那时实时值对 512 个点是同一个 ⇒ 会变成常数。*/
+volatile uint8_t  win_dbg[WIN_N];       /* 未钳制的步内时间（ADC 帧，饱和 255）*/
 volatile uint16_t win_n;
-volatile uint8_t  win_state;     /* 0=采集中 1=待发送 2=发送中 */
+volatile uint8_t  win_state;            /* 0=采集中 1=采满待发 */
 volatile uint32_t win_seq;
 volatile uint32_t win_ts;
-volatile uint32_t win_sent;      /* 已发出的窗口数 —— 没增长就说明卡住了 */
-volatile uint8_t  win_tx[200];
-volatile uint8_t  win_enable = 1;   /* ★ 运行时开关：0 = 停发窗口流，把带宽全给事件流
-                                     *   （跑"全变量"那轮用它；SWD 写 0/1 即可，不用重编译）*/
-/* ★★ xien/n2b：窗口流降采样倍数（运行时可经 SWD 写，不用重编译）★★
- *   1 = 每窗都发；N = 每 N 个窗只发 1 个。窗内仍 512 点全速，N 只改"多久拿一窗"。
- *   写：tools/esc-dbg.sh poke16 win_every_n <N>；上电初值 = targets.h 的 RM2027_WIN_EVERY_N。 */
+volatile uint32_t win_sent;             /* 已组包交给 DMA 的窗数 */
+volatile uint8_t  win_enable = 1;       /* SWD 可写：0=停窗口流 */
+/* 窗间抽窗：1=每窗都发；N=每 N 个采满的窗只发 1 个（窗内仍 512 全采样）。
+ * SWD 写：tools/esc-dbg.sh poke16 win_every_n <N>；上电初值 = targets.h 宏。*/
 volatile uint16_t win_every_n = RM2027_WIN_EVERY_N;
-static uint8_t    win_pkt[WIN_TOTAL];    /* ★ 整包组好后一次性交给 DMA（见 win_pump）*/
+static uint8_t    win_pkt[WIN_TOTAL];   /* 最近一窗：stop-and-wait 重发缓冲 */
 
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
 void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_t st)
 {
-    if (win_state != 0u) { return; }        /* 发送中/待发送 ⇒ 本窗不再采 */
-    /* ★★ 2026-10-12 补：每个窗口记下【本窗首帧的绝对 24kHz 帧号】★★
-     *   原来 win_ts 只被声明、从来没有赋值 ⇒ 每个窗口包的 ts 恒为 0
-     *   ⇒ 窗口之间是有间隔的，没有绝对帧号就没法把多窗拼回真实时间轴
-     *   （也就回答不了"这是交棒后第几毫秒"）。
-     *   注：adc_frame_total 在本函数返回后才 ++（见 stm32g0xx_it.c），
-     *   所以取到的是"上一帧"的编号 —— 差 1 帧 = 41.67µs，拼时间轴无影响。 */
+    if (win_state != 0u) { return; }        /* 采满待发/发送中 ⇒ 本窗不再采 */
     if (win_n == 0u) { win_ts = adc_frame_total; }
     uint16_t i = win_n;
     win_buf[i]  = va;
@@ -2172,9 +2385,7 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
     win_vc[i]   = vc;
     win_v0[i]   = v0;
     win_cur[i]  = cu;
-    win_step[i] = (uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));   /* 高2位=采样顺序 */
-    /* ★ 每进入 step1（一个电周期）轮转一次 A/B/C/V0 顺序；
-     *   在 ADC-TC 里安全应用 pending，保证同一电周期内顺序固定。 */
+    win_step[i] = (uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));
     {
         static uint8_t last_st = 0;
         uint8_t stp = (uint8_t)(st & 0x07u);
@@ -2184,7 +2395,6 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
         last_st = stp;
     }
     {
-        /* 未钳制的步内时间：距上次换相过了多少个 ADC 帧（1 帧 = 41.67µs = 83.33 拍）*/
         extern volatile uint16_t adc_frame_cnt;
         uint16_t el = (uint16_t)(adc_frame_cnt - ccm_last_frame);
         win_dbg[i] = (uint8_t)((el > 255u) ? 255u : el);
@@ -2192,78 +2402,156 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
     i++;
     if (i >= WIN_N) {
         win_n = WIN_N;
-        win_state = 1u;                     /* 采满 ⇒ 交给主循环发 */
+        win_state = 1u;                     /* 采满 ⇒ 交给主循环 */
     } else {
         win_n = i;
     }
 }
 
-/* 主循环调用：把采满的窗口【整包一次 DMA 发出去】。
- * ★★ 2026-10-12 改：原来是"每轮主循环发 200 字节"⇒ 发送速率被主循环的轮转速度
- *   卡住：实测窗口间隔 173ms（理论 36.8ms）、覆盖率只有 12%（理论 58%）。
- *   现在先在内存里组好整包再一次性交给 DMA ⇒ 发送时间只由波特率决定
- *   （1548 B @1Mbaud = 15.5ms），与主循环快慢无关。RAM 代价 1548 B。 */
+/* 主循环调用：窗口协议状态机（组包 / 收命令 / ACK / 重发 / 抽窗）。
+ * ★ 抽窗必须在 TX 忙时也处理：否则采集被 41ms 的 TX 节流，
+ *   win_every_n=2 也拿不到全速率采样。*/
 void win_pump(void)
 {
-    if (!win_enable) {                      /* ★ 关掉窗口流：丢这一窗、继续采，但不发 */
-        if (win_state == 1u) { win_state = 0u; win_n = 0u; }
+    /* (1) 排空上行命令队列（一个收窗内 PC 可连发 SET+ACK）*/
+    {
+        uint8_t got = 0;
+        while (rxq_head != rxq_tail) {
+        uint8_t  c = rxq_cmd[rxq_tail];
+        uint16_t a = rxq_arg[rxq_tail];
+        rxq_tail = (uint8_t)((rxq_tail + 1u) & (RX_CMD_QN - 1u));
+        got = 1;
+        switch (c) {
+        case CMD_ACK:
+            if (win_inflight && (uint16_t)a == win_inflight_seq) {
+                win_inflight = 0; win_retx_pending = 0; win_retry = 0;
+                win_ack_n++;
+            }
+            break;
+        case CMD_NAK:
+        case CMD_RESEND:
+            pkt_crc_fail_n++;
+            if (win_inflight) {
+                if (win_retry < WIN_RETRY_MAX) { win_retx_pending = 1; }
+                else { win_inflight = 0; win_giveup_n++; }
+            }
+            break;
+        case CMD_SET:
+            if (a < 1u) { a = 1u; }
+            if (a > 1000u) { a = 1000u; }
+            win_every_n = a;
+            break;
+        default:
+            break;
+        }
+        }   /* while rxq */
+        if (got) { win_noack_streak = 0; win_listen_end(); }
+    }
+
+    if (!win_enable) {
+        win_listen_end();
+        win_inflight = 0; win_retx_pending = 0;
+        if (win_state == 1u) { win_n = 0u; win_state = 0u; }
         return;
     }
-    if (!tx_ready()) { return; }            /* 串口忙（可能事件流在用）⇒ 等下一轮 */
-    if (win_state != 1u) { return; }        /* 只有"采满待发"才动 */
-    /* ★★ xien/n2b：窗口流降采样（运行时变量 win_every_n）★★
-     *   非采样窗在【组包之前】就丢掉 —— 组包本身要跑 512 次循环、发送要占 DMA，
-     *   两者都是扰动的来源。win_seq 照旧 +1（主机端从 seq 空档看出降采样），win_sent 不加。 */
-    if (win_every_n > 1u) {
-        static uint16_t win_skip = 0;
-        if (win_skip) {
-            win_skip--;
-            win_n = 0; win_state = 0u; win_seq++;
-            return;
+
+    /* (2) 收窗超时：没等到 ACK ⇒ 超时当 NAK，重发同一窗 */
+    if (win_listening) {
+        if ((int32_t)(ms10k_cnt - win_listen_until) >= 0) {
+            win_listen_end();
+            win_noack_streak++;
+            if (win_inflight) {
+                if (win_retry < WIN_RETRY_MAX) { win_retx_pending = 1; }
+                else { win_inflight = 0; win_giveup_n++; }
+            }
         }
-        win_skip = (uint16_t)(win_every_n - 1u);
+        return;                             /* 收窗内不发窗口/事件 */
     }
 
-    /* 组包（此时 ISR 已停写：win_state != 0 时 win_push 直接返回）*/
-    win_pkt[0] = 0xA5; win_pkt[1] = 0x5A; win_pkt[2] = 0xA5; win_pkt[3] = 0x5A;
-    win_pkt[4] = (uint8_t)(win_seq & 0xFF);  win_pkt[5] = (uint8_t)(win_seq >> 8);
-    win_pkt[6] = (uint8_t)(win_ts & 0xFF);
-    win_pkt[7] = (uint8_t)((win_ts >> 8) & 0xFF);
-    win_pkt[8] = (uint8_t)((win_ts >> 16) & 0xFF);
-    win_pkt[9] = (uint8_t)((win_ts >> 24) & 0xFF);
-    win_pkt[10] = (uint8_t)(WIN_N & 0xFF);   win_pkt[11] = (uint8_t)(WIN_N >> 8);
-    for (uint16_t f = 0; f < WIN_N; f++) {
-        uint16_t k = (uint16_t)(12u + f * 12u);
-        win_pkt[k + 0] = (uint8_t)( win_buf[f]       & 0xFF);  /* VA */
-        win_pkt[k + 1] = (uint8_t)((win_buf[f] >> 8) & 0xFF);
-        win_pkt[k + 2] = (uint8_t)( win_vb[f]        & 0xFF);  /* VB */
-        win_pkt[k + 3] = (uint8_t)((win_vb[f]  >> 8) & 0xFF);
-        win_pkt[k + 4] = (uint8_t)( win_vc[f]        & 0xFF);  /* VC */
-        win_pkt[k + 5] = (uint8_t)((win_vc[f]  >> 8) & 0xFF);
-        win_pkt[k + 6] = (uint8_t)( win_v0[f]        & 0xFF);  /* V0 */
-        win_pkt[k + 7] = (uint8_t)((win_v0[f]  >> 8) & 0xFF);
-        win_pkt[k + 8] = (uint8_t)( win_cur[f]       & 0xFF);  /* ★ 电流 */
-        win_pkt[k + 9] = (uint8_t)((win_cur[f] >> 8) & 0xFF);
-        win_pkt[k +10] = win_step[f];
-        /* ★★★ 2026-10-13 第 12 字节（原来是保留 0）= 【未钳制的实测步内时间】★★★
-         *   为什么必须是它：commutate() 里有一道离群值剔除把实测步长钳在 [ci/4, 2ci]，
-         *   而 PeriodElapsedCallback 又把 ci 做了一阶滤波 ⇒ **剧烈抖动/停顿会被抹平**
-         *   （源码注释原话："用户肉眼看到的抖正是被这段抹掉的部分"）。
-         *   所以用 ci 判"有没有失步/抖"在逻辑上不成立 —— 必须记一个【没被钳过】的量。
-         *   这里记 adc_frame_cnt − ccm_last_frame = 距上一次换相过了多少个 ADC 帧
-         *   （1 帧 = 41.67µs = 83.33 拍），饱和到 255（255 帧 ≈ 10.6ms，足够覆盖堵转）。
-         *   ⇒ 每采样点一个锯齿，其【周期】就是该步的真实步长（未钳制、未滤波）✓
-         *   ⚠ 解析侧同步：cap-evt.py 现在把每采样点第 12 字节存成 npz 里的 dbg 数组。 */
-        win_pkt[k +11] = win_dbg[f];   /* ★ 采集时逐点存下来的（见 win_push）*/
+    /* (3) 连续多窗一个命令都收不到 ⇒ 主机不在/收线断：退化尽力发，避免每窗发 4 遍。
+     *     每 64 个发送窗探一次，若主机回来收到命令立即恢复 ack 模式。*/
+    if (win_ack_mode && win_noack_streak >= 16u) { win_ack_mode = 0; }
+
+    /* (4) 抽窗（win_every_n）：TX 忙也要处理，丢的是 win_buf 里的窗，不碰 win_pkt */
+    if (win_state == 1u && win_skip > 0u) {
+        win_skip--;
+        win_n = 0u; win_state = 0u; win_seq++;
+        return;
     }
 
+    /* (5) 重发优先（win_pkt 仍是那一窗，未被覆盖）*/
+    if (win_retx_pending) {
+        if (!tx_ready()) { return; }
+        win_retx_pending = 0; win_retry++; tx_retry_n++;
+        uart_tx_submit(win_pkt, WIN_TOTAL, UART_KIND_WINDOW);
+        return;
+    }
+
+    /* (6) 有一窗在等 ACK ⇒ win_pkt 不能覆盖 */
+    if (win_inflight) { return; }
+
+    if (win_state != 1u) { return; }
+    if (!tx_ready()) { return; }
+
+    /* 无应答模式：每 64 窗探一次收窗，主机若回来就恢复 ACK 模式 */
+    if (!win_ack_mode && ((win_sent & 63u) == 0u)) { win_ack_mode = 1u; }
+
+    /* (7) 组包（proto2）+ CRC16 */
+    {
+        const uint16_t seq  = (uint16_t)win_seq;
+        const uint32_t ts   = win_ts;
+        uint16_t k = 0u;
+        win_pkt[k++] = 0xA5; win_pkt[k++] = 0x5A; win_pkt[k++] = 0xA5; win_pkt[k++] = 0x5A;
+        win_pkt[k++] = 0xC3; win_pkt[k++] = 0x3C; win_pkt[k++] = 0x96; win_pkt[k++] = 0x69;
+        win_pkt[k++] = 0x02u;                                   /* ver = proto2 */
+        win_pkt[k++] = 0x01u;                                   /* type = window */
+        win_pkt[k++] = (uint8_t)((WIN_N * 12u) & 0xFF);         /* len u16 */
+        win_pkt[k++] = (uint8_t)(((WIN_N * 12u) >> 8) & 0xFF);
+        win_pkt[k++] = (uint8_t)(seq & 0xFF);
+        win_pkt[k++] = (uint8_t)(seq >> 8);
+        win_pkt[k++] = (uint8_t)(ts & 0xFF);
+        win_pkt[k++] = (uint8_t)((ts >> 8) & 0xFF);
+        win_pkt[k++] = (uint8_t)((ts >> 16) & 0xFF);
+        win_pkt[k++] = (uint8_t)((ts >> 24) & 0xFF);
+        win_pkt[k++] = (uint8_t)(WIN_N & 0xFF);
+        win_pkt[k++] = (uint8_t)(WIN_N >> 8);
+        for (uint16_t f = 0; f < WIN_N; f++) {
+            win_pkt[k +  0] = (uint8_t)( win_buf[f]        & 0xFF);
+            win_pkt[k +  1] = (uint8_t)((win_buf[f] >>  8) & 0xFF);
+            win_pkt[k +  2] = (uint8_t)( win_vb[f]         & 0xFF);
+            win_pkt[k +  3] = (uint8_t)((win_vb[f]  >>  8) & 0xFF);
+            win_pkt[k +  4] = (uint8_t)( win_vc[f]         & 0xFF);
+            win_pkt[k +  5] = (uint8_t)((win_vc[f]  >>  8) & 0xFF);
+            win_pkt[k +  6] = (uint8_t)( win_v0[f]         & 0xFF);
+            win_pkt[k +  7] = (uint8_t)((win_v0[f]  >>  8) & 0xFF);
+            win_pkt[k +  8] = (uint8_t)( win_cur[f]        & 0xFF);
+            win_pkt[k +  9] = (uint8_t)((win_cur[f] >>  8) & 0xFF);
+            win_pkt[k + 10] = win_step[f];
+            win_pkt[k + 11] = win_dbg[f];
+            k = (uint16_t)(k + 12u);
+        }
+        uint16_t crc = 0xFFFFu;
+        for (uint16_t ci = 8u; ci < k; ci++) { crc = crc16_upd(crc, win_pkt[ci]); }
+        win_pkt[k++] = (uint8_t)(crc & 0xFF);
+        win_pkt[k++] = (uint8_t)(crc >> 8);
+    }
+
+    win_inflight = 1;
+    win_inflight_seq = (uint16_t)win_seq;
+    win_retry = 0;
+    win_retx_pending = 0;
+    win_skip = (uint16_t)((win_every_n > 1u) ? (win_every_n - 1u) : 0u);
     win_seq++;
     win_sent++;
-    /* ★ xien/n3e：每 5 个发送窗（≈1s @N=8）轮转一次 A/B/C/V0 的 rank 顺序 */
-    /* 顺序轮转已挪到 win_push 的 step1 边界（每电周期一次），这里不再动 */
-    win_n = 0;
-    win_state = 0u;                         /* 立刻开新一轮采集（DMA 在后台自己发）*/
-    evt_send((uint8_t *)win_pkt, WIN_TOTAL);
+    win_n = 0u; win_state = 0u;             /* 先清计数再释放！否则 ISR 看到 state=0 会向 win_buf[512] 写 */
+    uart_tx_submit(win_pkt, WIN_TOTAL, UART_KIND_WINDOW);
+}
+
+/* 事件流发送入口：也走统一仲裁（事件流默认关，见 targets.h RM2027_EVT_STREAM）*/
+static void evt_send(uint8_t *p, uint16_t len)
+{
+    if (!tx_ready()) { return; }
+    uart_tx_submit(p, len, UART_KIND_EVT);
 }
 
 /* 在换相那一刻打包一个事件（中断上下文：只写内存，不发送）*/

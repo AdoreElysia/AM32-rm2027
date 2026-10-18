@@ -82,13 +82,17 @@ void telem_UART_Init()
     LL_DMA_EnableIT_TE(DMA1, LL_DMA_CHANNEL_3);
 }
 
-void send_telem_DMA(uint8_t bytes)
-{ // set data length and enable channel to start transfer
-    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
-    //  GPIOB->OTYPER &= 0 << 6;
-    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, bytes);
-    LL_USART_EnableDMAReq_TX(USART1);
+/* ★★ 2026-10-18 xien/n4-serial-ack：KISS 遥测不再自己抢 DMA1_CH3 ★★
+ *   旧实现三个确定性 bug（WIP 台架 raw 实测）：
+ *     ① 不看 tx_busy，和窗口流抢同一条 DMA，半途 DisableChannel 改地址/长度；
+ *     ② 不重设 memory address（CMAR 被窗口流改过）；
+ *     ③ 启动 DMA 后立刻 SetTransferDirection(RX) 把 TE 清掉，正在传的包静默丢。
+ *   现在统一走 main.c 的仲裁入口 uart_tx_dma()：忙（包括半双工收窗）就丢这一帧遥测，绝不抢。 */
+extern uint8_t uart_tx_dma_ready(void);
+extern void    uart_tx_dma(uint8_t *p, uint16_t len);
 
-    LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_3);
-    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_RX);
+void send_telem_DMA(uint8_t bytes)
+{
+    if (!uart_tx_dma_ready()) { return; }   /* 窗口流/收窗在用 ⇒ 丢这一帧遥测 */
+    uart_tx_dma(aTxBuffer, bytes);
 }

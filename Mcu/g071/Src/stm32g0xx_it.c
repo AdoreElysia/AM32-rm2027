@@ -641,12 +641,35 @@ void DMA1_Channel2_3_IRQHandler(void)
         send_telemetry = 0;
         LL_DMA_ClearFlag_GI3(DMA1);
         LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
-        /* Call function Transmission complete Callback */
+        /* ★ xien/n4-serial-ack：通知 main.c 的发送状态机（窗口包则准备切 RX 收命令） */
+        { extern void uart_tx_tc3_isr(void); uart_tx_tc3_isr(); }
     } else if (LL_DMA_IsActiveFlag_TE3(DMA1)) {
         LL_DMA_ClearFlag_GI3(DMA1);
         LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
-        /* Call Error function */
-        // USART_TransferError_Callback();
+        /* ★ DMA 出错也必须释放 tx_busy，否则窗口流永久卡死 */
+        { extern void uart_tx_err_isr(void); uart_tx_err_isr(); }
+    }
+}
+
+/**
+ * @brief This function handles USART1 global interrupt.
+ * ★ 本板半双工：只在窗口包发完、USART TC 中断开启时才会进来切 RX；
+ *   RXNE 只在收窗内有效（PC 上行命令）。
+ */
+void USART1_IRQHandler(void)
+{
+    if (LL_USART_IsActiveFlag_ORE(USART1)) {
+        LL_USART_ClearFlag_ORE(USART1);
+        { extern void uart_rx_err_isr(void); uart_rx_err_isr(); }
+    }
+    if (LL_USART_IsActiveFlag_FE(USART1)) { LL_USART_ClearFlag_FE(USART1); }
+    if (LL_USART_IsActiveFlag_NE(USART1)) { LL_USART_ClearFlag_NE(USART1); }
+    if (LL_USART_IsActiveFlag_RXNE(USART1)) {
+        uint8_t b = LL_USART_ReceiveData8(USART1);
+        { extern void uart_rx_isr(uint8_t); uart_rx_isr(b); }
+    }
+    if (LL_USART_IsActiveFlag_TC(USART1) && LL_USART_IsEnabledIT_TC(USART1)) {
+        { extern void uart_usart_tc_isr(void); uart_usart_tc_isr(); }
     }
 }
 

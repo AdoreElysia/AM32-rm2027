@@ -2681,7 +2681,10 @@
  *   win_seq 照旧每窗 +1（主机端从 seq 的空档就能看出降采样）、win_sent 只数真正发出去的。
  *   1 = 不降采样（老行为）。取 8 ⇒ 带宽 ~36 KB/s，余量 3.5 倍。 */
 #ifndef RM2027_WIN_EVERY_N
-#define RM2027_WIN_EVERY_N   8
+/* ★ xien/n4-serial-ack：proto2 单包 6166B @1.5Mbaud ≈ 41ms，采一窗 512×41.67µs
+ *   ≈21.3ms ⇒ 链路最多 ~24 包/s、采集最多 ~47 窗/s。win_every_n=2 让"采 2 窗
+ *   发 1 窗"匹配链路（≈23.5 包/s），是长时间稳定跑的推荐值；SWD/上行 SET 可改。 */
+#define RM2027_WIN_EVERY_N   2
 #endif
 
 #ifndef RM2027_NEVER_HANDOVER
