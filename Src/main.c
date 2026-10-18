@@ -2231,10 +2231,10 @@ void uart_tx_tc3_isr(void)
     tx_busy = 0; tx_zero_ms = 0;
     if (tx_kind == UART_KIND_WINDOW) {
         dbg_tc3win_n++;
-        /* ★ 永远开收窗：收窗是 PC 唯一的"发送许可"。
-         *   老代码 `if(!win_ack_mode) return;` ⇒ 降级后永不开收窗 ⇒ ESC 永远 TE=1 独占总线
-         *   ⇒ PC 收不到许可、回 ACK 还会和 ESC 对撞 ⇒ 永久死锁。这一行是本次修复的核心。*/
-        LL_USART_EnableIT_TC(USART1);       /* 触发 USART TC 中断去切 RX */
+        /* ★ 本板上行物理未接线 ⇒ 不等 ACK、不开收窗、发完立即释放。
+         *   否则 win_inflight 会永久卡 1 ⇒ win_pump 永远提前返回 ⇒ 窗口流死掉。*/
+        win_inflight = 0;
+        win_retx_pending = 0;
     } else {
         dbg_tc3other_n++;
     }
@@ -2352,7 +2352,7 @@ static const uint16_t crc16_tab[256] = {
     0xEF1Fu, 0xFF3Eu, 0xCF5Du, 0xDF7Cu, 0xAF9Bu, 0xBFBAu, 0x8FD9u, 0x9FF8u,
     0x6E17u, 0x7E36u, 0x4E55u, 0x5E74u, 0x2E93u, 0x3EB2u, 0x0ED1u, 0x1EF0u
 };
-static uint16_t crc16_upd(uint16_t crc, uint8_t b)
+static uint16_t __attribute__((unused)) crc16_upd(uint16_t crc, uint8_t b)
 {
     return (uint16_t)((crc << 8) ^ crc16_tab[(uint8_t)((crc >> 8) ^ b)]);
 }
@@ -2380,7 +2380,8 @@ volatile uint8_t  win_enable = 1;       /* SWD 可写：0=停窗口流 */
 /* 窗间抽窗：1=每窗都发；N=每 N 个采满的窗只发 1 个（窗内仍 512 全采样）。
  * SWD 写：tools/esc-dbg.sh poke16 win_every_n <N>；上电初值 = targets.h 宏。*/
 volatile uint16_t win_every_n = RM2027_WIN_EVERY_N;
-static uint8_t    win_pkt[WIN_TOTAL];   /* 最近一窗：stop-and-wait 重发缓冲 */
+static uint8_t    win_pkt[2][WIN_TOTAL];
+static volatile uint8_t win_buf_i = 0u, win_tx_i = 0u;   /* 最近一窗：stop-and-wait 重发缓冲 */
 
 /* 中断里调用：窗口内全速采（只写内存，绝不发送）*/
 void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_t st)
@@ -2388,12 +2389,19 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
     if (win_state != 0u) { return; }        /* 采满待发/发送中 ⇒ 本窗不再采 */
     if (win_n == 0u) { win_ts = adc_frame_total; }
     uint16_t i = win_n;
-    win_buf[i]  = va;
-    win_vb[i]   = vb;
-    win_vc[i]   = vc;
-    win_v0[i]   = v0;
-    win_cur[i]  = cu;
-    win_step[i] = (uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));
+    /* ★ ISR 直写包缓冲最终位置（ping-pong）：主循环零重排、零 CRC */
+    {
+        uint8_t *q = &win_pkt[win_buf_i][WIN_HDR + (uint16_t)i * 12u];
+        extern volatile uint16_t adc_frame_cnt;
+        uint16_t el = (uint16_t)(adc_frame_cnt - ccm_last_frame);
+        q[ 0]=(uint8_t)( va & 0xFF); q[ 1]=(uint8_t)((va>>8)&0xFF);
+        q[ 2]=(uint8_t)( vb & 0xFF); q[ 3]=(uint8_t)((vb>>8)&0xFF);
+        q[ 4]=(uint8_t)( vc & 0xFF); q[ 5]=(uint8_t)((vc>>8)&0xFF);
+        q[ 6]=(uint8_t)( v0 & 0xFF); q[ 7]=(uint8_t)((v0>>8)&0xFF);
+        q[ 8]=(uint8_t)( cu & 0xFF); q[ 9]=(uint8_t)((cu>>8)&0xFF);
+        q[10]=(uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));
+        q[11]=(uint8_t)((el > 255u) ? 255u : el);
+    }
     {
         static uint8_t last_st = 0;
         uint8_t stp = (uint8_t)(st & 0x07u);
@@ -2401,11 +2409,6 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
             adc_order_pending = (uint8_t)((adc_order + 1u) & 3u);
         }
         last_st = stp;
-    }
-    {
-        extern volatile uint16_t adc_frame_cnt;
-        uint16_t el = (uint16_t)(adc_frame_cnt - ccm_last_frame);
-        win_dbg[i] = (uint8_t)((el > 255u) ? 255u : el);
     }
     i++;
     if (i >= WIN_N) {
@@ -2492,7 +2495,7 @@ void win_pump(void)
     if (win_retx_pending) {
         if (!tx_ready()) { return; }
         win_retx_pending = 0; win_retry++; tx_retry_n++;
-        uart_tx_submit(win_pkt, WIN_TOTAL, UART_KIND_WINDOW);
+        uart_tx_submit(win_pkt[win_tx_i], WIN_TOTAL, UART_KIND_WINDOW);
         return;
     }
 
@@ -2507,39 +2510,27 @@ void win_pump(void)
         const uint16_t seq  = (uint16_t)win_seq;
         const uint32_t ts   = win_ts;
         uint16_t k = 0u;
-        win_pkt[k++] = 0xA5; win_pkt[k++] = 0x5A; win_pkt[k++] = 0xA5; win_pkt[k++] = 0x5A;
-        win_pkt[k++] = 0xC3; win_pkt[k++] = 0x3C; win_pkt[k++] = 0x96; win_pkt[k++] = 0x69;
-        win_pkt[k++] = 0x02u;                                   /* ver = proto2 */
-        win_pkt[k++] = 0x01u;                                   /* type = window */
-        win_pkt[k++] = (uint8_t)((WIN_N * 12u) & 0xFF);         /* len u16 */
-        win_pkt[k++] = (uint8_t)(((WIN_N * 12u) >> 8) & 0xFF);
-        win_pkt[k++] = (uint8_t)(seq & 0xFF);
-        win_pkt[k++] = (uint8_t)(seq >> 8);
-        win_pkt[k++] = (uint8_t)(ts & 0xFF);
-        win_pkt[k++] = (uint8_t)((ts >> 8) & 0xFF);
-        win_pkt[k++] = (uint8_t)((ts >> 16) & 0xFF);
-        win_pkt[k++] = (uint8_t)((ts >> 24) & 0xFF);
-        win_pkt[k++] = (uint8_t)(WIN_N & 0xFF);
-        win_pkt[k++] = (uint8_t)(WIN_N >> 8);
-        for (uint16_t f = 0; f < WIN_N; f++) {
-            win_pkt[k +  0] = (uint8_t)( win_buf[f]        & 0xFF);
-            win_pkt[k +  1] = (uint8_t)((win_buf[f] >>  8) & 0xFF);
-            win_pkt[k +  2] = (uint8_t)( win_vb[f]         & 0xFF);
-            win_pkt[k +  3] = (uint8_t)((win_vb[f]  >>  8) & 0xFF);
-            win_pkt[k +  4] = (uint8_t)( win_vc[f]         & 0xFF);
-            win_pkt[k +  5] = (uint8_t)((win_vc[f]  >>  8) & 0xFF);
-            win_pkt[k +  6] = (uint8_t)( win_v0[f]         & 0xFF);
-            win_pkt[k +  7] = (uint8_t)((win_v0[f]  >>  8) & 0xFF);
-            win_pkt[k +  8] = (uint8_t)( win_cur[f]        & 0xFF);
-            win_pkt[k +  9] = (uint8_t)((win_cur[f] >>  8) & 0xFF);
-            win_pkt[k + 10] = win_step[f];
-            win_pkt[k + 11] = win_dbg[f];
-            k = (uint16_t)(k + 12u);
-        }
-        uint16_t crc = 0xFFFFu;
-        for (uint16_t ci = 8u; ci < k; ci++) { crc = crc16_upd(crc, win_pkt[ci]); }
-        win_pkt[k++] = (uint8_t)(crc & 0xFF);
-        win_pkt[k++] = (uint8_t)(crc >> 8);
+        /* ★ ping-pong：发送刚采满的那块，采集立刻切到另一块 */
+        win_tx_i = win_buf_i;
+        win_buf_i = (uint8_t)(win_buf_i ^ 1u);
+        win_state = 0u;
+        win_pkt[win_tx_i][k++] = 0xA5; win_pkt[win_tx_i][k++] = 0x5A; win_pkt[win_tx_i][k++] = 0xA5; win_pkt[win_tx_i][k++] = 0x5A;
+        win_pkt[win_tx_i][k++] = 0xC3; win_pkt[win_tx_i][k++] = 0x3C; win_pkt[win_tx_i][k++] = 0x96; win_pkt[win_tx_i][k++] = 0x69;
+        win_pkt[win_tx_i][k++] = 0x02u;                                   /* ver = proto2 */
+        win_pkt[win_tx_i][k++] = 0x01u;                                   /* type = window */
+        win_pkt[win_tx_i][k++] = (uint8_t)((WIN_N * 12u) & 0xFF);         /* len u16 */
+        win_pkt[win_tx_i][k++] = (uint8_t)(((WIN_N * 12u) >> 8) & 0xFF);
+        win_pkt[win_tx_i][k++] = (uint8_t)(seq & 0xFF);
+        win_pkt[win_tx_i][k++] = (uint8_t)(seq >> 8);
+        win_pkt[win_tx_i][k++] = (uint8_t)(ts & 0xFF);
+        win_pkt[win_tx_i][k++] = (uint8_t)((ts >> 8) & 0xFF);
+        win_pkt[win_tx_i][k++] = (uint8_t)((ts >> 16) & 0xFF);
+        win_pkt[win_tx_i][k++] = (uint8_t)((ts >> 24) & 0xFF);
+        win_pkt[win_tx_i][k++] = (uint8_t)(WIN_N & 0xFF);
+        win_pkt[win_tx_i][k++] = (uint8_t)(WIN_N >> 8);
+        k = (uint16_t)(WIN_HDR + WIN_N * 12u);
+        win_pkt[win_tx_i][k++] = 0u;   /* 无 CRC（靠 magic/len + UART 帧同步）*/
+        win_pkt[win_tx_i][k++] = 0u;
     }
 
     win_inflight = 1;
@@ -2550,7 +2541,7 @@ void win_pump(void)
     win_seq++;
     win_sent++;
     win_n = 0u; win_state = 0u;             /* 先清计数再释放！否则 ISR 看到 state=0 会向 win_buf[512] 写 */
-    uart_tx_submit(win_pkt, WIN_TOTAL, UART_KIND_WINDOW);
+    uart_tx_submit(win_pkt[win_tx_i], WIN_TOTAL, UART_KIND_WINDOW);
 }
 
 /* 事件流发送入口：也走统一仲裁（事件流默认关，见 targets.h RM2027_EVT_STREAM）*/

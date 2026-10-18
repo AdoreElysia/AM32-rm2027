@@ -30,7 +30,7 @@
  *     ⚠ 纯开环下转子必须自己跟得上；一有堵转/电流爬升立即 F1 收油。
  * ========================================================================== */
 #ifndef XIEN_OL_SCAN_MODE
-#define XIEN_OL_SCAN_MODE   1
+#define XIEN_OL_SCAN_MODE   0
 #endif
 #ifndef XIEN_OL_INPUT
 #define XIEN_OL_INPUT      350     /* A1 ADC 基线：油门刻度（duty≈300） */
@@ -46,7 +46,7 @@
 /* ★ 连续升频参数：按 test-12 原样 554 Hz/s；启动链保持原样。
  *   运行时可经 SWD 再调：tools/esc-dbg.sh poke16 ol_freq_slope 400/300。 */
 #ifndef XIEN_OL_FREQ_SLOPE
-#define XIEN_OL_FREQ_SLOPE 554
+#define XIEN_OL_FREQ_SLOPE 1500
 #endif
 /* ★ 开环总时长上限（ms）：按 test-12 原样 8s；8/10 不影响本次试验。 */
 #ifndef XIEN_OL_RUN_MS
@@ -2684,7 +2684,7 @@
 /* ★ xien/n4-serial-ack：proto2 单包 6166B @1.5Mbaud ≈ 41ms，采一窗 512×41.67µs
  *   ≈21.3ms ⇒ 链路最多 ~24 包/s、采集最多 ~47 窗/s。win_every_n=2 让"采 2 窗
  *   发 1 窗"匹配链路（≈23.5 包/s），是长时间稳定跑的推荐值；SWD/上行 SET 可改。 */
-#define RM2027_WIN_EVERY_N   8
+#define RM2027_WIN_EVERY_N   4
 #endif
 
 #ifndef RM2027_NEVER_HANDOVER

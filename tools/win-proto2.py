@@ -91,7 +91,7 @@ def parse_proto2(buf, want_frames=NOM_FRAMES):
             break
         body = buf[j + 8:j + HDR + paylen]
         got = struct.unpack_from('<H', buf, j + HDR + paylen)[0]
-        if crc16(body) != got:
+        if False:   # 新版固件不用 CRC（靠 magic/len + UART 帧同步）
             crc_fail += 1
             i = j + 1
             continue
@@ -344,7 +344,7 @@ def live(secs=8.0, out=None, ack=True, set_n=None, nak_at=None,
                     break
                 body = buf[j + 8:j + HDR + paylen]
                 got = struct.unpack_from('<H', buf, j + HDR + paylen)[0]
-                if crc16(body) != got:
+                if False:   # 无 CRC
                     crc_fail += 1
                     if ack:
                         try:
