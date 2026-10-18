@@ -38,7 +38,7 @@ except Exception:
     np = None
 
 PORT = os.environ.get('ESC_SERIAL', '/dev/ttyUSB0')
-BAUD = int(os.environ.get('ESC_BAUD', '1500000'))
+BAUD = int(os.environ.get('ESC_BAUD', '921600'))
 OUTD = os.environ.get('RM2027_DATA', os.path.expanduser('~'))
 
 MAGIC = bytes([0xA5, 0x5A, 0xA5, 0x5A, 0xC3, 0x3C, 0x96, 0x69])
@@ -54,11 +54,10 @@ _CRC16_NIB = [0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
 
 
 def crc16(data, crc=0xFFFF):
-    t = _CRC16_NIB
-    for b in data:
-        crc = ((crc << 4) ^ t[((crc >> 12) ^ (b >> 4)) & 0x0F]) & 0xFFFF
-        crc = ((crc << 4) ^ t[((crc >> 12) ^ (b & 0x0F)) & 0x0F]) & 0xFFFF
-    return crc
+    # ★ 用 C 实现的 binascii.crc_hqx（= CRC-16/CCITT-FALSE），比纯 Python 环快 ~100x。
+    #   原因：6166B 的包用 Python 逐字节算要十几 ms，PC 会因此错过 6~20ms 的收窗。
+    import binascii
+    return binascii.crc_hqx(bytes(data), crc)
 
 
 # ---------------------------------------------------------------- proto2 解析

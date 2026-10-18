@@ -2128,8 +2128,13 @@ volatile uint32_t rx_resync_n    = 0;  /* 上行字节流重同步次数 */
 
 /* ---- 窗口流协议状态 ---- */
 #define WIN_RETRY_MAX 3u
-volatile uint16_t ack_wait_ms = 8u;    /* 发窗后收命令窗长（SWD 可调，默认 8ms）*/
-volatile uint8_t  win_ack_mode = 1u;   /* 1=ACK/重传；0=长时间无主机应答时退化尽力发 */
+volatile uint16_t ack_wait_ms = 80u;   /* 发窗后收命令窗长（SWD 可调）。8ms 时 PC 的 USB 延迟常错过 ⇒ 默认 15ms */
+volatile uint8_t  win_ack_mode = 1u;   /* 保留：仅作观测/兼容；★ 不再有任何"降级停收窗"路径 */
+/* ---- 临时调试计数（定位"收窗为何不开"）---- */
+volatile uint32_t dbg_tc3win_n    = 0;  /* DMA-TC3 且 tx_kind==WINDOW 次数 */
+volatile uint32_t dbg_tc3other_n  = 0;  /* DMA-TC3 但非 WINDOW 次数 */
+volatile uint32_t dbg_uarttc_n    = 0;  /* USART TC 进 uart_usart_tc_isr 次数 */
+volatile uint32_t dbg_listenend_n = 0;  /* win_listen_end 被调用次数 */
 
 static volatile uint8_t  win_listening    = 0;
 static volatile uint32_t win_listen_until = 0;
@@ -2225,11 +2230,13 @@ void uart_tx_tc3_isr(void)
 {
     tx_busy = 0; tx_zero_ms = 0;
     if (tx_kind == UART_KIND_WINDOW) {
-        if (win_ack_mode) {
-            LL_USART_EnableIT_TC(USART1);       /* 触发 USART TC 中断去切 RX */
-        } else {
-            win_inflight = 0; win_retx_pending = 0;   /* 无应答模式：直接放行下一窗 */
-        }
+        dbg_tc3win_n++;
+        /* ★ 永远开收窗：收窗是 PC 唯一的"发送许可"。
+         *   老代码 `if(!win_ack_mode) return;` ⇒ 降级后永不开收窗 ⇒ ESC 永远 TE=1 独占总线
+         *   ⇒ PC 收不到许可、回 ACK 还会和 ESC 对撞 ⇒ 永久死锁。这一行是本次修复的核心。*/
+        LL_USART_EnableIT_TC(USART1);       /* 触发 USART TC 中断去切 RX */
+    } else {
+        dbg_tc3other_n++;
     }
 }
 /* DMA1_CH3 TE：DMA 错误。释放锁并计数，避免永久卡死。*/
@@ -2242,9 +2249,9 @@ void uart_tx_err_isr(void)
 /* USART1 TC：最后一 bit 已移出，切半双工 RX。*/
 void uart_usart_tc_isr(void)
 {
+    dbg_uarttc_n++;
     LL_USART_ClearFlag_TC(USART1);
     LL_USART_DisableIT_TC(USART1);
-    if (!win_ack_mode) { return; }
     (void)USART1->RDR;                                     /* 清 RXNE 残留 */
     USART1->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
     LL_USART_DisableDMAReq_TX(USART1);
@@ -2259,6 +2266,7 @@ void uart_usart_tc_isr(void)
 static void win_listen_end(void)
 {
     if (!win_listening) { return; }
+    dbg_listenend_n++;
     LL_USART_DisableIT_RXNE(USART1);
     (void)USART1->RDR;
     USART1->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
@@ -2468,9 +2476,10 @@ void win_pump(void)
         return;                             /* 收窗内不发窗口/事件 */
     }
 
-    /* (3) 连续多窗一个命令都收不到 ⇒ 主机不在/收线断：退化尽力发，避免每窗发 4 遍。
-     *     每 64 个发送窗探一次，若主机回来收到命令立即恢复 ack 模式。*/
-    if (win_ack_mode && win_noack_streak >= 16u) { win_ack_mode = 0; }
+    /* (3) ★ 已删除"连续多窗无 ACK ⇒ 降级并停开收窗"的逻辑 ★
+     *   根因：降级后 uart_usart_tc_isr() 直接 return ⇒ 永不开收窗 ⇒ ESC 永远 TE=1 独占总线
+     *   ⇒ PC 既收不到"可发许可"，一发言又和 ESC 对撞 ⇒ 永久死锁、必须重烧才能恢复。
+     *   结论：收窗必须【永远】开；无 ACK 时只放松重传力度，绝不关闭监听。*/
 
     /* (4) 抽窗（win_every_n）：TX 忙也要处理，丢的是 win_buf 里的窗，不碰 win_pkt */
     if (win_state == 1u && win_skip > 0u) {
@@ -2492,9 +2501,6 @@ void win_pump(void)
 
     if (win_state != 1u) { return; }
     if (!tx_ready()) { return; }
-
-    /* 无应答模式：每 64 窗探一次收窗，主机若回来就恢复 ACK 模式 */
-    if (!win_ack_mode && ((win_sent & 63u) == 0u)) { win_ack_mode = 1u; }
 
     /* (7) 组包（proto2）+ CRC16 */
     {

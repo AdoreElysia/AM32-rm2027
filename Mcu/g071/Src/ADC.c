@@ -44,7 +44,7 @@ void adc_set_first_rank(uint32_t channel)
  *   四个 order 轮完，每个通道在每个 rank 上各出现一次 ⇒ 两/四序平均可消 rank 误差。
  *   只影响采样顺序，不影响换相时基；闭环判据不能这样交替（会注入交替偏置）。 */
 volatile uint8_t adc_order = 0;
-volatile uint8_t adc_order_auto = 1;
+volatile uint8_t adc_order_auto = 0;   /* ★ 固定 order0（不再轮转）*/
 volatile uint8_t adc_order_pending = 0;
 volatile uint8_t adc_frame_order = 0;
 

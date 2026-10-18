@@ -2684,7 +2684,7 @@
 /* ★ xien/n4-serial-ack：proto2 单包 6166B @1.5Mbaud ≈ 41ms，采一窗 512×41.67µs
  *   ≈21.3ms ⇒ 链路最多 ~24 包/s、采集最多 ~47 窗/s。win_every_n=2 让"采 2 窗
  *   发 1 窗"匹配链路（≈23.5 包/s），是长时间稳定跑的推荐值；SWD/上行 SET 可改。 */
-#define RM2027_WIN_EVERY_N   2
+#define RM2027_WIN_EVERY_N   8
 #endif
 
 #ifndef RM2027_NEVER_HANDOVER
@@ -2904,10 +2904,10 @@
  *     （采样顺序效应 + 硬件 V0 逐步失真）⇒ g 从 1.16 涨到 ~1.80。
  *   ⚠ 闭环行为待测（历史上这一族失败过两次，但用的都是"参考不匹配"的旧表）。 */
 #ifndef RM2027_SG_NUM
-#define RM2027_SG_NUM { 0, 743, 1810, 1001, 742, 1298, 1017 }   /* ×1000（2026-10-15 hw V0 重标） */
+#define RM2027_SG_NUM { 0, 1152, 1629, 1325, 1152, 1629, 1325 }   /* ×1000（2026-10-15 hw V0 重标） */
 #endif
 #ifndef RM2027_SO_OFF
-#define RM2027_SO_OFF { 0, -36, 60, -43, 17, -107, 6 }          /* 码（2026-10-15 hw V0 重标） */
+#define RM2027_SO_OFF { 0, 0, 0, 0, 0, 0, 0 }          /* 码（2026-10-15 hw V0 重标） */
 #endif
 
 /* ★★ 2026-10-14 丢过零滤波（RM2027_ZCL_FILTER）★★ —— 用户方案
@@ -3337,7 +3337,7 @@
  *     · 3.0M / 1.152M：无有效帧头。
  *   ⇒ 目前默认取 1.5M（比 1M 提升 50%）；换 USB-TTL 型号/短线后可再试 2M。
  *   窗口包 6156 B 的 DMA 占用从 61.6ms 降到 ~41ms。 */
-#define ADC_CAP_BAUD     1500000
+#define ADC_CAP_BAUD     921600
 
 #endif
 
