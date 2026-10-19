@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stddef.h>
 #include "eeprom.h"
+#include "main.h"    /* ★ K2a-3：要用 TIM1 寄存器（BDTR.MOE）与 LL_TIM_EnableAllOutputs */
 
 esc_cal_t        esc_cal;
 volatile uint8_t esc_cal_state = 0;
@@ -88,13 +89,32 @@ static uint16_t cal_n      = 0;
 
 void esc_cal_poll(void)
 {
-    if (cal_mode != CAL_MODE_ADC) { return; }
     extern void comStep(int);
     extern void setPWMCompare1(uint16_t);
     extern void setPWMCompare2(uint16_t);
     extern void setPWMCompare3(uint16_t);
     extern uint16_t bemf_adc_va, bemf_adc_vb, bemf_adc_vc, bemf_adc_v0_hw;
 
+    /* ★ K2a-3 ⓪：cal_mode 的 0→1 上升沿 = 新一轮校准开始 ⇒ 必须复位状态机。
+     *   原来 cal_step / cal_tick / cal_acc / cal_n 都是 static 且【从不清零】，
+     *   于是第二次、第三次启动校准（PC 脚本每次都会先 poke cal_state=0, cal_mode=1）
+     *   一进来 cal_step 就已经 ≥12 ⇒ 立刻"完成"：既不驱动、也不采样，
+     *   cal_raw/cal_raw2 里全是上一轮的残留值 —— 看上去"秒完成 + 数据不变"。
+     *   首次上电跑（cal_step 初始 0）才会真的跑一轮，所以这个 bug 只在"重跑"时暴露。 */
+    static uint8_t cal_last_mode = 0;
+    if (cal_mode != cal_last_mode) {
+        cal_last_mode = cal_mode;
+        if (cal_mode == CAL_MODE_ADC) {
+            cal_step = 0;
+            cal_tick = 0;
+            cal_n    = 0;
+            cal_acc[0] = cal_acc[1] = cal_acc[2] = cal_acc[3] = 0;
+            cal_state  = 0;
+            LL_TIM_EnableCounter(TIM1);
+            LL_TIM_EnableAllOutputs(TIM1);
+        }
+    }
+    if (cal_mode != CAL_MODE_ADC) { return; }
     if (cal_state == 1u) { return; }
 
     /* cal_step 0..11 = 6 个换相状态 × 2 档占空比（低档/高档）*/
@@ -121,18 +141,41 @@ void esc_cal_poll(void)
     if (cal_step >= 12u) { cal_mode = 0; cal_state = 1u; return; }
 
     {
-        uint8_t ph = (uint8_t)(cal_step >> 1);
-        uint8_t hi = (uint8_t)(cal_step & 1u);
-        uint16_t d  = hi ? (uint16_t)(cal_duty * 2u) : cal_duty;
-        comStep((int)ph + 1);
-        /* 按 comStep 的映射设三路 CCR */
-        switch (ph + 1) {
-        case 1: setPWMCompare1(d); setPWMCompare2(0); break;  /* A pwm, B low */
-        case 2: setPWMCompare3(d); setPWMCompare2(0); break;  /* C pwm, B low */
-        case 3: setPWMCompare3(d); setPWMCompare1(0); break;  /* C pwm, A low */
-        case 4: setPWMCompare2(d); setPWMCompare1(0); break;  /* B pwm, A low */
-        case 5: setPWMCompare1(d); setPWMCompare3(0); break;  /* A pwm, C low */
-        default:setPWMCompare2(d); setPWMCompare3(0); break;  /* B pwm, C low */
+        uint8_t ph   = (uint8_t)(cal_step >> 1);
+        uint8_t hi   = (uint8_t)(cal_step & 1u);
+        uint16_t d   = hi ? (uint16_t)(cal_duty * 2u) : cal_duty;
+        uint8_t  step = (uint8_t)(ph + 1u);
+
+        /* ★ K2a-3 ①：TIM1 主输出使能（BDTR.MOE）+ 计数器运行。
+         *   正常流程由 enableCorePeripherals() 开过，但校准是"外部 SWD 触发"的旁路路径，
+         *   MOE=0 时 CCxE 全开也不出波形（互补通道全停在无效电平）⇒ 表现就是
+         *   三相读数恒 ~0 码、看不出任何驱动。这里每步兜一道（幂等、开销可忽略）。 */
+        LL_TIM_EnableCounter(TIM1);
+        LL_TIM_EnableAllOutputs(TIM1);
+
+        /* ★ K2a-3 ②：先把三路 CCR 全清零，再 comStep() 切引脚。
+         *   comStep() 会把"高侧相"引脚从 GPIO 切回 AF；若此刻 CCR 还留着上一步的值，
+         *   切回去的瞬间就会按残留占空比开通（可能正好撞上另一个还在导通的相）。 */
+        setPWMCompare1(0);
+        setPWMCompare2(0);
+        setPWMCompare3(0);
+
+        comStep((int)step);   /* 相 → 引脚模式：高侧 AF、低侧 GPIO 高(on)、悬空相两脚 GPIO 低 */
+
+        /* ★★★ K2a-3 ③：相 → TIM1 通道映射（本板）★★★
+         *   依据 Inc/targets.h 的 HARDWARE_GROUP_G0_RM2027 与 Src/main.c 的"六路门极"注释：
+         *       A 相 = CH3  / CH3N  → PA10 / PB1  → 【CCR3】
+         *       B 相 = CH2  / CH2N  → PA9  / PB0  → 【CCR2】
+         *       C 相 = CH1  / CH1N  → PA8  / PA7  → 【CCR1】
+         *   ⚠ 别写成"A→CCR1"——CCR1 是 C 相。K2a-2 就是按 A→CCR1/C→CCR3 写的，后果是：
+         *     该步"高侧相"的引脚虽然在 AF 模式，但它的 CCR 恒为 0 ⇒ 高侧一直关、
+         *     互补低侧一直开，三相都量不到电压（实测 0~2 码）。
+         *     —— 这不是 MOE/引脚 AF 的问题（实测 BDTR.MOE=1、AFRH=0x222 一直是对的）。
+         *   step→高侧相 由 comStep() 定：1/6=A、2/3=C、4/5=B。 */
+        switch (step) {
+        case 1: case 6: setPWMCompare3(d); break;   /* 高侧 PWM = A 相 = CH3 */
+        case 2: case 3: setPWMCompare1(d); break;   /* 高侧 PWM = C 相 = CH1 */
+        default:        setPWMCompare2(d); break;   /* 高侧 PWM = B 相 = CH2 */
         }
     }
 }

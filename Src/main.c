@@ -3944,7 +3944,17 @@ void tenKhzRoutine()
         }
         last_duty_cycle = duty_cycle;
         SET_AUTO_RELOAD_PWM(tim1_arr);
-        SET_DUTY_CYCLE_ALL(adjusted_duty_cycle);
+        /* ★★★ 2026-10-19 K2a-3：静态校准期间【让出】三路 CCR 的所有权 ★★★
+         *   本函数是 20kHz 的 PWM 中断，结尾这句 SET_DUTY_CYCLE_ALL 会把 TIM1->CCR1/2/3
+         *   全部重写成 adjusted_duty_cycle。F1 收油(f1 idle)时 duty_cycle=0 ⇒ 它每 50µs 把三路
+         *   CCR 清成 0 一次，于是 esc_cal_poll() 刚写进去的校准占空比【根本活不过一个中断周期】：
+         *   门极全程关断、三相读数恒 ~0 码。
+         *   —— 这才是"校准期间电机不驱动"的真正根因（不是 TIM1 MOE、也不是引脚 AF：
+         *      实测 BDTR.MOE=1、AFRH=0x222、引脚在 AF 模式，但 CCR 被这里反复清零）。
+         *   约定与 phaseouts.c 的 allOff() 里那条"校准期间让路"完全相同：校准模式 = 谁都不许动门极。 */
+        if (cal_mode == 0u) {
+            SET_DUTY_CYCLE_ALL(adjusted_duty_cycle);
+        }
     }
 #endif // ndef brushed_mode
 #if defined(FIXED_DUTY_MODE) || defined(FIXED_SPEED_MODE)
