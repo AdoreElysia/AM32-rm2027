@@ -44,5 +44,6 @@ extern volatile uint8_t  cal_mode;      /* 0=空闲 1=ADC静态 */
 extern volatile uint8_t  cal_state;     /* 0=空闲 1=完成 2=失败 */
 extern volatile uint16_t cal_bus_mv;    /* PC 传入的实测母线电压(mV) */
 extern volatile uint16_t cal_duty;      /* 校准用占空比（0..2000）*/
-extern volatile uint16_t cal_raw[6][4]; /* [step-1][VA,VB,VC,V0] 中位 */
+extern volatile uint16_t cal_raw[6][4];   /* 低档 duty */
+extern volatile uint16_t cal_raw2[6][4];  /* 高档 duty */ /* [step-1][VA,VB,VC,V0] 中位 */
 void esc_cal_poll(void);                /* 主循环调用 */

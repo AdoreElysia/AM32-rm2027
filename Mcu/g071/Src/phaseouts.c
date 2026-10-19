@@ -288,6 +288,8 @@ void phaseALOW()
 
 void allOff()
 {
+    { extern volatile uint8_t cal_mode;
+      if (cal_mode != 0u) { return; } }   /* ★ 校准期间不抢门极 */
     phaseAFLOAT();
     phaseBFLOAT();
     phaseCFLOAT();
