@@ -456,6 +456,7 @@ void rk_compute(void)
         /* ---- 第二步：用通道增益归一后的数据，算每步偏置 ---- */
         for (uint8_t st = 1u; st <= 6u; st++) {
             uint8_t f = (st == 2u || st == 5u) ? 0u : ((st == 3u || st == 6u) ? 1u : 2u);
+            (void)f;   /* 通道增益按 1 处理 ⇒ 偏置不依赖相 */
             /* ★ 只用 rank 因子（通道增益按 1 处理）
              *   sg = K_rank4 / K_rank[该步悬空相在 order0 占的槽位] */
             uint8_t rf = rk_rank_of(st, 0u);
