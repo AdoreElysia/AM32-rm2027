@@ -226,6 +226,7 @@ an settings option)
 #endif
 #include "dshot.h"
 #include "eeprom.h"
+#include "esc_cal.h"
 #include "functions.h"
 #include "peripherals.h"
 #include "phaseouts.h"
@@ -1801,6 +1802,7 @@ int32_t doPidCalculations(struct fastPID* pidnow, int actual, int target)
 void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
+    esc_cal_load();   /* ★ 加载校准参数（magic/CRC 校验失败则用默认值）*/
     if(eepromBuffer.eeprom_version < 3){ // eeprom versions less than 3 had a firmware name string in these bytes 
       eepromBuffer.max_ramp = 160;    // 0.1% per ms to 25% per ms 
       eepromBuffer.minimum_duty_cycle = 1; // 0.2% to 51 percent
@@ -3744,6 +3746,13 @@ void tenKhzRoutine()
         olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
         { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
         { extern void win_pump(void); win_pump(); }    /* ★ 窗口式全速采样 */
+        /* ★ 校准命令（SWD 可写）：1=存默认 2=重载 3=存当前 */
+        {
+            extern volatile uint8_t esc_cal_cmd;
+            if (esc_cal_cmd == 1u) { esc_cal_defaults(); (void)esc_cal_save(&esc_cal); esc_cal_cmd = 0u; }
+            else if (esc_cal_cmd == 2u) { esc_cal_load(); esc_cal_cmd = 0u; }
+            else if (esc_cal_cmd == 3u) { (void)esc_cal_save(&esc_cal); esc_cal_cmd = 0u; }
+        }
         /* ★★ 2026-10-12 固件级闭环自动停机（RM2027_CL_RUN_MS）★★
          *   为什么放主循环：交棒后 olStartupTick() 直接 return（ol_startup_arm=0），
          *   所以闭环段没有任何到点检查 ⇒ 这里用"绝对帧号差"当计时器（与 ADC 同步，
