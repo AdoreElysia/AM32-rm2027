@@ -4,7 +4,7 @@
   "tasks": [
     {
       "label": "ESC 1 · 烧录（不转）",
-      "detail": "编译 → 归档 firmware/<分支>.bin → 收油 → 烧录校验 → reset。只烧不转，安全。",
+      "detail": "编译 → 归档 firmware/<分支>.bin → 收油 → 烧录校验 → reset。不给油，电机不转。",
       "type": "shell",
       "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash",
       "options": {
@@ -21,34 +21,14 @@
       }
     },
     {
-      "label": "ESC 2 · 烧录 + 扩展脚本",
-      "detail": "烧录后自动运行 tools/branch/<分支名>.py（没有则跳过）。扩展脚本可要参数、测量、写 firmware/<分支>.cal.json。",
+      "label": "ESC 2 · 烧录 + 分支脚本（本分支要干什么由脚本决定）",
+      "detail": "烧录后自动运行 tools/branch/<分支名>.py；脚本自己决定采集/校准/给油/存 flash，并把结果写 firmware/<分支>.cal.json。无脚本则只烧录。",
       "type": "shell",
       "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-ext",
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
           "ESC_YES": "1"
-        }
-      },
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
-      "label": "ESC 3 · 烧录 + 采集 7s（会转！）",
-      "detail": "烧录后自动：等 armed → 给油 7s → 收油 → 落 CSV/NPZ/图。⚠ 会转电机：无桨/固定/限流。",
-      "type": "shell",
-      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-cap 7",
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "ESC_YES": "1",
-          "ESC_BAUD": "921600",
-          "ESC_REUSE": "1"
         }
       },
       "problemMatcher": [],
