@@ -3755,6 +3755,29 @@ void tenKhzRoutine()
         { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
         { extern void win_pump(void); win_pump(); }    /* ★ 窗口式全速采样 */
         esc_cal_poll();   /* ★ K2a 静态 ADC 校准状态机 */
+        /* ★★ K4：自驱动校准跑（不依赖 F1 给油）★★
+         *   用户要求："单独接电池+烧录线，烧录运行一下就能校准好"。
+         *   做法：不再等 DShot 解锁，主循环自己调 startMotor() 走【正统三段式开环】，
+         *   并把 adc_order_auto 打开 ⇒ order 逐电周期轮转；窗口包 q[10] 已带
+         *   (step | order<<6) 标记 ⇒ PC 侧能按 order 分组比同一相。
+         *   保护（沿用台架既有红线，不要在这里放宽）：
+         *     · OL_RUN_LIMIT = 160000 拍 = 8s ⇒ 到点自动收油；
+         *     · OL_TRIP_CURRENT = 8A（起步链）+ RM2027_BENCH_OC_LIMIT ≈1.8A（十 kHz 段）；
+         *     · 跑完/异常停机后必须把 adc_order_auto 还原为 0 —— 判据不能吃轮转序。 */
+        {
+            extern volatile uint8_t cal_run;
+            extern volatile uint8_t adc_order_auto;
+            extern volatile uint8_t adc_order_pending;
+            if (cal_run == 1u) {                        /* 请求：自己起转 */
+                if (!running) { startMotor(); }
+                adc_order_auto = 1u;
+                cal_run = 2u;
+            } else if (cal_run == 2u && !running) {     /* 自己停了（到点/过流/失锁）*/
+                adc_order_auto = 0u;                    /* ★ 必须还原：判据不许吃轮转序 */
+                adc_order_pending = 0u;
+                cal_run = 0u;                           /* PC 侧看到 0 = 本轮跑完 */
+            }
+        }
         /* ★ 校准命令（SWD 可写）：1=存默认 2=重载 3=存当前 */
         {
             extern volatile uint8_t esc_cal_cmd;

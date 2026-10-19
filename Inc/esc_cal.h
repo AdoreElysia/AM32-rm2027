@@ -100,3 +100,10 @@ void esc_cal_poll(void);                /* 主循环调用 */
 #define CAL_RANK_DWELL  240u   /* 每个 (sel,order,档) 驻留多少主循环拍 */
 extern volatile uint16_t cal_rank[3][4][2][4]; /* [sel][order][0=低/1=高][VA,VB,VC,V0] 均值 */
 extern volatile uint8_t  cal_rank_prog;        /* 进度：已完成的驻留期数（0..24，24=完成）*/
+
+/* ★★ K4：自驱动校准跑（不依赖 F1 给油）★★
+ *   0 = 空闲/跑完   1 = 请求起转   2 = 跑中
+ *   由 PC 侧 poke 成 1；固件自己调 startMotor() 走三段式开环，
+ *   并打开 adc_order_auto 让 order 逐电周期轮转（窗口包自带 order 标记）。
+ *   停机（到点/过流/失锁）后自动还原 adc_order_auto=0 并回到 0。 */
+extern volatile uint8_t  cal_run;
