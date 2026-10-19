@@ -485,8 +485,12 @@ void rk_compute(void)
                 if (so >  4095) { so =  4095; }
                 if (so < -4095) { so = -4095; }
             }
-            rk_so[st] = (int16_t)so;
-            if (cal_apply) { cal_so[st] = (int16_t)so; }
+            rk_so[st] = (int16_t)so;                       /* 只记录，供诊断 */
+            /* ★ 不应用 offset：V2.9 的 SO_OFF 就是全 0（它靠"过零居中"拟合出来的值也没启用）。
+             *   实测：应用我这版 offset（整步均值口径）后转速在 4800~15000 来回跳 = 卡顿
+             *   ⇒ gain 只改幅值、不移动过零点；offset 会直接移动过零点，六步各加不同值
+             *     = 给每步注入不同定时偏差。先学 V2.9：只用 gain、offset 保持 0。*/
+            if (cal_apply) { cal_so[st] = 0; }
         }
         rk_so[0] = 0; rk_gain[0] = 0;
         if (cal_apply) { cal_sg[0] = 0; cal_so[0] = 0; }
