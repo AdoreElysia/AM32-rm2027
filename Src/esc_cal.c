@@ -88,7 +88,7 @@ static   uint16_t cal_ccr4_save = 0;   /* 校准前 TIM1->CCR4 的值，结束�
  *     所以让 A/B/C 轮流当 PWM 相：sel0=step1(A PWM)、sel1=step2(C PWM)、sel2=step4(B PWM)。 */
 volatile uint16_t cal_rank[3][4][2][4] = {{{{0}}}};  /* [sel][order][0=低/1=高][VA,VB,VC,V0] */
 volatile uint8_t  cal_rank_prog = 0;   /* 进度：已完成的驻留期数(0..24) */
-static const uint8_t rk_step[3] = { 1u, 2u, 4u };
+static const uint8_t rk_step[3] = { 1u, 2u, 3u };
 static   uint8_t  rk_sel = 0;
 static   uint8_t  rk_ord = 0;
 static   uint8_t  rk_hi  = 0;
