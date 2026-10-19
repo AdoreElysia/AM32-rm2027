@@ -273,3 +273,102 @@ void esc_cal_poll(void)
     /* 切到下一个状态（step = 相1..6，hi = 档）*/
     cal_drive((uint8_t)((cal_step >> 1) + 1u), (uint8_t)(cal_step & 1u));
 }
+
+/* ================= K5：rank 增益自测（片上，用户要求）=================
+ * 事实（实跑实测）：采样槽位(rank)对"幅值"的影响是 rank1=0.670 → rank4=1.441（2.15×），
+ *   而现有 RM2027_SG_NUM 那张 3 周期增益表就是它换了个写法
+ *   （按 rank 因子算 A=1.52/B=1.16，表里是 1.41/1.15 —— 只差 8%/1%）。
+ * 做法（全部在片上，每帧只多 2 次比较）：
+ *   · 每个 ADC 帧把 (悬空相 − V0) 的 min/max 记进 [step][order] 格；pp=max−min 即该格幅值；
+ *   · 跑完一轮：每步用 4 个 order 的均值归一 ⇒ 得到该格所在 rank 的相对因子 k[rank]；
+ *   · 六步增益 g[s] = k[rank4] / k[rank(悬空相在 order0 的槽位)]，再归一（最小=1000）。
+ *     依据：order0 下 悬空相 A/B/C 分别在 rank1/2/3，而参考 V0 恒在 rank4。
+ *   ⚠ 这是"增益"；每步残留的"偏置"归六步 offset（RM2027_SO_OFF）单独管 —— 分工不混。
+ */
+volatile int16_t  rk_min[7][4];
+volatile int16_t  rk_max[7][4];
+volatile uint16_t rk_pp[7][4];
+volatile uint16_t rk_gain[7];
+volatile uint8_t  rk_arm  = 0;
+volatile uint8_t  rk_done = 0;
+
+void rk_reset(void)
+{
+    for (uint8_t s = 0; s < 7u; s++) {
+        rk_gain[s] = 1000u;
+        for (uint8_t o = 0; o < 4u; o++) {
+            rk_min[s][o] = 32767; rk_max[s][o] = -32768; rk_pp[s][o] = 0u;
+        }
+    }
+    rk_done = 0;
+}
+
+void rk_sample(uint8_t st, uint8_t order, int16_t dv)
+{
+    if (rk_arm == 0u || st < 1u || st > 6u) { return; }
+    /* ★ 必须丢掉换相后的前几帧：换相尖峰（±200~600 码）会把 min/max 撑大，
+     *   而尖峰大小随 order 变 ⇒ 会把 rank 图案带歪（第一版就是这么错的：
+     *   片上算出 C 最大/A 最小，离线丢边界后是 A 最大，正好相反）。 */
+    static uint8_t last_st = 0;
+    static uint8_t skip = 0;
+    if (st != last_st) { last_st = st; skip = RK_SKIP_AFTER_COMM; }
+    if (skip) { skip--; return; }
+    uint8_t o = (uint8_t)(order & 3u);
+    if (dv < rk_min[st][o]) { rk_min[st][o] = dv; }
+    if (dv > rk_max[st][o]) { rk_max[st][o] = dv; }
+}
+
+/* order o 下，步 st 的悬空相占哪个 rank（1..4）*/
+static uint8_t rk_rank_of(uint8_t st, uint8_t o)
+{
+    /* 悬空相: 1/4=C 2/5=A 3/6=B ；RANK_OF: A=[1,4,3,2] B=[2,1,4,3] C=[3,2,1,4] */
+    static const uint8_t A_[4] = {1u,4u,3u,2u};
+    static const uint8_t B_[4] = {2u,1u,4u,3u};
+    static const uint8_t C_[4] = {3u,2u,1u,4u};
+    const uint8_t *t = (st == 2u || st == 5u) ? A_ : ((st == 3u || st == 6u) ? B_ : C_);
+    return t[o & 3u];
+}
+
+void rk_compute(void)
+{
+    uint32_t rsum[5] = {0,0,0,0,0};
+    uint16_t rcnt[5] = {0,0,0,0,0};
+    uint32_t k[5]    = {0,0,0,0,0};      /* rank 因子 ×1000 */
+    uint32_t graw[7];
+    uint32_t gmin;
+
+    for (uint8_t st = 1u; st <= 6u; st++) {
+        uint32_t sum = 0u; uint8_t n = 0u;
+        for (uint8_t o = 0; o < 4u; o++) {
+            int16_t a = rk_min[st][o], b = rk_max[st][o];
+            uint16_t pp = (b > a) ? (uint16_t)(b - a) : 0u;
+            rk_pp[st][o] = pp;
+            if (pp > 0u) { sum += pp; n++; }
+        }
+        if (n < 2u || sum == 0u) { continue; }
+        uint32_t mu = sum / n;                        /* 该步 4 序的均值 */
+        for (uint8_t o = 0; o < 4u; o++) {
+            if (rk_pp[st][o] == 0u) { continue; }
+            uint32_t khat = (uint32_t)rk_pp[st][o] * 1000u / mu;   /* 相对因子 ×1000 */
+            uint8_t r = rk_rank_of(st, o);
+            if (r >= 1u && r <= 4u) { rsum[r] += khat; rcnt[r]++; }
+        }
+    }
+    for (uint8_t r = 1u; r <= 4u; r++) { k[r] = rcnt[r] ? (rsum[r] / rcnt[r]) : 1000u; }
+    if (k[4] == 0u) { k[4] = 1000u; }                 /* V0 在 rank4 */
+
+    graw[0] = 1000u;
+    gmin = 0xFFFFFFFFu;
+    for (uint8_t st = 1u; st <= 6u; st++) {
+        uint8_t rf = rk_rank_of(st, 0u);              /* 运行用 order0 */
+        uint32_t kf = (k[rf] == 0u) ? 1000u : k[rf];
+        graw[st] = (uint32_t)k[4] * 1000u / kf;       /* 修正系数（V0/悬空相）*/
+        if (graw[st] < gmin) { gmin = graw[st]; }
+    }
+    if (gmin == 0u || gmin == 0xFFFFFFFFu) { return; }
+    for (uint8_t st = 1u; st <= 6u; st++) {
+        uint32_t g = graw[st] * 1000u / gmin;         /* 归一：最小 = 1000 */
+        rk_gain[st] = (g > 65535u) ? 65535u : (uint16_t)g;
+    }
+    rk_done = 1u;
+}

@@ -3783,6 +3783,8 @@ void tenKhzRoutine()
             extern volatile uint8_t adc_order_auto;
             extern volatile uint8_t adc_order_pending;
             if (cal_run == 1u) {                        /* 请求：等正常状态机自己起步 */
+                { extern void rk_reset(void); extern volatile uint8_t rk_arm;
+                  rk_reset(); rk_arm = 1u; }           /* ★ K5：开始累计 rank 增益 */
                 adc_order_auto = 1u;
                 cal_run = 2u;
             } else if (cal_run == 2u) {
@@ -3799,6 +3801,8 @@ void tenKhzRoutine()
                     cal_dbg[3]=signaltimeout; cal_dbg[4]=ol_startup_stage;
                     cal_dbg[5]=ol_startup_arm; cal_dbg[6]=duty_cycle; cal_dbg[7]=actual_current;
                 }
+                { extern void rk_compute(void); extern volatile uint8_t rk_arm;
+                  rk_arm = 0u; rk_compute(); }         /* ★ K5：跑完在片上算出六步增益 */
                 adc_order_auto = 0u;                    /* ★ 必须还原：判据不许吃轮转序 */
                 adc_order_pending = 0u;
                 cal_run = 0u;                           /* PC 侧看到 0 = 本轮跑完 */

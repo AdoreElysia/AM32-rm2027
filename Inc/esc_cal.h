@@ -109,3 +109,14 @@ extern volatile uint8_t  cal_rank_prog;        /* 进度：已完成的驻留期
 extern volatile uint8_t  cal_run;
 extern volatile uint16_t cal_dbg[8];   /* K4 停机现场面包屑 */
 extern volatile uint16_t cal_trip[4];  /* K4: newinput<48 停机路径现场 */
+
+/* ★★ K5：rank 增益自测（片上）★★
+ *   rk_pp[step][order] = 该格 (悬空相−V0) 的 pp=max−min
+ *   rk_gain[1..6]      = 求出的六步增益 ×1000（新 SG_NUM 候选；旧 SG_NUM = {0,1152,1629,1325,...}） */
+#define RK_SKIP_AFTER_COMM  4u   /* 换相后跳过几帧（避尖峰），与离线 --drop 3 对齐 */
+extern volatile uint16_t rk_pp[7][4];
+extern volatile uint16_t rk_gain[7];
+extern volatile uint8_t  rk_arm, rk_done;
+void rk_reset(void);
+void rk_sample(uint8_t st, uint8_t order, int16_t dv);
+void rk_compute(void);
