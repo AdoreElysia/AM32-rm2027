@@ -297,6 +297,8 @@ volatile int32_t  rk_sum[7][4];
 volatile uint32_t rk_sq[7][4];   /* Σ(dv>>2)² —— 稳健幅值用（抗尖峰）*/
 volatile uint16_t rk_n[7][4];
 volatile uint8_t  cal_tables_ready = 0;
+/* ★ 1=把算出的表应用到判据；0=保持编译期宏（= V2.9 行为）。默认 0 更安全。*/
+volatile uint8_t  cal_apply = 0;
 
 /* ★★ K7：rank 增益改成【4 路通道各自的增益】★★
  *   模型：pp(步,order) = G_相 × K_rank × S_步
@@ -339,7 +341,16 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv,
      *   片上算出 C 最大/A 最小，离线丢边界后是 A 最大，正好相反）。 */
     static uint8_t last_st = 0;
     static uint8_t skip = 0;
-    if (st != last_st) { last_st = st; skip = RK_SKIP_AFTER_COMM; }
+    if (st != last_st) {
+        /* ★ 片上自己推进 adc_order：不能依赖 win_push()（那要 PC 在收窗口流才会跑），
+         *   否则不接采集时 order 恒为 0 ⇒ 24 个格子只有 order0 有数据 ⇒ rank 因子全 1.0
+         *   （实测踩过）。每电周期（step 回到 1）前进一格。 */
+        if (st == 1u && rk_arm) {
+            extern volatile uint8_t adc_order, adc_order_pending;
+            adc_order_pending = (uint8_t)((adc_order + 1u) & 3u);
+        }
+        last_st = st; skip = RK_SKIP_AFTER_COMM;
+    }
     if (skip) { skip--; return; }
     uint8_t o = (uint8_t)(order & 3u);
     if (dv < rk_min[st][o]) { rk_min[st][o] = dv; }   /* 仅留作参考/诊断 */
@@ -465,7 +476,8 @@ void rk_compute(void)
             int32_t g  = (kv * 1000) / kf;                 /* 修正乘数 ×1000 */
             if (g < 500)  { g = 500; }
             if (g > 4000) { g = 4000; }
-            cal_sg[st] = (int16_t)g;
+            rk_gain[st] = (int16_t)g;
+            if (cal_apply) { cal_sg[st] = (int16_t)g; }
             int32_t so = 0;
             if (rk_n[st][0] > 0u) {
                 int32_t mraw = rk_sum[st][0] / (int32_t)rk_n[st][0];   /* 原始 d 的均值（order0）*/
@@ -473,10 +485,11 @@ void rk_compute(void)
                 if (so >  4095) { so =  4095; }
                 if (so < -4095) { so = -4095; }
             }
-            cal_so[st] = (int16_t)so;
             rk_so[st] = (int16_t)so;
+            if (cal_apply) { cal_so[st] = (int16_t)so; }
         }
-        cal_sg[0] = 0; cal_so[0] = 0; rk_so[0] = 0;
+        rk_so[0] = 0; rk_gain[0] = 0;
+        if (cal_apply) { cal_sg[0] = 0; cal_so[0] = 0; }
         cal_tables_ready = 1u;
     }
     rk_done = 1u;

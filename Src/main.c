@@ -2153,7 +2153,14 @@ volatile uint32_t rx_resync_n    = 0;  /* 上行字节流重同步次数 */
 /* ---- 窗口流协议状态 ---- */
 #define WIN_RETRY_MAX 3u
 volatile uint16_t ack_wait_ms = 80u;   /* 发窗后收命令窗长（SWD 可调）。8ms 时 PC 的 USB 延迟常错过 ⇒ 默认 15ms */
-volatile uint8_t  win_ack_mode = 1u;   /* 保留：仅作观测/兼容；★ 不再有任何"降级停收窗"路径 */
+/* ★ 2026-10-19 默认改为 0（关闭 ACK 模式）★
+ *   实测证据：本板【上行 UART 物理不存在】（只有 ESC_TX→CH340_RX）。
+ *   win_ack_mode=1 时固件发一包就等 ACK ⇒ 永远等不到 ⇒ 超时+重传 ⇒
+ *     win_seq +87/500ms 但 win_sent 只有 +5/500ms（吞吐塌到 1/5），
+ *     且重传帧让 PC 侧解析 6940 字节却 0 个有效包（magic 命中 0）。
+ *   关掉后同一场景：68 窗/5.72s、seq 严格递增、CRC 0 错 ✓
+ *   ⇒ 这块板上 ACK 模式必然自毁，默认关。 */
+volatile uint8_t  win_ack_mode = 0u;
 /* ---- 临时调试计数（定位"收窗为何不开"）---- */
 volatile uint32_t dbg_tc3win_n    = 0;  /* DMA-TC3 且 tx_kind==WINDOW 次数 */
 volatile uint32_t dbg_tc3other_n  = 0;  /* DMA-TC3 但非 WINDOW 次数 */

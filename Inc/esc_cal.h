@@ -124,6 +124,7 @@ extern volatile int16_t  rk_so[7];
 extern volatile int32_t  rk_sum[7][4];
 extern volatile uint16_t rk_n[7][4];
 extern volatile uint8_t  cal_tables_ready;
+extern volatile uint8_t  cal_apply;   /* 1=应用算出的表；0=保持 V2.9 宏（默认）*/
 /* ★ K7：4 路通道增益 ×1000（A,B,C,V0）—— 这是 rank 校准的最终产物 */
 extern volatile int16_t  ch_gain[4];
 extern volatile int16_t  rk_k[5];   /* rank 因子 rank1..4 ×1000 */
