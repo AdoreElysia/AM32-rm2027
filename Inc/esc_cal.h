@@ -35,3 +35,14 @@ void    esc_cal_auto(void);   /* 自动校准（K2/K3 实现；当前=填默认�
 void    esc_cal_load(void);
 uint8_t esc_cal_save(const esc_cal_t *c);
 #endif
+
+/* ---- K2a：静态 ADC 校准（PC 脚本驱动）---- */
+#define CAL_MODE_ADC   1u   /* 6 个静态换相状态，采 4 通道原始值 */
+#define CAL_DUTY_DEF   120u /* 6% 占空比：只用来把"高侧相"抬到已知比例，避免大电流 */
+
+extern volatile uint8_t  cal_mode;      /* 0=空闲 1=ADC静态 */
+extern volatile uint8_t  cal_state;     /* 0=空闲 1=完成 2=失败 */
+extern volatile uint16_t cal_bus_mv;    /* PC 传入的实测母线电压(mV) */
+extern volatile uint16_t cal_duty;      /* 校准用占空比（0..2000）*/
+extern volatile uint16_t cal_raw[6][4]; /* [step-1][VA,VB,VC,V0] 中位 */
+void esc_cal_poll(void);                /* 主循环调用 */

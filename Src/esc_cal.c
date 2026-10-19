@@ -72,3 +72,54 @@ void esc_cal_auto(void)
 {
     esc_cal_defaults();
 }
+
+/* ================= K2a：静态 ADC 校准 ================= */
+volatile uint8_t  cal_mode   = 0;
+volatile uint8_t  cal_state  = 0;
+volatile uint16_t cal_bus_mv = 12000;
+volatile uint16_t cal_duty   = CAL_DUTY_DEF;
+volatile uint16_t cal_raw[6][4] = {{0}};
+
+static uint8_t  cal_step   = 0;
+static uint16_t cal_tick   = 0;
+static uint32_t cal_acc[4] = {0,0,0,0};
+static uint16_t cal_n      = 0;
+
+void esc_cal_poll(void)
+{
+    if (cal_mode != CAL_MODE_ADC) { return; }
+    extern void comStep(int);
+    extern volatile uint16_t duty_cycle;
+    extern uint16_t bemf_adc_va, bemf_adc_vb, bemf_adc_vc, bemf_adc_v0_hw;
+
+    if (cal_state == 1u) { return; }       /* 已完成 */
+
+    /* 每 100 次主循环 ≈ 几十 ms，切一个状态 */
+    if (cal_tick < 200u) {
+        cal_tick++;
+        if (cal_tick > 40u) {              /* 状态稳定后再采 */
+            cal_acc[0] += bemf_adc_va;
+            cal_acc[1] += bemf_adc_vb;
+            cal_acc[2] += bemf_adc_vc;
+            cal_acc[3] += bemf_adc_v0_hw;
+            cal_n++;
+        }
+        return;
+    }
+    /* 收尾当前状态 */
+    if (cal_n) {
+        cal_raw[cal_step][0] = (uint16_t)(cal_acc[0]/cal_n);
+        cal_raw[cal_step][1] = (uint16_t)(cal_acc[1]/cal_n);
+        cal_raw[cal_step][2] = (uint16_t)(cal_acc[2]/cal_n);
+        cal_raw[cal_step][3] = (uint16_t)(cal_acc[3]/cal_n);
+    }
+    cal_acc[0]=cal_acc[1]=cal_acc[2]=cal_acc[3]=0; cal_n=0; cal_tick=0;
+    cal_step++;
+    if (cal_step >= 6u) {
+        duty_cycle = 0;
+        cal_mode = 0; cal_state = 1u;      /* 完成 */
+        return;
+    }
+    comStep((int)cal_step + 1);
+    duty_cycle = cal_duty;
+}

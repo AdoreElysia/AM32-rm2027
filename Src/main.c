@@ -3754,6 +3754,7 @@ void tenKhzRoutine()
         olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
         { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
         { extern void win_pump(void); win_pump(); }    /* ★ 窗口式全速采样 */
+        esc_cal_poll();   /* ★ K2a 静态 ADC 校准状态机 */
         /* ★ 校准命令（SWD 可写）：1=存默认 2=重载 3=存当前 */
         {
             extern volatile uint8_t esc_cal_cmd;
