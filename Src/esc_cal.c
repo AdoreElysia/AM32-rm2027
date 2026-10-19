@@ -444,33 +444,27 @@ void rk_compute(void)
         int32_t m3 = 0; uint8_t n3 = 0;
         for (uint8_t i = 0; i < 3u; i++) { if (cnt[i]) { amp[i] /= (int32_t)cnt[i]; m3 += amp[i]; n3++; } }
         if (n3 == 0u || m3 == 0) { rk_done = 1u; return; }
-        int32_t mu = m3 / (int32_t)n3;
-        for (uint8_t i = 0; i < 3u; i++) {
-            ch_gain[i] = (int16_t)(cnt[i] ? (amp[i] * 1000 / mu) : 1000);   /* ×1000，均值归一 */
-        }
+        /* ★ 通道增益【一律当 1，不校】：
+         *   实测通道间只有 ±0.9%（静态两点法，落在 deadband 内），
+         *   把它们算成 1000/1100 这类值是估计噪声，乘进去会污染后面的六步不对称。
+         *   这里只保留 rank 因子（rk_k）作为真正的校准量。*/
+        (void)amp;
+        ch_gain[0] = 1000; ch_gain[1] = 1000; ch_gain[2] = 1000; ch_gain[3] = 1000;
         /* V0 增益：G_V0 = (G_A·mva + G_B·mvb + G_C·mvc) / (3·mv0) */
-        int32_t mv[4] = {0,0,0,0};
-        if (rk_cn) { for (uint8_t i = 0; i < 4u; i++) { mv[i] = rk_csum[i] / (int32_t)rk_cn; } }
-        if (mv[3] > 0) {
-            int32_t num = ch_gain[0]*(int32_t)mv[0] + ch_gain[1]*(int32_t)mv[1] + ch_gain[2]*(int32_t)mv[2];
-            ch_gain[3] = (int16_t)(num / (3 * mv[3]));
-            if (ch_gain[3] < 500) { ch_gain[3] = 500; }
-            if (ch_gain[3] > 2000) { ch_gain[3] = 2000; }
-        } else { ch_gain[3] = 1000; }
+        /* V0 同样不校（与三相同增益）—— 通道一致性的问题归静态校准，不在这里做 */
 
         /* ---- 第二步：用通道增益归一后的数据，算每步偏置 ---- */
         for (uint8_t st = 1u; st <= 6u; st++) {
             uint8_t f = (st == 2u || st == 5u) ? 0u : ((st == 3u || st == 6u) ? 1u : 2u);
-            /* ★ 完整模型：通道增益 × rank 因子（缺一个都修不动大偏差）*/
+            /* ★ 只用 rank 因子（通道增益按 1 处理）
+             *   sg = K_rank4 / K_rank[该步悬空相在 order0 占的槽位] */
             uint8_t rf = rk_rank_of(st, 0u);
-            int32_t gf = (int32_t)ch_gain[f];      if (gf < 500) { gf = 500; }
-            int32_t gv = (int32_t)ch_gain[3];      if (gv < 500) { gv = 500; }
             int32_t kf = (rf <= 4u && k[rf] != 0u) ? (int32_t)k[rf] : 1000;
             int32_t kv = (k[4] != 0u) ? (int32_t)k[4] : 1000;
-            int32_t g  = (gv * kv * 1000) / (gf * kf);     /* 修正乘数 ×1000 */
-            if (g < 500)   { g = 500; }
-            if (g > 4000)  { g = 4000; }
-            cal_sg[st] = (int16_t)g;                       /* 通道增益 × rank 因子 */
+            int32_t g  = (kv * 1000) / kf;                 /* 修正乘数 ×1000 */
+            if (g < 500)  { g = 500; }
+            if (g > 4000) { g = 4000; }
+            cal_sg[st] = (int16_t)g;
             int32_t so = 0;
             if (rk_n[st][0] > 0u) {
                 int32_t mraw = rk_sum[st][0] / (int32_t)rk_n[st][0];   /* 原始 d 的均值（order0）*/
