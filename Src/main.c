@@ -4511,6 +4511,21 @@ e_com_time = ((commutation_intervals[0] + commutation_intervals[1] + commutation
      }
 #endif
 #endif
+        /* ★★ K4：自驱动校准跑期间把【油门刻度】钉在台架值（替代 DShot 给油）★★
+         *   为什么必须钉：startMotor() 只是"点火"，之后靠 input 持续供油；
+         *   没有 DShot 时 input==0 ⇒ 节流状态机立刻 running=0
+         *   （实测 poke cal_run=1 后 300ms 就退回 0、ol_startup_arm 也归 0）。
+         *   ⚠ 这里只钉【油门】，绝不动任何保护：
+         *     过流(OL_TRIP_CURRENT / 台架 RM2027_BENCH_OC_LIMIT)、失速、
+         *     到点(OL_RUN_LIMIT=8s)、失锁 —— 全部照旧能停机。 */
+        {
+            extern volatile uint8_t  cal_run;
+            extern volatile uint16_t ol_input_tgt;
+            if (cal_run == 2u) {
+                input          = (ol_input_tgt >= 48u) ? ol_input_tgt : 350u;
+                adjusted_input = input;
+            }
+        }
 if(zero_crosses < 5){
     if(eepromBuffer.bi_direction){
      min_bemf_counts_up = TARGET_MIN_BEMF_COUNTS + 1;
