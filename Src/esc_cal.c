@@ -79,6 +79,8 @@ volatile uint8_t  cal_mode   = 0;
 volatile uint8_t  cal_state  = 0;
 volatile uint16_t cal_bus_mv = 12000;
 volatile uint16_t cal_duty   = CAL_DUTY_DEF;
+volatile uint16_t cal_duty_hi = CAL_DUTY_HI;
+static   uint16_t cal_ccr4_save = 0;   /* 校准前 TIM1->CCR4 的值，结束要还回去 */
 volatile uint16_t cal_raw[6][4] = {{0}};
 volatile uint16_t cal_raw2[6][4] = {{0}};
 
@@ -87,13 +89,54 @@ static uint16_t cal_tick   = 0;
 static uint32_t cal_acc[4] = {0,0,0,0};
 static uint16_t cal_n      = 0;
 
+extern void comStep(int);
+extern void setPWMCompare1(uint16_t);
+extern void setPWMCompare2(uint16_t);
+extern void setPWMCompare3(uint16_t);
+extern uint16_t bemf_adc_va, bemf_adc_vb, bemf_adc_vc, bemf_adc_v0_hw;
+
+/* ★ K2a-5：把"下发一个驱动状态"抽成函数。
+ *   为什么必须抽出来：原来驱动只在【每个驻留期结束时】下发，
+ *   于是【第一个驻留期全程没有任何驱动】也被采样了 —— 那一格是空闲底噪
+ *   （实测：表里第 1 步低档 = 53/51/51/47，正是 allOff 状态的三相读数）。
+ *   现在开局立刻下发第一个状态（step1/低档），每个状态都被采到，一格不废。 */
+static void cal_drive(uint8_t step, uint8_t hi)
+{
+    uint16_t d = hi ? cal_duty_hi : cal_duty;   /* ★ K2a-4：两档各自独立，不再 duty×2 */
+
+    /* ★ TIM1 主输出使能（BDTR.MOE）+ 计数器运行：校准是 SWD 触发的旁路路径，
+     *   MOE=0 时 CCxE 全开也不出波形（三相恒 ~0 码）。每步兜一道，幂等。 */
+    LL_TIM_EnableCounter(TIM1);
+    LL_TIM_EnableAllOutputs(TIM1);
+
+    /* ★ 先把三路 CCR 全清零，再 comStep() 切引脚：
+     *   comStep() 会把"高侧相"引脚从 GPIO 切回 AF；若此刻 CCR 还留着上一步的值，
+     *   切回去的瞬间就会按残留占空比开通（可能撞上另一个还在导通的相）。 */
+    setPWMCompare1(0);
+    setPWMCompare2(0);
+    setPWMCompare3(0);
+
+    comStep((int)step);   /* 相 → 引脚模式：高侧 AF、低侧 GPIO 高(on)、悬空相两脚 GPIO 低 */
+
+    /* ★★★ 相 → TIM1 通道映射（本板）★★★
+     *   依据 Inc/targets.h 的 HARDWARE_GROUP_G0_RM2027 与 Src/main.c 的"六路门极"注释：
+     *       A 相 = CH3 / CH3N → PA10 / PB1 → 【CCR3】
+     *       B 相 = CH2 / CH2N → PA9  / PB0 → 【CCR2】
+     *       C 相 = CH1 / CH1N → PA8  / PA7 → 【CCR1】
+     *   ⚠ 别写成"A→CCR1"——CCR1 是 C 相。K2a-2 就是按 A→CCR1/C→CCR3 写的，后果是：
+     *     该步"高侧相"的引脚虽然在 AF 模式，但它的 CCR 恒为 0 ⇒ 高侧一直关、
+     *     互补低侧一直开，三相都量不到电压（实测 0~2 码）。
+     *     —— 这不是 MOE/引脚 AF 的问题（实测 BDTR.MOE=1、AFRH=0x222 一直是对的）。
+     *   step→高侧相 由 comStep() 定：1/6=A、2/3=C、4/5=B。 */
+    switch (step) {
+    case 1: case 6: setPWMCompare3(d); break;   /* 高侧 PWM = A 相 = CH3 */
+    case 2: case 3: setPWMCompare1(d); break;   /* 高侧 PWM = C 相 = CH1 */
+    default:        setPWMCompare2(d); break;   /* 高侧 PWM = B 相 = CH2 */
+    }
+}
+
 void esc_cal_poll(void)
 {
-    extern void comStep(int);
-    extern void setPWMCompare1(uint16_t);
-    extern void setPWMCompare2(uint16_t);
-    extern void setPWMCompare3(uint16_t);
-    extern uint16_t bemf_adc_va, bemf_adc_vb, bemf_adc_vc, bemf_adc_v0_hw;
 
     /* ★ K2a-3 ⓪：cal_mode 的 0→1 上升沿 = 新一轮校准开始 ⇒ 必须复位状态机。
      *   原来 cal_step / cal_tick / cal_acc / cal_n 都是 static 且【从不清零】，
@@ -112,6 +155,13 @@ void esc_cal_poll(void)
             cal_state  = 0;
             LL_TIM_EnableCounter(TIM1);
             LL_TIM_EnableAllOutputs(TIM1);
+            /* ★ K2a-4：换上校准专用触发点（跑完必须还原）。
+             *   默认 ADC_TRIGGER_CCR4 是按"正常运行占空比（~17%）"调的；
+             *   校准高档导通窗短得多，必须把触发点提前，否则 rank3/4（VC/V0）落在关断窗。*/
+            cal_ccr4_save = (uint16_t)(TIM1->CCR4 & 0xFFFFu);
+            TIM1->CCR4    = CAL_CCR4;
+            /* ★ K2a-5：开局就下发第一个状态，否则第一个驻留期采到的是空闲底噪 */
+            cal_drive(1u, 0u);
         }
     }
     if (cal_mode != CAL_MODE_ADC) { return; }
@@ -138,44 +188,11 @@ void esc_cal_poll(void)
     }
     cal_acc[0]=cal_acc[1]=cal_acc[2]=cal_acc[3]=0; cal_n=0; cal_tick=0;
     cal_step++;
-    if (cal_step >= 12u) { cal_mode = 0; cal_state = 1u; return; }
-
-    {
-        uint8_t ph   = (uint8_t)(cal_step >> 1);
-        uint8_t hi   = (uint8_t)(cal_step & 1u);
-        uint16_t d   = hi ? (uint16_t)(cal_duty * 2u) : cal_duty;
-        uint8_t  step = (uint8_t)(ph + 1u);
-
-        /* ★ K2a-3 ①：TIM1 主输出使能（BDTR.MOE）+ 计数器运行。
-         *   正常流程由 enableCorePeripherals() 开过，但校准是"外部 SWD 触发"的旁路路径，
-         *   MOE=0 时 CCxE 全开也不出波形（互补通道全停在无效电平）⇒ 表现就是
-         *   三相读数恒 ~0 码、看不出任何驱动。这里每步兜一道（幂等、开销可忽略）。 */
-        LL_TIM_EnableCounter(TIM1);
-        LL_TIM_EnableAllOutputs(TIM1);
-
-        /* ★ K2a-3 ②：先把三路 CCR 全清零，再 comStep() 切引脚。
-         *   comStep() 会把"高侧相"引脚从 GPIO 切回 AF；若此刻 CCR 还留着上一步的值，
-         *   切回去的瞬间就会按残留占空比开通（可能正好撞上另一个还在导通的相）。 */
-        setPWMCompare1(0);
-        setPWMCompare2(0);
-        setPWMCompare3(0);
-
-        comStep((int)step);   /* 相 → 引脚模式：高侧 AF、低侧 GPIO 高(on)、悬空相两脚 GPIO 低 */
-
-        /* ★★★ K2a-3 ③：相 → TIM1 通道映射（本板）★★★
-         *   依据 Inc/targets.h 的 HARDWARE_GROUP_G0_RM2027 与 Src/main.c 的"六路门极"注释：
-         *       A 相 = CH3  / CH3N  → PA10 / PB1  → 【CCR3】
-         *       B 相 = CH2  / CH2N  → PA9  / PB0  → 【CCR2】
-         *       C 相 = CH1  / CH1N  → PA8  / PA7  → 【CCR1】
-         *   ⚠ 别写成"A→CCR1"——CCR1 是 C 相。K2a-2 就是按 A→CCR1/C→CCR3 写的，后果是：
-         *     该步"高侧相"的引脚虽然在 AF 模式，但它的 CCR 恒为 0 ⇒ 高侧一直关、
-         *     互补低侧一直开，三相都量不到电压（实测 0~2 码）。
-         *     —— 这不是 MOE/引脚 AF 的问题（实测 BDTR.MOE=1、AFRH=0x222 一直是对的）。
-         *   step→高侧相 由 comStep() 定：1/6=A、2/3=C、4/5=B。 */
-        switch (step) {
-        case 1: case 6: setPWMCompare3(d); break;   /* 高侧 PWM = A 相 = CH3 */
-        case 2: case 3: setPWMCompare1(d); break;   /* 高侧 PWM = C 相 = CH1 */
-        default:        setPWMCompare2(d); break;   /* 高侧 PWM = B 相 = CH2 */
-        }
+    if (cal_step >= 12u) {
+        TIM1->CCR4 = cal_ccr4_save;   /* ★ K2a-4：还原正常采样触发点 */
+        cal_mode = 0; cal_state = 1u; return;
     }
+
+    /* 切到下一个状态（step = 相1..6，hi = 档）*/
+    cal_drive((uint8_t)((cal_step >> 1) + 1u), (uint8_t)(cal_step & 1u));
 }
