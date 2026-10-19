@@ -1802,7 +1802,15 @@ int32_t doPidCalculations(struct fastPID* pidnow, int actual, int target)
 void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
-    esc_cal_load();   /* ★ 加载校准参数（magic/CRC 校验失败则用默认值）*/
+    /* ★ 校准流程（宏控制，不依赖 SWD）：
+     *   默认：先读 flash 校验 → 合法就用；不合法（或 XIEN_CAL_FORCE=1）→ 自动校准 → 存回 flash */
+    esc_cal_load();
+#if XIEN_CAL_ENABLE
+    if (esc_cal_state != 1u || XIEN_CAL_FORCE) {
+        esc_cal_auto();
+        (void)esc_cal_save(&esc_cal);
+    }
+#endif
     if(eepromBuffer.eeprom_version < 3){ // eeprom versions less than 3 had a firmware name string in these bytes 
       eepromBuffer.max_ramp = 160;    // 0.1% per ms to 25% per ms 
       eepromBuffer.minimum_duty_cycle = 1; // 0.2% to 51 percent

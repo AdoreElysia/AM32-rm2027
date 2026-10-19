@@ -66,3 +66,9 @@ uint8_t esc_cal_save(const esc_cal_t *c)
 
 /* SWD 可写命令：0 空闲 / 1 存默认 / 2 重载 / 3 存当前 */
 volatile uint8_t esc_cal_cmd = 0;
+
+/* ★ 自动校准入口（K2/K3 实现）：当前先填默认值，保证流程可跑通 */
+void esc_cal_auto(void)
+{
+    esc_cal_defaults();
+}
