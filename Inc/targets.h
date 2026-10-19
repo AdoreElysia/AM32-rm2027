@@ -2684,7 +2684,12 @@
 /* ★ xien/n4-serial-ack：proto2 单包 6166B @1.5Mbaud ≈ 41ms，采一窗 512×41.67µs
  *   ≈21.3ms ⇒ 链路最多 ~24 包/s、采集最多 ~47 窗/s。win_every_n=2 让"采 2 窗
  *   发 1 窗"匹配链路（≈23.5 包/s），是长时间稳定跑的推荐值；SWD/上行 SET 可改。 */
-#define RM2027_WIN_EVERY_N   4
+/* ★ 2026-10-19 4 → 8：链路带宽实测不够。
+ *   proto2 单包 ~6176B @921600 ≈ 67ms/包；窗口产出远快于此 ⇒ TX 常年占满，
+ *   缓冲一满就丢包/自锁（实测跑校准期间 win_seq 涨、win_sent 几乎不动，
+ *   PC 侧 0 个有效包）。降到 8 ⇒ 包量减半，余量翻倍。
+ *   取数据若嫌少，优先改波特率（1.5M 已在 targets 里验证过），不要改回 4。 */
+#define RM2027_WIN_EVERY_N   8
 #endif
 
 #ifndef RM2027_NEVER_HANDOVER
