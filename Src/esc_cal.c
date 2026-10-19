@@ -93,6 +93,9 @@ volatile uint8_t  cal_run       = 0;   /* K4 自驱动校准跑：0空闲/1请�
  *   [0]newinput [1]input [2]armed [3]signaltimeout [4]ol_startup_stage
  *   [5]ol_startup_arm [6]duty_cycle [7]actual_current  */
 volatile uint16_t cal_dbg[8] = {0};
+/* ★ K4 追踪：olStartupTick() 的 newinput<48 分支（唯一不写 ol_stop_site 的停机路径）
+ *   [0]=0xBEEF 标记 [1]=当时的 newinput [2]=当时的 cal_run [3]=当时的 input */
+volatile uint16_t cal_trip[4] = {0};
 static const uint8_t rk_step[3] = { 1u, 2u, 3u };
 static   uint8_t  rk_sel = 0;
 static   uint8_t  rk_ord = 0;

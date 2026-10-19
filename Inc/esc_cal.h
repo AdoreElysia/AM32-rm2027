@@ -108,3 +108,4 @@ extern volatile uint8_t  cal_rank_prog;        /* 进度：已完成的驻留期
  *   停机（到点/过流/失锁）后自动还原 adc_order_auto=0 并回到 0。 */
 extern volatile uint8_t  cal_run;
 extern volatile uint16_t cal_dbg[8];   /* K4 停机现场面包屑 */
+extern volatile uint16_t cal_trip[4];  /* K4: newinput<48 停机路径现场 */

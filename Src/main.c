@@ -1327,7 +1327,21 @@ static void olStartupTick(void)
     }
     /* ★ 收油门即停（2026-10-08 补）：原来用被覆盖过的 input 判断 ⇒ 起步期间
      *   油门回 0 也停不下来、一路跑到超时。改用原始油门 newinput。 */
+    /* ★★ K4：自驱期间，在【使用点】把虚拟油门强制钉住 ★★
+     *   为什么放这里：newinput 有多个异步写入者（dshot.c 的 EXTI 路径、signal.c 的模拟/伺服
+     *   路径…），在主循环某处注入会被它们覆盖。而 olStartupTick() 只有这一个判断点
+     *   ⇒ 在判断前一刻钉住，谁都盖不掉。实测（cal_trip 追踪）：命中此路径时
+     *   newinput=0 而 cal_run=3，即"自驱中被别的写入者清掉了油门"。
+     *   ⚠ 只钉油门；过流/失速/到点/失锁保护全不动。 */
+    {   extern volatile uint8_t cal_run;
+        if (cal_run != 0u) { newinput = 350; input = 350; }
+    }
     if (newinput < 48) {
+        {   /* ★ K4 追踪：这条路径不写 ol_stop_site，必须单独打点 */
+            extern volatile uint16_t cal_trip[4];
+            extern volatile uint8_t  cal_run;
+            cal_trip[0]=0xBEEFu; cal_trip[1]=newinput; cal_trip[2]=cal_run; cal_trip[3]=input;
+        }
         allOff();
         running = 0;
         ol_startup_arm = 0;
