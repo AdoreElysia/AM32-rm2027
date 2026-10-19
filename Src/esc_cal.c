@@ -300,6 +300,21 @@ volatile uint8_t  cal_tables_ready = 0;
 /* ★ 1=把算出的表应用到判据；0=保持编译期宏（= V2.9 行为）。默认 0 更安全。*/
 volatile uint8_t  cal_apply = 0;
 
+/* ★★ K12：按 V2.9 口径在【rank 修正后】的数据上重拟合 ★★
+ *   V2.9 的做法：每步中段直线拟合 → 外推到步两端 e0_s/e1_s
+ *     A_s = e1−e0（幅值）、m_s = (e0+e1)/2（中点）
+ *     g_s = meanA/|A_s|（幅值归一）、o_s = −g_s·m_s（过零居中）
+ *   这里的关键改动：拟合用的不是原始 d，而是 d×1000/K_rank[该帧所在槽位]
+ *     ⇒ 抠掉 rank 槽位差，剩下的起伏才是真实相间不对称（= 需重标部分）。
+ *   累加量：Σt, Σt², Σd, Σt·d（t = 步内采样序号），跑完解最小二乘。
+ */
+volatile int32_t  fit_n[7];
+volatile int64_t  fit_t[7], fit_tt[7], fit_td[7];
+volatile int32_t  fit_d[7];
+volatile int16_t  fit_g[7], fit_o[7];     /* 重拟合出来的增益/偏置（诊断+候选）*/
+volatile uint8_t  fit_ready = 0;
+static   uint16_t fit_tc = 0;             /* 当前步内序号 */
+
 /* ★★ K7：rank 增益改成【4 路通道各自的增益】★★
  *   模型：pp(步,order) = G_相 × K_rank × S_步
  *   每个通道在 4 个 order 下轮流占 rank1~4 ⇒ 对 order 取平均就把 K_rank 消掉，
@@ -311,6 +326,7 @@ volatile int16_t  rk_k[5];             /* [1..4] rank 因子 ×1000（rank1..ran
 volatile int32_t  rk_csum[4];          /* 通道读数和（A,B,C,V0）*/
 volatile uint32_t rk_cn;
 
+static uint8_t rk_rank_of(uint8_t st, uint8_t o);   /* K12: 前置声明 */
 volatile int16_t  rk_min[7][4];
 volatile int16_t  rk_max[7][4];
 volatile uint16_t rk_pp[7][4];
@@ -329,6 +345,8 @@ void rk_reset(void)
     }
     rk_done = 0;
     rk_csum[0]=rk_csum[1]=rk_csum[2]=rk_csum[3]=0; rk_cn=0;
+    for (uint8_t i=0;i<7u;i++){ fit_n[i]=0; fit_t[i]=0; fit_tt[i]=0; fit_td[i]=0; fit_d[i]=0; fit_g[i]=0; fit_o[i]=0; }
+    fit_tc = 0; fit_ready = 0;
     for (uint8_t i=0;i<4u;i++) ch_gain[i]=1000;
 }
 
@@ -350,6 +368,7 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv,
             adc_order_pending = (uint8_t)((adc_order + 1u) & 3u);
         }
         last_st = st; skip = RK_SKIP_AFTER_COMM;
+        fit_tc  = 0;   /* K12：步内序号从 0 开始 */
     }
     if (skip) { skip--; return; }
     uint8_t o = (uint8_t)(order & 3u);
@@ -366,6 +385,19 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv,
     }
     rk_csum[0]+=(int32_t)va; rk_csum[1]+=(int32_t)vb;   /* K7：通道增益用 */
     rk_csum[2]+=(int32_t)vc; rk_csum[3]+=(int32_t)v0; rk_cn++;
+    /* ★ K12：按 rank 修正后做最小二乘（t = 步内序号）*/
+    {
+        uint8_t r = rk_rank_of(st, o);
+        int32_t kr = (r >= 1u && r <= 4u && rk_k[r] > 0) ? (int32_t)rk_k[r] : 1000;
+        int32_t dc = (int32_t)(((int64_t)dv * 1000) / kr);   /* 抠掉槽位差 */
+        int64_t t  = (int64_t)fit_tc;
+        fit_n[st]++;
+        fit_t[st]  += t;
+        fit_tt[st] += t * t;
+        fit_d[st]  += dc;
+        fit_td[st] += t * (int64_t)dc;
+        fit_tc++;
+    }
 }
 
 /* order o 下，步 st 的悬空相占哪个 rank（1..4）*/
@@ -491,6 +523,42 @@ void rk_compute(void)
              *   ⇒ gain 只改幅值、不移动过零点；offset 会直接移动过零点，六步各加不同值
              *     = 给每步注入不同定时偏差。先学 V2.9：只用 gain、offset 保持 0。*/
             if (cal_apply) { cal_so[st] = 0; }
+        }
+        /* ★★ K12：V2.9 口径重拟合（数据已按 rank 因子修正过）★★
+         *   每步 min² 拟合 → e0=b、e1=b+k(n−1) → A=|e1−e0|、M=(e0+e1)/2
+         *   g_s = meanA/A_s ； o_s = −M_s·g_s/1000   （与 cal-anchor.py 同口径）*/
+        {
+            int32_t As[7] = {0}, Ms[7] = {0};
+            int32_t sumA = 0; uint8_t nA = 0;
+            for (uint8_t st = 1u; st <= 6u; st++) {
+                int32_t n = fit_n[st];
+                if (n < 32) { continue; }
+                int64_t den = (int64_t)n * fit_tt[st] - fit_t[st] * fit_t[st];
+                if (den == 0) { continue; }
+                int64_t num = (int64_t)n * fit_td[st] - fit_t[st] * (int64_t)fit_d[st];
+                int32_t ksl = (int32_t)(num / den);
+                int32_t b   = (int32_t)(((int64_t)fit_d[st] - (int64_t)ksl * fit_t[st]) / (int64_t)n);
+                int32_t e0  = b;
+                int32_t e1  = b + ksl * (n - 1);
+                int32_t A   = e1 - e0; if (A < 0) { A = -A; }
+                As[st] = A; Ms[st] = (e0 + e1) / 2;
+                if (A > 0) { sumA += A; nA++; }
+            }
+            if (nA > 0u) {
+                int32_t mA = sumA / (int32_t)nA;
+                for (uint8_t st = 1u; st <= 6u; st++) {
+                    if (As[st] <= 0) { fit_g[st] = 1000; fit_o[st] = 0; continue; }
+                    int32_t g = mA * 1000 / As[st];
+                    if (g < 500)  { g = 500; }
+                    if (g > 4000) { g = 4000; }
+                    int32_t o = -(Ms[st] * g) / 1000;
+                    if (o >  4095) { o =  4095; }
+                    if (o < -4095) { o = -4095; }
+                    fit_g[st] = (int16_t)g;
+                    fit_o[st] = (int16_t)o;
+                }
+                fit_ready = 1u;
+            }
         }
         rk_so[0] = 0; rk_gain[0] = 0;
         if (cal_apply) { cal_sg[0] = 0; cal_so[0] = 0; }
