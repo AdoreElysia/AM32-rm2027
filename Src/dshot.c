@@ -136,7 +136,11 @@ void computeDshotDMA()
             }
 
             if ((tocheck <= 47) && (tocheck > 0)) {
-                newinput = 0;
+                /* ★ K4：自驱校准跑期间【不许清虚拟油门】。
+                     *   processDshot() 也被 EXTI 中断调用(stm32g0xx_it.c:821) ⇒ 会异步
+                     *   把 newinput 清 0，把自驱的虚拟油门盖掉 ⇒ 起步链(读 newinput<48)
+                     *   立刻自我关闭（实测面包屑：停机时 newinput=0）。 */
+                    { extern volatile uint8_t cal_run; if (cal_run == 0u) { newinput = 0; } }
                 dshotcommand = tocheck; //  todo
             }
             if (tocheck == 0) {
@@ -149,7 +153,11 @@ void computeDshotDMA()
                     return;
                 }
 #endif
-                newinput = 0;
+                /* ★ K4：自驱校准跑期间【不许清虚拟油门】。
+                     *   processDshot() 也被 EXTI 中断调用(stm32g0xx_it.c:821) ⇒ 会异步
+                     *   把 newinput 清 0，把自驱的虚拟油门盖掉 ⇒ 起步链(读 newinput<48)
+                     *   立刻自我关闭（实测面包屑：停机时 newinput=0）。 */
+                    { extern volatile uint8_t cal_run; if (cal_run == 0u) { newinput = 0; } }
                 dshotcommand = 0;
                 command_count = 0;
             }
