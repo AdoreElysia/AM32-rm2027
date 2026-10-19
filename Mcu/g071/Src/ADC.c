@@ -160,9 +160,10 @@ void ADC_DMA_Callback()
         else if (st == 2u || st == 5u) { bemf_adc_vph = bemf_adc_va; }
         else                           { bemf_adc_vph = bemf_adc_vb; }
         /* ★ K5：rank 增益自测取样（片上，每帧 2 次比较；未武装时立即返回）*/
-        { extern void rk_sample(uint8_t, uint8_t, int16_t);
+        { extern void rk_sample(uint8_t, uint8_t, int16_t, uint16_t, uint16_t, uint16_t, uint16_t);
           rk_sample(st, (uint8_t)(adc_frame_order & 3u),
-                    (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0)); }
+                    (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0),
+                    bemf_adc_va, bemf_adc_vb, bemf_adc_vc, bemf_adc_v0_hw); }
     }
     ADC_raw_current = ADCDataDMA[4];   /* rank5 */
     ADC_raw_volts   = ADCDataDMA[5];   /* rank6 */

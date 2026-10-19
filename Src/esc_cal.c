@@ -297,6 +297,17 @@ volatile int32_t  rk_sum[7][4];
 volatile uint16_t rk_n[7][4];
 volatile uint8_t  cal_tables_ready = 0;
 
+/* ★★ K7：rank 增益改成【4 路通道各自的增益】★★
+ *   模型：pp(步,order) = G_相 × K_rank × S_步
+ *   每个通道在 4 个 order 下轮流占 rank1~4 ⇒ 对 order 取平均就把 K_rank 消掉，
+ *   剩下正比于 G_相 × S_步。三相在同一转速下 S 相同 ⇒ 比值即通道增益。
+ *   V0 的增益用恒等式定标：V0 是三相星形中点 ⇒ G_V0·v0 ≈ (G_A·va+G_B·vb+G_C·vc)/3。
+ */
+volatile int16_t  ch_gain[4];          /* [A,B,C,V0] ×1000 —— 4 路通道增益 */
+volatile int16_t  rk_k[5];             /* [1..4] rank 因子 ×1000（rank1..rank4）*/
+volatile int32_t  rk_csum[4];          /* 通道读数和（A,B,C,V0）*/
+volatile uint32_t rk_cn;
+
 volatile int16_t  rk_min[7][4];
 volatile int16_t  rk_max[7][4];
 volatile uint16_t rk_pp[7][4];
@@ -314,9 +325,12 @@ void rk_reset(void)
         }
     }
     rk_done = 0;
+    rk_csum[0]=rk_csum[1]=rk_csum[2]=rk_csum[3]=0; rk_cn=0;
+    for (uint8_t i=0;i<4u;i++) ch_gain[i]=1000;
 }
 
-void rk_sample(uint8_t st, uint8_t order, int16_t dv)
+void rk_sample(uint8_t st, uint8_t order, int16_t dv,
+               uint16_t va, uint16_t vb, uint16_t vc, uint16_t v0)
 {
     if (rk_arm == 0u || st < 1u || st > 6u) { return; }
     /* ★ 必须丢掉换相后的前几帧：换相尖峰（±200~600 码）会把 min/max 撑大，
@@ -330,6 +344,8 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv)
     if (dv < rk_min[st][o]) { rk_min[st][o] = dv; }
     if (dv > rk_max[st][o]) { rk_max[st][o] = dv; }
     rk_sum[st][o] += (int32_t)dv; rk_n[st][o]++;   /* K6：偏置用（按 order 分开存）*/
+    rk_csum[0]+=(int32_t)va; rk_csum[1]+=(int32_t)vb;   /* K7：通道增益用 */
+    rk_csum[2]+=(int32_t)vc; rk_csum[3]+=(int32_t)v0; rk_cn++;
 }
 
 /* order o 下，步 st 的悬空相占哪个 rank（1..4）*/
@@ -369,6 +385,7 @@ void rk_compute(void)
         }
     }
     for (uint8_t r = 1u; r <= 4u; r++) { k[r] = rcnt[r] ? (rsum[r] / rcnt[r]) : 1000u; }
+    for (uint8_t r = 1u; r <= 4u; r++) { rk_k[r] = (int16_t)((k[r] > 32000u) ? 32000u : k[r]); }
     if (k[4] == 0u) { k[4] = 1000u; }                 /* V0 在 rank4 */
 
     graw[0] = 1000u;
@@ -384,22 +401,68 @@ void rk_compute(void)
         uint32_t g = graw[st] * 1000u / gmin;         /* 归一：最小 = 1000 */
         rk_gain[st] = (g > 65535u) ? 65535u : (uint16_t)g;
     }
-    /* ★ K6 第二步：用【已改好的增益】把数据归一，再算每步偏置
-     *   so[s] = −mean(d_raw|order0) × rk_gain[s]/1000
-     *   （order0 才是运行序；均值里的 rank 效应已被 rk_gain 除掉）*/
-    for (uint8_t st = 1u; st <= 6u; st++) {
-        int32_t so = 0;
-        if (rk_n[st][0] > 0u) {
-            int32_t m = rk_sum[st][0] / (int32_t)rk_n[st][0];
-            so = -(int32_t)(((int32_t)m * (int32_t)rk_gain[st]) / 1000);
-            if (so >  4095) { so =  4095; }
-            if (so < -4095) { so = -4095; }
+    /* ================= K7：先求【4 路通道各自的增益】，再推每步乘数 =================
+     * 模型：pp(步,order) = G_相 × K_rank × S_步
+     *   · 每个通道在 4 个 order 下轮流占 rank1~4 ⇒ 对 order 取平均把 K_rank 消掉；
+     *   · 三相在同一转速下幅值相同 ⇒ 三者之比就是【通道增益】；
+     *   · V0 是三相星形中点 ⇒ G_V0·v0 ≈ (G_A·va+G_B·vb+G_C·vc)/3 定标。
+     * 然后判据仍用"每步一个乘数"的接口：sg[step] = G_该步悬空相（×1000）。
+     */
+    {
+        int32_t amp[3] = {0,0,0};
+        uint16_t cnt[3] = {0,0,0};
+        for (uint8_t st = 1u; st <= 6u; st++) {
+            uint8_t f = (st == 2u || st == 5u) ? 0u : ((st == 3u || st == 6u) ? 1u : 2u);
+            for (uint8_t o = 0; o < 4u; o++) {
+                if (rk_pp[st][o] == 0u) { continue; }
+                uint8_t r = rk_rank_of(st, o);
+                uint32_t kr = (r <= 4u && k[r] != 0u) ? k[r] : 1000u;
+                amp[f] += (int32_t)((uint32_t)rk_pp[st][o] * 1000u / kr);   /* 去 rank 后的幅值 */
+                cnt[f]++;
+            }
         }
-        rk_so[st] = (int16_t)so;
-        cal_sg[st] = (int16_t)rk_gain[st];      /* ★ 生效：增益 */
-        cal_so[st] = (int16_t)so;               /* ★ 生效：偏置 */
+        int32_t m3 = 0; uint8_t n3 = 0;
+        for (uint8_t i = 0; i < 3u; i++) { if (cnt[i]) { amp[i] /= (int32_t)cnt[i]; m3 += amp[i]; n3++; } }
+        if (n3 == 0u || m3 == 0) { rk_done = 1u; return; }
+        int32_t mu = m3 / (int32_t)n3;
+        for (uint8_t i = 0; i < 3u; i++) {
+            ch_gain[i] = (int16_t)(cnt[i] ? (amp[i] * 1000 / mu) : 1000);   /* ×1000，均值归一 */
+        }
+        /* V0 增益：G_V0 = (G_A·mva + G_B·mvb + G_C·mvc) / (3·mv0) */
+        int32_t mv[4] = {0,0,0,0};
+        if (rk_cn) { for (uint8_t i = 0; i < 4u; i++) { mv[i] = rk_csum[i] / (int32_t)rk_cn; } }
+        if (mv[3] > 0) {
+            int32_t num = ch_gain[0]*(int32_t)mv[0] + ch_gain[1]*(int32_t)mv[1] + ch_gain[2]*(int32_t)mv[2];
+            ch_gain[3] = (int16_t)(num / (3 * mv[3]));
+            if (ch_gain[3] < 500) { ch_gain[3] = 500; }
+            if (ch_gain[3] > 2000) { ch_gain[3] = 2000; }
+        } else { ch_gain[3] = 1000; }
+
+        /* ---- 第二步：用通道增益归一后的数据，算每步偏置 ---- */
+        for (uint8_t st = 1u; st <= 6u; st++) {
+            uint8_t f = (st == 2u || st == 5u) ? 0u : ((st == 3u || st == 6u) ? 1u : 2u);
+            /* ★ 完整模型：通道增益 × rank 因子（缺一个都修不动大偏差）*/
+            uint8_t rf = rk_rank_of(st, 0u);
+            int32_t gf = (int32_t)ch_gain[f];      if (gf < 500) { gf = 500; }
+            int32_t gv = (int32_t)ch_gain[3];      if (gv < 500) { gv = 500; }
+            int32_t kf = (rf <= 4u && k[rf] != 0u) ? (int32_t)k[rf] : 1000;
+            int32_t kv = (k[4] != 0u) ? (int32_t)k[4] : 1000;
+            int32_t g  = (gv * kv * 1000) / (gf * kf);     /* 修正乘数 ×1000 */
+            if (g < 500)   { g = 500; }
+            if (g > 4000)  { g = 4000; }
+            cal_sg[st] = (int16_t)g;                       /* 通道增益 × rank 因子 */
+            int32_t so = 0;
+            if (rk_n[st][0] > 0u) {
+                int32_t mraw = rk_sum[st][0] / (int32_t)rk_n[st][0];   /* 原始 d 的均值（order0）*/
+                so = -(int32_t)((mraw * g) / 1000);        /* 归一后应归零 ⇒ 反向补偿 */
+                if (so >  4095) { so =  4095; }
+                if (so < -4095) { so = -4095; }
+            }
+            cal_so[st] = (int16_t)so;
+            rk_so[st] = (int16_t)so;
+        }
+        cal_sg[0] = 0; cal_so[0] = 0; rk_so[0] = 0;
+        cal_tables_ready = 1u;
     }
-    cal_sg[0] = 0; cal_so[0] = 0;
-    cal_tables_ready = 1u;
     rk_done = 1u;
 }
