@@ -372,6 +372,27 @@ cmd_flash_cap() {
     fi
     rm -f "$raw"
 }
+cmd_flash_ext() {
+    local target="${1:-}"
+    echo "== 编译烧录 + 分支扩展脚本 =="
+    cmd_flash "$target" || return 1
+    local BRANCH SAFE EXT
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    SAFE=$(safe_fw_name "$BRANCH")
+    EXT="$REPO/tools/branch/$SAFE.py"
+    export ESC_BRANCH="$BRANCH"
+    export ESC_COMMIT="$(git rev-parse --short HEAD)"
+    export ESC_BIN="$FW_DIR/$SAFE.bin"
+    export ESC_BIN_SHA="$(sha256sum "$FW_DIR/$SAFE.bin" 2>/dev/null | awk '{print $1}')"
+    export ESC_ROOT="$REPO"
+    if [ -f "$EXT" ]; then
+        echo "→ 运行扩展脚本：tools/branch/$SAFE.py"
+        python3 "$EXT" || { echo "❌ 扩展脚本返回非 0"; return 1; }
+    else
+        echo "（本分支无扩展脚本 tools/branch/$SAFE.py —— 跳过）"
+    fi
+}
+
 cmd_judge() {
     local secs="${1:-11}"
     echo "== 计数轮判分 ${secs}s（关窗口流）=="
@@ -387,8 +408,9 @@ if [ $# -ge 1 ]; then
       reuse-check) cmd_reuse_check ;;
       cap)       shift; cmd_cap "${1:-8}" ;;
       flash-cap) shift; cmd_flash_cap "${1:-8}" "${2:-}" ;;
+      flash-ext) shift; cmd_flash_ext "${1:-}" ;;
       judge)     shift; cmd_judge "${1:-11}" "${2:-}" ;;
-      *) echo "用法: esc-lab.sh [1|2|flash [<分支>|<bin>]|build-only|reuse-check|cap <秒>|flash-cap <秒> [<分支>|<bin>]|judge <秒> <标签>]"; exit 1 ;;
+      *) echo "用法: esc-lab.sh [1|2|flash [<分支>|<bin>]|flash-ext [<分支>|<bin>]|build-only|reuse-check|cap <秒>|flash-cap <秒> [<分支>|<bin>]|judge <秒> <标签>]"; exit 1 ;;
     esac
 else
     while :; do main_menu; done

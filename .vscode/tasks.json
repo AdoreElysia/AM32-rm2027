@@ -43,6 +43,24 @@
         "panel": "dedicated",
         "clear": true
       }
+    },
+    {
+      "label": "ESC 3 · 编译烧录 + 分支扩展脚本（按分支名自动找 tools/branch/<分支>.py）",
+      "detail": "esc-lab.sh flash-ext：先做 ESC 1 的全部动作（编译→归档 firmware/<分支>.bin→收油→烧录→校验→reset），然后自动运行 tools/branch/<分支名>.py（/ 映射成 __）。扩展脚本可向用户要参数（母线电压/ci/秒数），结果建议写 firmware/<分支>.cal.json。无扩展脚本则只烧录。",
+      "type": "shell",
+      "command": "bash '${workspaceFolder}/tools/esc-lab.sh' flash-ext",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "ESC_YES": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     }
   ]
 }
