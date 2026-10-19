@@ -81,6 +81,18 @@ volatile uint16_t cal_bus_mv = 12000;
 volatile uint16_t cal_duty   = CAL_DUTY_DEF;
 volatile uint16_t cal_duty_hi = CAL_DUTY_HI;
 static   uint16_t cal_ccr4_save = 0;   /* 校准前 TIM1->CCR4 的值，结束要还回去 */
+
+/* ★ K3：rank 偏差校准
+ *   ⚠ 必须【三个驱动状态各测一遍】：step1 只有 A 是 PWM 相，B 被低边钳到 0、C 悬空，
+ *     它们没有真正的"两电平"，算出来的 k 是假的（第一版就踩了这个）。
+ *     所以让 A/B/C 轮流当 PWM 相：sel0=step1(A PWM)、sel1=step2(C PWM)、sel2=step4(B PWM)。 */
+volatile uint16_t cal_rank[3][4][2][4] = {{{{0}}}};  /* [sel][order][0=低/1=高][VA,VB,VC,V0] */
+volatile uint8_t  cal_rank_prog = 0;   /* 进度：已完成的驻留期数(0..24) */
+static const uint8_t rk_step[3] = { 1u, 2u, 4u };
+static   uint8_t  rk_sel = 0;
+static   uint8_t  rk_ord = 0;
+static   uint8_t  rk_hi  = 0;
+extern volatile uint8_t adc_order_pending; /* ADC-TC 中断里生效的 rank 顺序请求 */
 volatile uint16_t cal_raw[6][4] = {{0}};
 volatile uint16_t cal_raw2[6][4] = {{0}};
 
@@ -147,8 +159,8 @@ void esc_cal_poll(void)
     static uint8_t cal_last_mode = 0;
     if (cal_mode != cal_last_mode) {
         cal_last_mode = cal_mode;
-        if (cal_mode == CAL_MODE_ADC) {
-            cal_step = 0;
+        if (cal_mode == CAL_MODE_ADC || cal_mode == CAL_MODE_RANK) {
+            /* ---- 两个模式共用的进入动作 ---- */
             cal_tick = 0;
             cal_n    = 0;
             cal_acc[0] = cal_acc[1] = cal_acc[2] = cal_acc[3] = 0;
@@ -160,10 +172,67 @@ void esc_cal_poll(void)
              *   校准高档导通窗短得多，必须把触发点提前，否则 rank3/4（VC/V0）落在关断窗。*/
             cal_ccr4_save = (uint16_t)(TIM1->CCR4 & 0xFFFFu);
             TIM1->CCR4    = CAL_CCR4;
-            /* ★ K2a-5：开局就下发第一个状态，否则第一个驻留期采到的是空闲底噪 */
-            cal_drive(1u, 0u);
+
+            if (cal_mode == CAL_MODE_ADC) {
+                cal_step = 0;
+                /* ★ K2a-5：开局就下发第一个状态，否则第一个驻留期采到的是空闲底噪 */
+                cal_drive(1u, 0u);
+            } else {
+                /* ★ K3：rank 偏差 —— 三个驱动状态 × 4 order × 2 档 = 24 个驻留期。
+                 *   每个驱动状态内信号真值恒定 ⇒ 同一通道跨 4 个 order 的差
+                 *   【纯粹是 rank 效应】，不掺负载角/转速。 */
+                rk_sel = 0;
+                rk_ord = 0;
+                rk_hi  = 0;
+                cal_rank_prog = 0;
+                adc_order_pending = 0;
+                cal_drive(rk_step[0], 0u);  /* 从 sel0/order0/低档开始 */
+            }
         }
     }
+    /* ★★ K3：rank 偏差校准状态机（不转电机，逐个 order 驻留平均）★★
+     *   每个 order 把四个通道摆到不同的 rank 上；跑完 4 个 order，每个通道
+     *   恰好把 rank1~4 各占一次 ⇒ cal_rank[order][ch] 就是"ch 在某个 rank 上的读数"。 */
+    if (cal_mode == CAL_MODE_RANK) {
+        if (cal_tick < CAL_RANK_DWELL) {
+            cal_tick++;
+            if (cal_tick > 60u) {      /* 前 60 拍丢掉：等 order 切换在中断里生效 */
+                cal_acc[0] += bemf_adc_va; cal_acc[1] += bemf_adc_vb;
+                cal_acc[2] += bemf_adc_vc; cal_acc[3] += bemf_adc_v0_hw;
+                cal_n++;
+            }
+            return;
+        }
+        if (cal_n) {
+            for (uint8_t j = 0; j < 4u; j++) {
+                cal_rank[rk_sel][rk_ord][rk_hi][j] = (uint16_t)(cal_acc[j] / cal_n);
+            }
+            cal_rank_prog++;
+        }
+        cal_acc[0]=cal_acc[1]=cal_acc[2]=cal_acc[3]=0; cal_n=0; cal_tick=0;
+        /* 推进顺序：同 sel 内先切低/高档，一档采完换 order，4 个 order 采完换 sel */
+        rk_hi++;
+        if (rk_hi >= 2u) {
+            rk_hi = 0;
+            rk_ord++;
+            if (rk_ord >= 4u) {
+                rk_ord = 0;
+                rk_sel++;
+                if (rk_sel >= 3u) {          /* 3 sel × 4 order × 2 档 = 24，采完 */
+                    adc_order_pending = 0;   /* 还原 order0 */
+                    TIM1->CCR4 = cal_ccr4_save; /* 还原正常采样触发点 */
+                    cal_mode = 0; cal_state = 1u;
+                    return;
+                }
+                adc_order_pending = 0;       /* 换 sel：order 回到 0 */
+            } else {
+                adc_order_pending = rk_ord;  /* 换 order：交给 ADC-TC 中断下一帧生效 */
+            }
+        }
+        cal_drive(rk_step[rk_sel], rk_hi);   /* 保持 sel 的换相状态，只切档 */
+        return;                              /* 真值只随"档"变，与 rank 无关 */
+    }
+
     if (cal_mode != CAL_MODE_ADC) { return; }
     if (cal_state == 1u) { return; }
 

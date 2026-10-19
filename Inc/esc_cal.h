@@ -64,3 +64,39 @@ extern volatile uint16_t cal_duty_hi;   /* 高档占空比（0..2000）*/
 extern volatile uint16_t cal_raw[6][4];   /* 低档 duty（关断参考点）*/
 extern volatile uint16_t cal_raw2[6][4];  /* 高档 duty（导通点）*/ /* [step-1][VA,VB,VC,V0] 中位 */
 void esc_cal_poll(void);                /* 主循环调用 */
+
+/* ================= K3：rank 偏差校准（不转电机）=================
+ * 要解决什么：四个电压通道排在 rank1..4，各 rank 的采样时刻/建立不同
+ *   ⇒【同一个物理通道】换个 rank 排位，读数就变。这就是历史上一改 ADC 顺序
+ *   A/C 幅值就翻转（0.668 → 2.048）的那个效应。
+ *
+ * 为什么它必然表现为【六步 3 周期】误差：
+ *   order0 下 悬空相 A=rank1、B=rank2、C=rank3，而参考 V0 恒在 rank4：
+ *     步  1  2  3  4  5  6
+ *     悬空相 C  A  B  C  A  B
+ *     所在直 3  1  2  3  1  2
+ *   ⇒ 若 R1≠R2≠R3，六步上就出现 1≡4、2≡5、3≡6 的图案。
+ *   证据：现有 RM2027_SG_NUM = {0,1152,1629,1325,1152,1629,1325} 正是严格 3 周期！
+ *   ⇒ 结论：那张"六步增益表"的 3 周期部分【就是 rank 偏差换了个写法】；
+ *     做完 rank 校准后若 3 周期性消失，就说明不必再单独做增益校准，只留 offset。
+ *
+ * 怎么做：固定【一个】静态驱动状态（step1 高档：A=PWM/B=LOW/C=悬空），
+ *   让 adc_order 依次 0/1/2/3 各驻留 CAL_RANK_DWELL 拍，每个 order 采 4 通道。
+ *   这段时间里信号真值恒定 ⇒ 同一通道跨 4 个 order 的差【纯粹是 rank 效应】。
+ *   注意：必须【不转电机】——转起来会有负载角/转速变化混进来。
+ *   ⚠ 还要【两个电平】才能把每个 rank 的增益和偏置分开（单一个电平只能看到混合量）：
+ *     低档(<CCR4，采样落在关断窗) ≈ 0V、高档(>CCR4+180，落在导通窗) ≈ Vbus。
+ *   ⚠ 还要【三个驱动状态各测一遍】：step1 里只有 A 是 PWM 相，B 被低边钳到 0、C 悬空，
+ *     它们没有真正的两电平，k 是假的（第一版踩过）。所以让 A/B/C 轮流当 PWM 相：
+ *       sel0 = step1(A PWM)  sel1 = step2(C PWM)  sel2 = step4(B PWM)
+ *     每个 sel 内扫 4 个 order × 低/高两档 ⇒ 3×4×2 = 24 个驻留期。
+ *
+ * 通道 ↔ rank 对照（由 ADC.c 的 adc_apply_order 决定）：
+ *   order0: R1=A R2=B R3=C R4=V0      order2: R1=C R2=V0 R3=A R4=B
+ *   order1: R1=B R2=C R3=V0 R4=A      order3: R1=V0 R2=A R3=B R4=C
+ *   ⇒ A 相分别在 rank [1,4,3,2]（order0..3），B=[2,1,4,3]，C=[3,2,1,4]，V0=[4,3,2,1]。
+ */
+#define CAL_MODE_RANK   2u
+#define CAL_RANK_DWELL  240u   /* 每个 (sel,order,档) 驻留多少主循环拍 */
+extern volatile uint16_t cal_rank[3][4][2][4]; /* [sel][order][0=低/1=高][VA,VB,VC,V0] 均值 */
+extern volatile uint8_t  cal_rank_prog;        /* 进度：已完成的驻留期数（0..24，24=完成）*/
