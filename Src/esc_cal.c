@@ -294,6 +294,7 @@ volatile int16_t  cal_sg[7] = RM2027_SG_NUM;
 volatile int16_t  cal_so[7] = RM2027_SO_OFF;
 volatile int16_t  rk_so[7];
 volatile int32_t  rk_sum[7][4];
+volatile uint32_t rk_sq[7][4];   /* Σ(dv>>2)² —— 稳健幅值用（抗尖峰）*/
 volatile uint16_t rk_n[7][4];
 volatile uint8_t  cal_tables_ready = 0;
 
@@ -321,7 +322,7 @@ void rk_reset(void)
         rk_gain[s] = 1000u;
         for (uint8_t o = 0; o < 4u; o++) {
             rk_min[s][o] = 32767; rk_max[s][o] = -32768; rk_pp[s][o] = 0u;
-            rk_sum[s][o] = 0; rk_n[s][o] = 0u;
+            rk_sum[s][o] = 0; rk_sq[s][o] = 0u; rk_n[s][o] = 0u;
         }
     }
     rk_done = 0;
@@ -341,9 +342,17 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv,
     if (st != last_st) { last_st = st; skip = RK_SKIP_AFTER_COMM; }
     if (skip) { skip--; return; }
     uint8_t o = (uint8_t)(order & 3u);
-    if (dv < rk_min[st][o]) { rk_min[st][o] = dv; }
+    if (dv < rk_min[st][o]) { rk_min[st][o] = dv; }   /* 仅留作参考/诊断 */
     if (dv > rk_max[st][o]) { rk_max[st][o] = dv; }
-    rk_sum[st][o] += (int32_t)dv; rk_n[st][o]++;   /* K6：偏置用（按 order 分开存）*/
+    /* ★ 幅值用【方差】而不是 min/max：换相尖峰会把 max 撑大、把 B/C 只有 6% 的差异翻掉
+     *   （实测两轮 B/C 相对大小翻转）。方差对少量尖峰不敏感 ⇒ 稳。
+     *   dv>>2 缩放到 ±~500 后平方，配合 n 上限 4096 避免 uint32 溢出。*/
+    if (rk_n[st][o] < 4096u) {
+        int32_t x = dv >> 2;
+        rk_sum[st][o] += x;
+        rk_sq[st][o]  += (uint32_t)(x * x);
+        rk_n[st][o]++;
+    }
     rk_csum[0]+=(int32_t)va; rk_csum[1]+=(int32_t)vb;   /* K7：通道增益用 */
     rk_csum[2]+=(int32_t)vc; rk_csum[3]+=(int32_t)v0; rk_cn++;
 }
@@ -370,8 +379,19 @@ void rk_compute(void)
     for (uint8_t st = 1u; st <= 6u; st++) {
         uint32_t sum = 0u; uint8_t n = 0u;
         for (uint8_t o = 0; o < 4u; o++) {
-            int16_t a = rk_min[st][o], b = rk_max[st][o];
-            uint16_t pp = (b > a) ? (uint16_t)(b - a) : 0u;
+            /* 幅值 ∝ sqrt(var)，var = E[x²] − E[x]²（x = dv>>2）*/
+            uint16_t pp = 0u;
+            if (rk_n[st][o] >= 32u) {
+                int32_t n2 = (int32_t)rk_n[st][o];
+                int32_t mean = rk_sum[st][o] / n2;
+                int32_t var  = (int32_t)(rk_sq[st][o] / (uint32_t)n2) - mean * mean;
+                if (var > 0) {
+                    /* 整数 sqrt（牛顿迭代，够用）*/
+                    uint32_t r = (uint32_t)var, x = r, y = (x + 1u) / 2u;
+                    while (y < x) { x = y; y = (x + r / x) / 2u; }
+                    pp = (uint16_t)x;
+                }
+            }
             rk_pp[st][o] = pp;
             if (pp > 0u) { sum += pp; n++; }
         }

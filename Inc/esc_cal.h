@@ -129,6 +129,7 @@ extern volatile int16_t  ch_gain[4];
 extern volatile int16_t  rk_k[5];   /* rank 因子 rank1..4 ×1000 */
 extern volatile int32_t  rk_csum[4];
 extern volatile uint32_t rk_cn;
+extern volatile uint32_t rk_sq[7][4];
 void rk_reset(void);
 void rk_sample(uint8_t st, uint8_t order, int16_t dv, uint16_t va, uint16_t vb, uint16_t vc, uint16_t v0);
 void rk_compute(void);
