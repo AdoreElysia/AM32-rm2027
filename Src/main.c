@@ -3768,11 +3768,16 @@ void tenKhzRoutine()
             extern volatile uint8_t cal_run;
             extern volatile uint8_t adc_order_auto;
             extern volatile uint8_t adc_order_pending;
-            if (cal_run == 1u) {                        /* 请求：自己起转 */
-                if (!running) { startMotor(); }
+            if (cal_run == 1u) {                        /* 请求：等正常状态机自己起步 */
                 adc_order_auto = 1u;
                 cal_run = 2u;
-            } else if (cal_run == 2u && !running) {     /* 自己停了（到点/过流/失锁）*/
+            } else if (cal_run == 2u) {
+                /* ★ 点火：正常路径的起步在"输入处理"段里（靠 DShot 触发），自驱绕过了它
+                 *   ⇒ 这里替它调一次 startMotor()。油门/解锁已由输入层虚拟油门保证，
+                 *   复位也不再触发 ⇒ 点了火就能被正常状态机接手。 */
+                if (!running) { startMotor(); }
+                if (running) { cal_run = 3u; }
+            } else if (cal_run == 3u && !running) {     /* 转起来后又停了（到点/过流/失锁）*/
                 adc_order_auto = 0u;                    /* ★ 必须还原：判据不许吃轮转序 */
                 adc_order_pending = 0u;
                 cal_run = 0u;                           /* PC 侧看到 0 = 本轮跑完 */
@@ -4511,19 +4516,22 @@ e_com_time = ((commutation_intervals[0] + commutation_intervals[1] + commutation
      }
 #endif
 #endif
-        /* ★★ K4：自驱动校准跑期间把【油门刻度】钉在台架值（替代 DShot 给油）★★
-         *   为什么必须钉：startMotor() 只是"点火"，之后靠 input 持续供油；
-         *   没有 DShot 时 input==0 ⇒ 节流状态机立刻 running=0
-         *   （实测 poke cal_run=1 后 300ms 就退回 0、ol_startup_arm 也归 0）。
-         *   ⚠ 这里只钉【油门】，绝不动任何保护：
-         *     过流(OL_TRIP_CURRENT / 台架 RM2027_BENCH_OC_LIMIT)、失速、
-         *     到点(OL_RUN_LIMIT=8s)、失锁 —— 全部照旧能停机。 */
+        /* ★★ K4：台架【虚拟油门】——在输入层注入，下游状态机一行都不用改 ★★
+         *   为什么必须在这一层：自驱跳过了 DShot，而"信号存在"是整条链的前提 ——
+         *   没有 DShot 时 input 恒 0（到不了 input>47 的起步条件），
+         *   且 signaltimeout 必然超时 ⇒ 每 ~2s 触发"掉信号复位"(NVIC_SystemReset)
+         *   ⇒ 自驱刚起来就被清掉（实测：ol_ci_cur 回初值、ol_stop_site=0 = 被复位）。
+         *   所以这里只假装"我一直在给油、信号一直在"，让【解锁/起步/保护原样跑】。
+         *   ⚠ 不绕过任何保护：过流、失速、到点(OL_RUN_LIMIT=8s)、失锁、掉信号 全部照旧。 */
         {
-            extern volatile uint8_t  cal_run;
-            extern volatile uint16_t ol_input_tgt;
-            if (cal_run == 2u) {
-                input          = (ol_input_tgt >= 48u) ? ol_input_tgt : 350u;
-                adjusted_input = input;
+            extern volatile uint8_t cal_run;
+            if (cal_run == 2u || cal_run == 3u) {
+                input         = 350;      /* 台架已验证刻度（与 OL_INPUT_START 同级）*/
+                newinput      = 350;      /* ★ 必须一起钉！olStartupTick() 判"收油门即停"
+                                           *   用的是【原始油门 newinput】（main.c:1332），
+                                           *   只钉 input ⇒ 起步链第一个 tick 就 allOff。 */
+                armed         = 1;        /* 虚拟解锁 */
+                signaltimeout = 0;        /* 虚拟"信号一直在" ⇒ 不触发上锁/复位 */
             }
         }
 if(zero_crosses < 5){
