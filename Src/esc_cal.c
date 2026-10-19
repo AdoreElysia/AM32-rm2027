@@ -2,7 +2,8 @@
 #include <string.h>
 #include <stddef.h>
 #include "eeprom.h"
-#include "main.h"    /* ★ K2a-3：要用 TIM1 寄存器（BDTR.MOE）与 LL_TIM_EnableAllOutputs */
+#include "main.h"
+#include "targets.h"   /* K6：要用 RM2027_SG_NUM / RM2027_SO_OFF 做初值 */    /* ★ K2a-3：要用 TIM1 寄存器（BDTR.MOE）与 LL_TIM_EnableAllOutputs */
 
 esc_cal_t        esc_cal;
 volatile uint8_t esc_cal_state = 0;
@@ -285,6 +286,17 @@ void esc_cal_poll(void)
  *     依据：order0 下 悬空相 A/B/C 分别在 rank1/2/3，而参考 V0 恒在 rank4。
  *   ⚠ 这是"增益"；每步残留的"偏置"归六步 offset（RM2027_SO_OFF）单独管 —— 分工不混。
  */
+/* ★★ K6：运行期可改的六步表 ★★
+ *   初值 = 编译期宏（= 现状，能正常跑）；校准跑完后由 rk_compute() 覆盖。
+ *   判据(adc_bemf.c) 读这两个 RAM 表 ⇒ 校准结果立刻生效，不需要重编译。
+ *   ⚠ 增益管 rank 的 3 周期（A最大/B中/C基准）；偏置管每步残留 DC —— 分工不混。 */
+volatile int16_t  cal_sg[7] = RM2027_SG_NUM;
+volatile int16_t  cal_so[7] = RM2027_SO_OFF;
+volatile int16_t  rk_so[7];
+volatile int32_t  rk_sum[7][4];
+volatile uint16_t rk_n[7][4];
+volatile uint8_t  cal_tables_ready = 0;
+
 volatile int16_t  rk_min[7][4];
 volatile int16_t  rk_max[7][4];
 volatile uint16_t rk_pp[7][4];
@@ -298,6 +310,7 @@ void rk_reset(void)
         rk_gain[s] = 1000u;
         for (uint8_t o = 0; o < 4u; o++) {
             rk_min[s][o] = 32767; rk_max[s][o] = -32768; rk_pp[s][o] = 0u;
+            rk_sum[s][o] = 0; rk_n[s][o] = 0u;
         }
     }
     rk_done = 0;
@@ -316,6 +329,7 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv)
     uint8_t o = (uint8_t)(order & 3u);
     if (dv < rk_min[st][o]) { rk_min[st][o] = dv; }
     if (dv > rk_max[st][o]) { rk_max[st][o] = dv; }
+    rk_sum[st][o] += (int32_t)dv; rk_n[st][o]++;   /* K6：偏置用（按 order 分开存）*/
 }
 
 /* order o 下，步 st 的悬空相占哪个 rank（1..4）*/
@@ -370,5 +384,22 @@ void rk_compute(void)
         uint32_t g = graw[st] * 1000u / gmin;         /* 归一：最小 = 1000 */
         rk_gain[st] = (g > 65535u) ? 65535u : (uint16_t)g;
     }
+    /* ★ K6 第二步：用【已改好的增益】把数据归一，再算每步偏置
+     *   so[s] = −mean(d_raw|order0) × rk_gain[s]/1000
+     *   （order0 才是运行序；均值里的 rank 效应已被 rk_gain 除掉）*/
+    for (uint8_t st = 1u; st <= 6u; st++) {
+        int32_t so = 0;
+        if (rk_n[st][0] > 0u) {
+            int32_t m = rk_sum[st][0] / (int32_t)rk_n[st][0];
+            so = -(int32_t)(((int32_t)m * (int32_t)rk_gain[st]) / 1000);
+            if (so >  4095) { so =  4095; }
+            if (so < -4095) { so = -4095; }
+        }
+        rk_so[st] = (int16_t)so;
+        cal_sg[st] = (int16_t)rk_gain[st];      /* ★ 生效：增益 */
+        cal_so[st] = (int16_t)so;               /* ★ 生效：偏置 */
+    }
+    cal_sg[0] = 0; cal_so[0] = 0;
+    cal_tables_ready = 1u;
     rk_done = 1u;
 }

@@ -180,12 +180,14 @@ int16_t adc_bemf_get_delta(void)
      *   表与推导见 Inc/targets.h 的 RM2027_STEP_GAINOFF。只改【判据用的 d】，
      *   窗口载荷仍记原始 va/vb/vc/v0 ⇒ 日志语义不变、离线可用同一张表复算。*/
     {
-        static const int16_t sg[7] = RM2027_SG_NUM;
-        static const int16_t so[7] = RM2027_SO_OFF;
+        /* ★ K6：改成读【运行期 RAM 表】——初值仍是编译期宏（行为不变），
+         *   校准跑完后由 rk_compute() 覆盖 ⇒ 校准结果无需重编译就生效。 */
+        extern volatile int16_t cal_sg[7];
+        extern volatile int16_t cal_so[7];
         uint8_t _s = (uint8_t)step;      /* step 已在 comparator.h 里声明为 char */
         int16_t _d = (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0);
         if (_s >= 1u && _s <= 6u) {
-            _d = (int16_t)(((int32_t)_d * sg[_s]) / 1000) + so[_s];
+            _d = (int16_t)(((int32_t)_d * cal_sg[_s]) / 1000) + cal_so[_s];
         }
         return _d;
     }

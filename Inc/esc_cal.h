@@ -117,6 +117,13 @@ extern volatile uint16_t cal_trip[4];  /* K4: newinput<48 停机路径现场 */
 extern volatile uint16_t rk_pp[7][4];
 extern volatile uint16_t rk_gain[7];
 extern volatile uint8_t  rk_arm, rk_done;
+/* ★ K6：运行期六步表（初值=编译期宏；校准完由 rk_compute 覆盖）*/
+extern volatile int16_t  cal_sg[7];
+extern volatile int16_t  cal_so[7];
+extern volatile int16_t  rk_so[7];
+extern volatile int32_t  rk_sum[7][4];
+extern volatile uint16_t rk_n[7][4];
+extern volatile uint8_t  cal_tables_ready;
 void rk_reset(void);
 void rk_sample(uint8_t st, uint8_t order, int16_t dv);
 void rk_compute(void);
