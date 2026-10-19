@@ -299,6 +299,11 @@ volatile uint16_t rk_n[7][4];
 volatile uint8_t  cal_tables_ready = 0;
 /* ★ 1=把算出的表应用到判据；0=保持编译期宏（= V2.9 行为）。默认 0 更安全。*/
 volatile uint8_t  cal_apply = 0;
+/* ★ K15：按需触发计算。为什么需要：电机卡顿时 running 反复通断，
+ *   ol_run_ticks 被反复清零 ⇒ OL_RUN_LIMIT 永远到不了 ⇒ 状态机的 3→0 不收尾
+ *   ⇒ rk_compute() 永远不跑（实测 f_cnt 都满了、fit_ready 还是 0）。
+ *   PC 侧 poke 本变量为 1 即可立刻算一次。*/
+volatile uint8_t  cal_compute_req = 0;
 
 /* ★★ K12：按 V2.9 口径在【rank 修正后】的数据上重拟合 ★★
  *   V2.9 的做法：每步中段直线拟合 → 外推到步两端 e0_s/e1_s
@@ -312,6 +317,11 @@ volatile int32_t  fit_n[7];
 volatile int64_t  fit_t[7], fit_tt[7], fit_td[7];
 volatile int32_t  fit_d[7];
 volatile int16_t  fit_g[7], fit_o[7];     /* 重拟合出来的增益/偏置（诊断+候选）*/
+volatile int32_t  fit_A[7], fit_M[7];     /* 拟合出的幅值 A_s / 中点 M_s（诊断真值）*/
+/* ★ K13：单次换相步的长度统计（拟合把"每步实例"混在一起算，A=e1−e0 必须用
+ *   【单实例长度】而不是总样本数 —— 否则幅值被放大几十倍，fit_A 会撞到上万码）*/
+volatile int32_t  fit_Lsum[7];
+volatile uint16_t fit_Lcnt[7];
 volatile uint8_t  fit_ready = 0;
 static   uint16_t fit_tc = 0;             /* 当前步内序号 */
 
@@ -327,6 +337,57 @@ volatile int32_t  rk_csum[4];          /* 通道读数和（A,B,C,V0）*/
 volatile uint32_t rk_cn;
 
 static uint8_t rk_rank_of(uint8_t st, uint8_t o);   /* K12: 前置声明 */
+
+/* ★★ K14：单实例 + 中段裁剪 + MAD 剔除（学 V2.9 的 u∈[0.15,0.95]，并补上抗离群）★★
+ *   为什么必须按实例：跨实例把几百条斜坡混在一起拟合，实例间的整体漂移会把斜率稀释
+ *   （实测 fit_A 只有 49 码，真实幅值是几百码）。
+ *   为什么必须裁两端：换相后第 1 点有 ±200~600 码尖峰（仓库实测记录），末尾靠近下次换相也有振铃。
+ *   为什么要 MAD：只裁两端挡不住偶发尖峰，一个 ±600 就能把均值拉歪。
+ */
+#define RK_INST_MAX  96
+static int16_t inst_buf[RK_INST_MAX];
+static uint8_t inst_n  = 0;
+static uint8_t inst_st = 0;
+volatile int32_t  fA_sum[7], fM_sum[7];
+volatile uint16_t f_cnt[7];
+
+static void rk_inst_close(void)
+{
+    uint8_t n = inst_n; uint8_t st = inst_st;
+    inst_n = 0;
+    if (st < 1u || st > 6u || n < 12u) { return; }
+    uint8_t i0 = (uint8_t)((uint16_t)n * 15u / 100u);
+    uint8_t i1 = (uint8_t)((uint16_t)n * 95u / 100u);
+    if (i1 <= i0 + 3u) { return; }
+    uint8_t m = (uint8_t)(i1 - i0);
+    int16_t tmp[RK_INST_MAX];
+    uint8_t i, j;
+    for (i = 0; i < m; i++) { tmp[i] = inst_buf[i0 + i]; }
+    for (i = 1; i < m; i++) { int16_t v = tmp[i]; j = i; while (j > 0u && tmp[j-1] > v) { tmp[j] = tmp[j-1]; j--; } tmp[j] = v; }
+    int16_t med = tmp[m / 2u];
+    int16_t dev[RK_INST_MAX];
+    for (i = 0; i < m; i++) { int16_t x = (int16_t)(inst_buf[i0+i] - med); dev[i] = (x < 0) ? (int16_t)(-x) : x; }
+    for (i = 1; i < m; i++) { int16_t v = dev[i]; j = i; while (j > 0u && dev[j-1] > v) { dev[j] = dev[j-1]; j--; } dev[j] = v; }
+    int16_t mad = dev[m / 2u];
+    int16_t thr = (int16_t)(mad * 3);
+    if (thr < 8) { thr = 8; }
+    uint8_t a = (uint8_t)(m / 3u), b = (uint8_t)(m - m / 3u);
+    int32_t s1 = 0, s3 = 0; uint8_t c1 = 0, c3 = 0;
+    for (i = 0; i < m; i++) {
+        int16_t x = inst_buf[i0 + i];
+        int16_t dv2 = (int16_t)(x - med); if (dv2 < 0) { dv2 = (int16_t)(-dv2); }
+        if (dv2 > thr) { continue; }
+        if (i < a)          { s1 += x; c1++; }
+        else if (i >= b)    { s3 += x; c3++; }
+    }
+    if (c1 && c3) {
+        int32_t A = s3 / (int32_t)c3 - s1 / (int32_t)c1;
+        if (A < 0) { A = -A; }
+        fA_sum[st] += A;
+        fM_sum[st] += med;
+        if (f_cnt[st] < 60000u) { f_cnt[st]++; }
+    }
+}
 volatile int16_t  rk_min[7][4];
 volatile int16_t  rk_max[7][4];
 volatile uint16_t rk_pp[7][4];
@@ -345,7 +406,8 @@ void rk_reset(void)
     }
     rk_done = 0;
     rk_csum[0]=rk_csum[1]=rk_csum[2]=rk_csum[3]=0; rk_cn=0;
-    for (uint8_t i=0;i<7u;i++){ fit_n[i]=0; fit_t[i]=0; fit_tt[i]=0; fit_td[i]=0; fit_d[i]=0; fit_g[i]=0; fit_o[i]=0; }
+    for (uint8_t i=0;i<7u;i++){ fit_n[i]=0; fit_t[i]=0; fit_tt[i]=0; fit_td[i]=0; fit_d[i]=0; fit_g[i]=0; fit_o[i]=0; fit_Lsum[i]=0; fit_Lcnt[i]=0; fA_sum[i]=0; fM_sum[i]=0; f_cnt[i]=0; }
+    inst_n=0; inst_st=0;
     fit_tc = 0; fit_ready = 0;
     for (uint8_t i=0;i<4u;i++) ch_gain[i]=1000;
 }
@@ -367,6 +429,10 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv,
             extern volatile uint8_t adc_order, adc_order_pending;
             adc_order_pending = (uint8_t)((adc_order + 1u) & 3u);
         }
+        if (last_st >= 1u && last_st <= 6u && fit_tc > 0u) {   /* K13：记下上一实例的长度 */
+            fit_Lsum[last_st] += (int32_t)fit_tc;
+            if (fit_Lcnt[last_st] < 60000u) { fit_Lcnt[last_st]++; }
+        }
         last_st = st; skip = RK_SKIP_AFTER_COMM;
         fit_tc  = 0;   /* K12：步内序号从 0 开始 */
     }
@@ -385,18 +451,21 @@ void rk_sample(uint8_t st, uint8_t order, int16_t dv,
     }
     rk_csum[0]+=(int32_t)va; rk_csum[1]+=(int32_t)vb;   /* K7：通道增益用 */
     rk_csum[2]+=(int32_t)vc; rk_csum[3]+=(int32_t)v0; rk_cn++;
-    /* ★ K12：按 rank 修正后做最小二乘（t = 步内序号）*/
-    {
-        uint8_t r = rk_rank_of(st, o);
-        int32_t kr = (r >= 1u && r <= 4u && rk_k[r] > 0) ? (int32_t)rk_k[r] : 1000;
-        int32_t dc = (int32_t)(((int64_t)dv * 1000) / kr);   /* 抠掉槽位差 */
-        int64_t t  = (int64_t)fit_tc;
-        fit_n[st]++;
-        fit_t[st]  += t;
-        fit_tt[st] += t * t;
-        fit_d[st]  += dc;
-        fit_td[st] += t * (int64_t)dc;
-        fit_tc++;
+    /* ★ K14：单实例收集（rank 修正后），实例结束时按"中段 15%~95% + MAD 剔除 + 中位"处理 */
+    {   extern volatile uint8_t ol_startup_arm;
+        if (ol_startup_arm == 0u) { return; }      /* 只取开环段 */
+        if (st != inst_st) {                       /* 上一实例结束 ⇒ 收尾 */
+            rk_inst_close();
+            inst_st = st; inst_n = 0;
+        }
+        if (inst_n < RK_INST_MAX) {
+            uint8_t r = rk_rank_of(st, o);
+            int32_t kr = (r >= 1u && r <= 4u && rk_k[r] > 0) ? (int32_t)rk_k[r] : 1000;
+            int32_t dc = (int32_t)(((int64_t)dv * 1000) / kr);
+            if (dc >  32000) { dc =  32000; }
+            if (dc < -32000) { dc = -32000; }
+            inst_buf[inst_n++] = (int16_t)dc;
+        }
     }
 }
 
@@ -531,17 +600,11 @@ void rk_compute(void)
             int32_t As[7] = {0}, Ms[7] = {0};
             int32_t sumA = 0; uint8_t nA = 0;
             for (uint8_t st = 1u; st <= 6u; st++) {
-                int32_t n = fit_n[st];
-                if (n < 32) { continue; }
-                int64_t den = (int64_t)n * fit_tt[st] - fit_t[st] * fit_t[st];
-                if (den == 0) { continue; }
-                int64_t num = (int64_t)n * fit_td[st] - fit_t[st] * (int64_t)fit_d[st];
-                int32_t ksl = (int32_t)(num / den);
-                int32_t b   = (int32_t)(((int64_t)fit_d[st] - (int64_t)ksl * fit_t[st]) / (int64_t)n);
-                int32_t e0  = b;
-                int32_t e1  = b + ksl * (n - 1);
-                int32_t A   = e1 - e0; if (A < 0) { A = -A; }
-                As[st] = A; Ms[st] = (e0 + e1) / 2;
+                if (f_cnt[st] == 0u) { continue; }
+                int32_t A = fA_sum[st] / (int32_t)f_cnt[st];   /* 实例级 A 的平均 */
+                int32_t M = fM_sum[st] / (int32_t)f_cnt[st];   /* 实例级中位的平均 */
+                As[st] = A; Ms[st] = M;
+                fit_A[st] = A; fit_M[st] = M;                  /* 诊断真值 */
                 if (A > 0) { sumA += A; nA++; }
             }
             if (nA > 0u) {

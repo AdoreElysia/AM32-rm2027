@@ -3787,8 +3787,11 @@ void tenKhzRoutine()
          *     · 跑完/异常停机后必须把 adc_order_auto 还原为 0 —— 判据不能吃轮转序。 */
         {
             extern volatile uint8_t cal_run;
+            extern volatile uint8_t cal_compute_req;
+            extern void rk_compute(void);
             extern volatile uint8_t adc_order_auto;
             extern volatile uint8_t adc_order_pending;
+            if (cal_compute_req) { cal_compute_req = 0u; rk_compute(); }   /* ★ K15 按需计算 */
             if (cal_run == 1u) {                        /* 请求：等正常状态机自己起步 */
                 { extern void rk_reset(void); extern volatile uint8_t rk_arm;
                   rk_reset(); rk_arm = 1u; }           /* ★ K5：开始累计 rank 增益 */
