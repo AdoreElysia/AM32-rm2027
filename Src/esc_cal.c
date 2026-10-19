@@ -89,6 +89,10 @@ static   uint16_t cal_ccr4_save = 0;   /* 校准前 TIM1->CCR4 的值，结束�
 volatile uint16_t cal_rank[3][4][2][4] = {{{{0}}}};  /* [sel][order][0=低/1=高][VA,VB,VC,V0] */
 volatile uint8_t  cal_rank_prog = 0;   /* 进度：已完成的驻留期数(0..24) */
 volatile uint8_t  cal_run       = 0;   /* K4 自驱动校准跑：0空闲/1请求/2跑中 */
+/* ★ K4 调试面包屑：跑中→停 的那一刻把现场录下来（事后读，避免 SWD 采样不到毫秒级）
+ *   [0]newinput [1]input [2]armed [3]signaltimeout [4]ol_startup_stage
+ *   [5]ol_startup_arm [6]duty_cycle [7]actual_current  */
+volatile uint16_t cal_dbg[8] = {0};
 static const uint8_t rk_step[3] = { 1u, 2u, 3u };
 static   uint8_t  rk_sel = 0;
 static   uint8_t  rk_ord = 0;

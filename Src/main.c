@@ -3778,6 +3778,13 @@ void tenKhzRoutine()
                 if (!running) { startMotor(); }
                 if (running) { cal_run = 3u; }
             } else if (cal_run == 3u && !running) {     /* 转起来后又停了（到点/过流/失锁）*/
+                {   /* ★ 面包屑：把停机现场录下来，看是谁把它关掉的
+                     *   （这些都是本文件的全局，直接用，别加 extern —— 类型/限定符会对不上）*/
+                    extern volatile uint16_t cal_dbg[8];
+                    cal_dbg[0]=newinput; cal_dbg[1]=input; cal_dbg[2]=armed;
+                    cal_dbg[3]=signaltimeout; cal_dbg[4]=ol_startup_stage;
+                    cal_dbg[5]=ol_startup_arm; cal_dbg[6]=duty_cycle; cal_dbg[7]=actual_current;
+                }
                 adc_order_auto = 0u;                    /* ★ 必须还原：判据不许吃轮转序 */
                 adc_order_pending = 0u;
                 cal_run = 0u;                           /* PC 侧看到 0 = 本轮跑完 */
@@ -3995,7 +4002,15 @@ void tenKhzRoutine()
         signaltimeout = 0;
     }
 #else
-    signaltimeout++;
+    /* ★★ K4：自驱动校准跑期间【冻结"信号超时"计时器】—— 这就是"DShot 依赖"的解耦点 ★★
+     *   为什么必须在这里：signaltimeout 由本函数（20kHz 中断）无条件累加，
+     *   而"掉信号"处理在超过 0.5s 时做 armed=0 / input=0 / allOff()。
+     *   自驱没有 DShot ⇒ 主循环里压 0 没用（ISR 每 50µs 又加 1）
+     *   ⇒ 0.5 秒后起步链自我关闭（实测：点火后 ~20-40ms 就掉，且无 ol_stop_site
+     *     记录 —— 它不是"保护停机"，是"掉信号"）。
+     *   ⚠ 只冻结这一个计时器：过流/失速/到点(OL_RUN_LIMIT)/失锁 全部照旧有效。 */
+    { extern volatile uint8_t cal_run;
+      if (cal_run == 0u) { signaltimeout++; } else { signaltimeout = 0; } }
 
 #endif
 }

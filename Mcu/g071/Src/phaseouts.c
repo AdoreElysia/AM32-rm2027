@@ -288,8 +288,10 @@ void phaseALOW()
 
 void allOff()
 {
-    { extern volatile uint8_t cal_mode;
-      if (cal_mode != 0u) { return; } }   /* ★ 校准期间不抢门极 */
+    { extern volatile uint8_t cal_mode; extern volatile uint8_t cal_run;
+      /* ★ 校准/自驱期间不抢门极：cal_mode = 静态校准；cal_run = 台架自驱动跑。
+       *   两者都是"固件自己要占着门极"，必须一起让路（K4 加）。 */
+      if (cal_mode != 0u || cal_run != 0u) { return; } }
     phaseAFLOAT();
     phaseBFLOAT();
     phaseCFLOAT();

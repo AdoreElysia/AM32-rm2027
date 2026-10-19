@@ -107,3 +107,4 @@ extern volatile uint8_t  cal_rank_prog;        /* 进度：已完成的驻留期
  *   并打开 adc_order_auto 让 order 逐电周期轮转（窗口包自带 order 标记）。
  *   停机（到点/过流/失锁）后自动还原 adc_order_auto=0 并回到 0。 */
 extern volatile uint8_t  cal_run;
+extern volatile uint16_t cal_dbg[8];   /* K4 停机现场面包屑 */
