@@ -4335,7 +4335,12 @@ void processDshot()
         return;
     }
     { extern volatile uint16_t bench_ol;
-      if (bench_ol != 0u) { newinput = bench_ol; input = bench_ol; armed = 1; signaltimeout = 0; } }
+      if (bench_ol != 0u) {
+          newinput = bench_ol; input = bench_ol; armed = 1; signaltimeout = 0;
+          /* ★ V4：强制开环链（不靠 startMotor 门限）*/
+          if (running == 0u) { running = 1u; }
+          { extern volatile uint8_t ol_startup_arm; if (ol_startup_arm == 0u) { ol_startup_arm = 1u; } }
+      } }
     setInput();
 }
 

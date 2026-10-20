@@ -75,11 +75,15 @@
  *   例：1700、1650、1600、1550 ... 每 1 拍都有效（1700 处约 0.06% 分辨率）。
  *   默认仍从 XIEN_OL_STEP_DIV*100 来；运行时 poke32 ol_ci_tgt <ticks> 可改。 */
 /* V4_PROP_TARGETS：带桨 3S、20%油门≈7000RPM：ci=408拍（换相 4900Hz）、input=414 */
+#ifndef XIEN_OL_INPUT_START
+#define XIEN_OL_INPUT_START  600u   /* ★ V/f 起点提高（原 400），保证带桨能起转 */
+#endif
+
 #ifndef XIEN_OL_CI_TGT
-#define XIEN_OL_CI_TGT    408UL
+#define XIEN_OL_CI_TGT    272UL   /* ★ 3S 20% 油门 ≈ 10500 机械RPM：73.5k eRPM ⇒ 7350Hz ⇒ ci=272拍 */
 #endif
 #ifndef XIEN_OL_INPUT_TGT
-#define XIEN_OL_INPUT_TGT  414u
+#define XIEN_OL_INPUT_TGT  900u   /* ★ 带桨启动需要更大电压：V/f 目标 900（duty≈853）*/   /* ★ 20% 油门 对应 duty≈550 ⇒ input=597 */
 #endif
 
 #ifndef XIEN_OL_CI_TGT
@@ -2696,10 +2700,10 @@
  *   RM2027_OL_RUN_MS      ：交棒前先【纯开环】跑多久（毫秒）。0 = 斜坡跑完立刻交棒。
  *   RM2027_NEVER_HANDOVER ：1 = 永不交棒（纯开环调试）。
  *   改这两个数字 ⇒ 重编译 ⇒ 烧录，即可控制"何时切闭环"。 */
-#define RM2027_OL_RUN_MS        8000   /* V4：校准阶段强制 8s（不受 CAL_BUILD 影响）*/
+#define RM2027_OL_RUN_MS        6000   /* V4：校准阶段强制 8s（不受 CAL_BUILD 影响）*/
 #ifndef RM2027_OL_RUN_MS
 #if RM2027_CAL_BUILD
-#define RM2027_OL_RUN_MS        8000   /* 校准：开环拉长到 8s 多采数据 */
+#define RM2027_OL_RUN_MS        6000   /* 校准：开环拉长到 8s 多采数据 */
 #else
 #define RM2027_OL_RUN_MS        3000   /* 正常：3s（原值）*/
 #endif
