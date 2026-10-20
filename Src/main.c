@@ -4536,6 +4536,10 @@ int main(void)
     loadEEpromSettings();
     /* ★ 2026-10-20：正确流程——上电验证 flash 里的校准（esc_cal_state==1）就直接用
      *   esc_cal.sg / esc_cal.so（含 fit_o 偏差）；只有 flash 无效时才用烘焙常量兜底。 */
+    /* ★★ V4：假定 rank 增益不随工作点变化 —— 统一用 V2 的 rank4 */
+    eepromBuffer.motor_kv = eepromBuffer.motor_kv;   /* no-op, 保持原样 */
+    esc_cal.ch_g[0] = 664;  esc_cal.ch_g[1] = 904;
+    esc_cal.ch_g[2] = 1135; esc_cal.ch_g[3] = 1346;   /* V4_FIXED_RANK */
     { extern volatile uint8_t esc_cal_state; extern void v2_apply(void);
       if (esc_cal_state != 1u) { v2_apply(); } }
 #endif
