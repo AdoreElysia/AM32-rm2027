@@ -2502,10 +2502,15 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
         q[ 6]=(uint8_t)( v0 & 0xFF); q[ 7]=(uint8_t)((v0>>8)&0xFF);
         /* ★ 奇偶帧交替：偶数帧 q[8..9]=电流，奇数帧 q[8..9]=占空比(duty 本值)；step bit3 标记 */
         {
-            uint16_t cu_or_duty = (uint16_t)(((i & 1u) != 0u) ? duty_cycle : cu);
-            q[ 8]=(uint8_t)( cu_or_duty & 0xFF); q[ 9]=(uint8_t)((cu_or_duty>>8)&0xFF);
+            uint16_t v16;
+            uint8_t  kind = (uint8_t)(i & 3u);
+            if (kind == 0u)      { v16 = (uint16_t)cu; }             /* 电流 */
+            else if (kind == 1u) { v16 = (uint16_t)duty_cycle; }     /* 占空比本值 */
+            else if (kind == 2u) { v16 = (uint16_t)zero_crosses; }   /* 累计过零数 */
+            else                 { v16 = (uint16_t)e_rpm; }          /* 转速 */
+            q[ 8]=(uint8_t)( v16 & 0xFF); q[ 9]=(uint8_t)((v16>>8)&0xFF);
         }
-        q[10]=(uint8_t)((st & 0x07u) | ((i & 1u) << 3) | ((adc_frame_order & 0x03u) << 6));
+        q[10]=(uint8_t)((st & 0x07u) | ((i & 3u) << 3) | ((adc_frame_order & 0x03u) << 6));
         q[11]=(uint8_t)((((input >> 4) & 0x7Fu) << 1) | (old_routine ? 1u : 0u));   /* dbg: bit7..1=油门/16, bit0=old_routine */
     }
     {

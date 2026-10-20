@@ -176,20 +176,22 @@ def frames_to_arrays(pkt):
     va = vb = vc = v0 = cur = step = dbg = None
     if np is None or not pkt:
         return None
-    va, vb, vc, v0, cur, duty, step, dbg = [], [], [], [], [], [], [], []
+    va, vb, vc, v0, cur, duty, zc, erpm, step, dbg = [], [], [], [], [], [], [], [], [], []
     for p in pkt:
         a = np.frombuffer(p['pay'], dtype=np.uint8).reshape(-1, FRAME)
         def i16(c):
             return (a[:, c].astype(np.int16) | (a[:, c + 1].astype(np.int16) << 8))
         va.append(i16(0)); vb.append(i16(2)); vc.append(i16(4)); v0.append(i16(6))
         raw_cu = (a[:, 8].astype(int) | (a[:, 9].astype(int) << 8))
-        is_duty = ((a[:, 10] >> 3) & 1).astype(int)
-        cur.append(np.where(is_duty == 0, raw_cu, 0))
-        duty.append(np.where(is_duty == 1, raw_cu, 0))
+        kind = ((a[:, 10] >> 3) & 3).astype(int)
+        cur.append(np.where(kind == 0, raw_cu, 0))
+        duty.append(np.where(kind == 1, raw_cu, 0))
+        zc.append(np.where(kind == 2, raw_cu, 0))
+        erpm.append(np.where(kind == 3, raw_cu, 0))
         step.append(a[:, 10]); dbg.append(a[:, 11])
     cat = lambda L: np.concatenate(L)
     return dict(va=cat(va), vb=cat(vb), vc=cat(vc), v0=cat(v0),
-                cur=cat(cur), duty=cat(duty), step=cat(step), dbg=cat(dbg),
+                cur=cat(cur), duty=cat(duty), zc=cat(zc), erpm=cat(erpm), step=cat(step), dbg=cat(dbg),
                 win_seq=np.array([p['seq'] for p in pkt], dtype=np.uint16),
                 win_ts=np.array([p['ts'] for p in pkt], dtype=np.uint32))
 
