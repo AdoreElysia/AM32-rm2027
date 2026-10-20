@@ -2500,9 +2500,13 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
         q[ 2]=(uint8_t)( vb & 0xFF); q[ 3]=(uint8_t)((vb>>8)&0xFF);
         q[ 4]=(uint8_t)( vc & 0xFF); q[ 5]=(uint8_t)((vc>>8)&0xFF);
         q[ 6]=(uint8_t)( v0 & 0xFF); q[ 7]=(uint8_t)((v0>>8)&0xFF);
-        q[ 8]=(uint8_t)( cu & 0xFF); q[ 9]=(uint8_t)((cu>>8)&0xFF);
-        q[10]=(uint8_t)((st & 0x07u) | (((duty_cycle >> 9) & 0x07u) << 3) | ((adc_frame_order & 0x03u) << 6));   /* bit3..5: duty/512 粗值 */
-        q[11]=(uint8_t)((((input >> 4) & 0x7Fu) << 1) | (old_routine ? 1u : 0u));   /* ★ dbg: bit7..1=油门/16, bit0=old_routine(1=开环/无闭环) */
+        /* ★ 奇偶帧交替：偶数帧 q[8..9]=电流，奇数帧 q[8..9]=占空比(duty 本值)；step bit3 标记 */
+        {
+            uint16_t cu_or_duty = (uint16_t)(((i & 1u) != 0u) ? duty_cycle : cu);
+            q[ 8]=(uint8_t)( cu_or_duty & 0xFF); q[ 9]=(uint8_t)((cu_or_duty>>8)&0xFF);
+        }
+        q[10]=(uint8_t)((st & 0x07u) | ((i & 1u) << 3) | ((adc_frame_order & 0x03u) << 6));
+        q[11]=(uint8_t)((((input >> 4) & 0x7Fu) << 1) | (old_routine ? 1u : 0u));   /* dbg: bit7..1=油门/16, bit0=old_routine */
     }
     {
         static uint8_t last_st = 0;
