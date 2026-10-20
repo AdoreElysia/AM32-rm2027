@@ -753,7 +753,7 @@ void dbg_two_save(uint8_t which, const volatile int16_t *rank4, const volatile i
  *   order0 固定（adc_order_auto=0）⇒ 每步悬空相的槽位固定，rank 因子可以提前乘进去。 */
 static const int16_t V2_RANK[5] = { 0, 664, 904, 1135, 1346 };
 static const int16_t V2_FG[7]   = { 0, 1016, 1052, 923, 1333, 857, 937 };
-static const int16_t V2_FO[7]   = { 0, 0, 0, 0, 0, 0, 0 };   /* 514851736389 offsetFf0865e77ecf9a8cFf1aoffset 4f1a79fb8fc796f670b9Ff09*/
+static const int16_t V2_FO[7]   = { 0, -7, 0, -20, -2, -25, -18 };   /* ★ V2 flash 里的 fit_o（上次烘焙时漏掉了）*/   /* 514851736389 offsetFf0865e77ecf9a8cFf1aoffset 4f1a79fb8fc796f670b9Ff09*/
 
 void v2_apply(void)
 {
