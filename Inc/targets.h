@@ -10,6 +10,11 @@
 /* ★ 2026-10-20 速度环：0=关（油门直接给占空比，正常电调行为）；1=开（油门映射目标转速） */
 #define RM2027_USE_SPEED_LOOP  0
 
+/* ★ 2026-10-21：补上分压比，否则 battery_voltage 公式乘 0 恒为 0V（12.3V/1387 码 ⇒ 110）*/
+#ifndef VOLTAGE_DIVIDER
+#define VOLTAGE_DIVIDER 110
+#endif
+
 #ifndef RM2027_CAL_BUILD
 #define RM2027_CAL_BUILD       0
 #endif
@@ -2627,12 +2632,6 @@
 
 #ifdef RM2027_ESC_G071
 #define FILE_NAME "RM2027_ESC_G071"
-/* ★ 2026-10-21 修：原来全工程没有 VOLTAGE_DIVIDER 的定义（只有 TARGET_VOLTAGE_DIVIDER）
- *   ⇒ battery_voltage 的公式乘 0，恒为 0V。按实测：12.3V 时 ADC 原始 1387
- *   → 分压比 ≈ 11 ⇒ VOLTAGE_DIVIDER = 110。 */
-#ifndef VOLTAGE_DIVIDER
-#define VOLTAGE_DIVIDER 110
-#endif
 
 /* ★★ 强制开环 + DShot 仅解锁（台架调试模式）
  *   目的：把【换相编排 + 门极/驱动链】与【无感过零判据】解耦，单独验证前者。
