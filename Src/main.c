@@ -4597,7 +4597,8 @@ int main(void)
         throttle_max_at_low_rpm = 1000;
         eepromBuffer.bi_direction = 1;
         eepromBuffer.use_sine_start = 0;
-        low_rpm_throttle_limit = 1;
+        low_rpm_throttle_limit = 0;   /* V4：台架关闭（原 1），避免 11k eRPM 被当作低转速限死 */
+        throttle_max_at_low_rpm = 2000;
         eepromBuffer.variable_pwm = 0;
         eepromBuffer.brake_on_zero_throttle = 0;
         eepromBuffer.comp_pwm = 0;
