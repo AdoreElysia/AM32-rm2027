@@ -11,6 +11,10 @@ RAW = '/tmp/esc_branch_raw.bin'
 OUT = os.path.join(REPO, 'firmware'); os.makedirs(OUT, exist_ok=True)
 
 def main():
+    br = os.environ.get('ESC_BRANCH', 'xien/v3-normal-esc')
+    cm = os.environ.get('ESC_COMMIT', '')
+    print(f"== 分支脚本：{br} @ {cm} ==", flush=True)
+    print("== 烧录后自动运行：串口常发 + 按油门分段（不占 J-Link）==", flush=True)
     secs = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
     try: os.unlink(RAW)
     except OSError: pass
