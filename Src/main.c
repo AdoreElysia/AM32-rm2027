@@ -404,7 +404,7 @@ char crawler_mode = 0; // no longer used //
 uint16_t velocity_count = 0;
 uint16_t velocity_count_threshold = 75;
 
-char low_rpm_throttle_limit = 1;
+char low_rpm_throttle_limit = 0;   /* ★ 2026-10-20 台架关闭低转速占空比限制（low_rpm_level=20k 会把 duty 夹在 ~300 ⇒ 转速死锁） */
 
 uint16_t low_voltage_count = 0;
 uint16_t telem_ms_count;
