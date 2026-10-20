@@ -125,6 +125,7 @@ extern volatile int32_t  rk_sum[7][4];
 extern volatile uint16_t rk_n[7][4];
 extern volatile uint8_t  cal_tables_ready;
 extern volatile uint8_t  cal_apply;
+void cal_sg_guard(void);   /* cal_sg 越界 ⇒ 回落编译期表（硬保险）*/
 extern volatile uint8_t  cal_compute_req;   /* 1=立刻算一次 rk_compute()（不等跑结束）*/
 /* ★ K12：按 V2.9 口径在 rank 修正后的数据上重拟合的结果 */
 extern volatile int16_t  fit_g[7], fit_o[7];

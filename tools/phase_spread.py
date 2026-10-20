@@ -27,6 +27,8 @@ def main():
     ap.add_argument('npz')
     ap.add_argument('--drop', type=int, default=3)
     ap.add_argument('--minlen', type=int, default=40)
+    ap.add_argument('--steady', action='store_true',
+                    help='只取"步长稳定"的窗（剔除对齐/斜坡/停转段）')
     a = ap.parse_args()
 
     d = np.load(a.npz)
@@ -35,6 +37,28 @@ def main():
     V = {'A': d['va'].astype(float), 'B': d['vb'].astype(float), 'C': d['vc'].astype(float)}
     v0 = d['v0'].astype(float)
     cur = d['cur'].astype(float) if 'cur' in d else None
+
+    # ---- --steady：先用"窗内换相间隔"筛出稳态窗 ----
+    W = 512
+    nw = len(st) // W
+    if a.steady and nw >= 3:
+        M = s[:nw * W].reshape(nw, W)
+        meds_iv, keep_w = [], []
+        for r in range(nw):
+            ch = np.where(np.diff(M[r]) != 0)[0] + 1
+            if len(ch) < 4:
+                continue
+            iv = np.diff(ch)
+            meds_iv.append((r, float(np.median(iv)), float(iv.std())))
+        if meds_iv:
+            allmed = float(np.median([x[1] for x in meds_iv]))
+            keep_w = [r for r, m, sd in meds_iv
+                      if abs(m - allmed) <= 0.10 * allmed and sd <= 0.35 * allmed]
+            mask = np.zeros(len(s), bool)
+            for r in keep_w:
+                mask[r * W:(r + 1) * W] = True
+            s = np.where(mask, s, 0)          # 非稳态窗的 step 置 0 ⇒ 后续自然跳过
+            print(f'[steady] 窗 {nw} → 保留 {len(keep_w)}（全局中位间隔 {allmed:.1f}）')
 
     per = {}
     for stp in range(1, 7):

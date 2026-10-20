@@ -663,3 +663,21 @@ void rk_compute(void)
     }
     rk_done = 1u;
 }
+
+/* ★★★ 2026-10-20 硬保险：cal_sg 永远不许出现越界值 ★★★
+ *   事故：flash 加载路径把一张【全 0】的表当有效表应用 ⇒ cal_sg 全 0
+ *   ⇒ 判据 d ≡ 0 ⇒ 认不到过零 ⇒ 永不交棒 ⇒ 一直开环（油门不改变转速）。
+ *   这里做最后一道闸：只要有一个值不在 [700,3500]，整张表回落到编译期宏。
+ *   调用点：开机加载之后、rk_compute 应用之后、以及主循环里（便宜，7 次比较）。
+ */
+void cal_sg_guard(void)
+{
+    static const int16_t dflt[7] = RM2027_SG_NUM;
+    for (uint8_t i = 1u; i <= 6u; i++) {
+        if (cal_sg[i] < 700 || cal_sg[i] > 3500) {
+            for (uint8_t j = 0; j < 7u; j++) { cal_sg[j] = dflt[j]; cal_so[j] = 0; }
+            cal_tables_ready = 0u;
+            return;
+        }
+    }
+}

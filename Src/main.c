@@ -2253,6 +2253,48 @@ void    uart_tx_dma(uint8_t *p, uint16_t len)
     uart_tx_submit(p, len, UART_KIND_TELEM);
 }
 
+/* ★★★ 2026-10-20 文本遥测：直接打"油门 / 转速 / 母线电压 / 母线电流" ★★★
+ *   为什么要它：调参时最想知道的就是这四个量，窗口流(proto2)是给离线波形分析用的，
+ *   不方便一眼看数。打开后【窗口流自动让路】（两者抢同一个 UART）。
+ *   格式：一行一行，921600，约 20Hz：
+ *     THR=400 RPM=123456 VBUS=11600 IBUS=1500
+ *       THR  = 解码后的油门 0..2047（= input）
+ *       RPM  = 电转速 erpm（e_rpm 的单位是 100 erpm）
+ *       VBUS = 母线电压 mV（battery_voltage 的单位是 10mV）
+ *       IBUS = 母线电流 mA（actual_current 的单位是 10mA）
+ *   关掉：poke telem_text_en 0
+ */
+volatile uint8_t telem_text_en = 1u;
+static char     telem_text_buf[72];
+static uint32_t telem_text_last = 0u;
+
+static char *tt_u2s(char *q, uint32_t v)
+{
+    char t[12]; uint8_t n = 0u;
+    if (v == 0u) { *q++ = '0'; return q; }
+    while (v) { t[n++] = (char)('0' + (v % 10u)); v /= 10u; }
+    while (n) { *q++ = t[--n]; }
+    return q;
+}
+static char *tt_str(char *q, const char *s) { while (*s) { *q++ = *s++; } return q; }
+
+static void telem_text_pump(void)
+{
+    if (telem_text_en == 0u) { return; }
+    if (!tx_ready()) { return; }
+    /* 20Hz（按 24kHz 帧计数，不受主循环快慢影响）*/
+    if ((uint32_t)(adc_frame_total - telem_text_last) < (24u * 50u)) { return; }
+    telem_text_last = adc_frame_total;
+
+    char *q = telem_text_buf;
+    q = tt_str(q, "THR=");  q = tt_u2s(q, (uint32_t)input);
+    q = tt_str(q, " RPM="); q = tt_u2s(q, (uint32_t)e_rpm * 100u);
+    q = tt_str(q, " VBUS=");q = tt_u2s(q, (uint32_t)battery_voltage * 10u);
+    q = tt_str(q, " IBUS=");q = tt_u2s(q, (uint32_t)((int32_t)actual_current * 10));
+    *q++ = '\r'; *q++ = '\n';
+    uart_tx_submit((uint8_t *)telem_text_buf, (uint16_t)(q - telem_text_buf), UART_KIND_TELEM);
+}
+
 /* CRC8（poly 0x07, init 0）：上行命令帧与换相事件帧共用 */
 static uint8_t evt_crc8(const uint8_t *p, uint8_t n)
 {
@@ -2471,6 +2513,8 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
  *   win_every_n=2 也拿不到全速率采样。*/
 void win_pump(void)
 {
+    { extern volatile uint8_t telem_text_en;
+      if (telem_text_en != 0u) { return; } }   /* 文本遥测优先，窗口流让路 */
     /* (1) 排空上行命令队列（一个收窗内 PC 可连发 SET+ACK）*/
     {
         uint8_t got = 0;
@@ -3791,6 +3835,8 @@ void tenKhzRoutine()
         olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
         { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
         { extern void win_pump(void); win_pump(); }    /* ★ 窗口式全速采样 */
+        { extern void telem_text_pump(void); telem_text_pump(); }   /* ★ 文本遥测 20Hz */
+        { extern void cal_sg_guard(void); cal_sg_guard(); }        /* ★ cal_sg 越界硬保险 */
         esc_cal_poll();   /* ★ K2a 静态 ADC 校准状态机 */
         /* ★★ K4：自驱动校准跑（不依赖 F1 给油）★★
          *   用户要求："单独接电池+烧录线，烧录运行一下就能校准好"。
@@ -3853,6 +3899,43 @@ void tenKhzRoutine()
                 }
             }
 #endif
+            /* ★★ K18：自动对齐工作点（用户要求）★★
+             *   问题：开环按固定 ol_ci_tgt 硬踹，而电机在某油门下的自然转速是另一回事
+             *        （实测 ci=1700 ⇒ 11765 eRPM，但 400 油门闭环只有 9300 eRPM ⇒ 差 26%）
+             *        ⇒ 交棒瞬间相位/负载角突跳，瞬态被采进校准数据 ⇒ 只对某个油门合适。
+             *   做法：cal_run=4 ⇒ 先正常起步、交棒、闭环跑 2 秒取 e_rpm 平均
+             *        ⇒ ci_tgt = 20,000,000 / eRPM（1 拍 = 0.5µs，6 步一电周期）
+             *        ⇒ 写回 ol_ci_tgt ⇒ 停机 ⇒ 自动转 cal_run=1 跑校准。
+             */
+            if (cal_run == 4u) {
+                static uint32_t rt_t0 = 0;
+                static uint32_t rt_sum = 0;
+                static uint16_t rt_n = 0;
+                extern volatile uint32_t ol_ci_tgt;
+                if (!running) { startMotor(); }
+                if (running && ol_startup_arm == 0u) {          /* 已在闭环 */
+                    if (rt_t0 == 0u) { rt_t0 = adc_frame_total; rt_sum = 0u; rt_n = 0u; }
+                    if ((uint32_t)(adc_frame_total - rt_t0) > 48000u) {   /* 2 秒 */
+                        uint32_t avg = rt_n ? (rt_sum / (uint32_t)rt_n) : 0u;
+                        uint32_t ci;
+                        if (avg < 50u)   { avg = 50u; }          /* 500 eRPM 下限 */
+                        ci = 20000000UL / avg;
+                        if (ci < 200u)   { ci = 200u; }
+                        if (ci > 20000u) { ci = 20000u; }
+                        ol_ci_tgt = ci;
+                        cal_run = 0u;                            /* 先清零，allOff 才真关断 */
+                        allOff();
+                        running = 0;
+                        rt_t0 = 0u; rt_sum = 0u; rt_n = 0u;
+                        cal_run = 1u;                            /* → 用新 ci 自动跑校准 */
+                    } else {
+                        rt_sum += (uint32_t)e_rpm;
+                        if (rt_n < 60000u) { rt_n++; }
+                    }
+                } else if (rt_t0 != 0u) {
+                    rt_t0 = 0u; rt_sum = 0u; rt_n = 0u;          /* 回到开环 ⇒ 重新等交棒 */
+                }
+            }
             if (cal_run == 1u) {                        /* 请求：等正常状态机自己起步 */
                 { extern void rk_reset(void); extern volatile uint8_t rk_arm;
                   rk_reset(); rk_arm = 1u; }           /* ★ K5：开始累计 rank 增益 */
