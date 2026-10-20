@@ -10,6 +10,9 @@
 /* ★ 2026-10-20 速度环：0=关（油门直接给占空比，正常电调行为）；1=开（油门映射目标转速） */
 #define RM2027_USE_SPEED_LOOP  0
 
+/* ★ V4：当前测试工作点（开环函数用）*/
+#define RM2027_V4_DUTY  400
+
 #ifndef RM2027_CAL_BUILD
 #define RM2027_CAL_BUILD       0
 #endif

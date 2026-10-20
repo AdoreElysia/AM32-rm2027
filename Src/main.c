@@ -1344,7 +1344,12 @@ __attribute__((unused)) static void olStartupTick(void)
      *   newinput=0 而 cal_run=3，即"自驱中被别的写入者清掉了油门"。
      *   ⚠ 只钉油门；过流/失速/到点/失锁保护全不动。 */
     {   extern volatile uint8_t cal_run;
-        if (cal_run != 0u) { newinput = 350; input = 350; }
+        if (cal_run != 0u) {
+            newinput = 350; input = 350;
+            /* ★ V4：开环工作点随测试 duty（频率+电压都对齐该 duty）*/
+            ol_ci_tgt    = (uint32_t)(2924u - (335u * (uint32_t)RM2027_V4_DUTY) / 100u);
+            ol_input_tgt = (uint16_t)(RM2027_V4_DUTY + 47u);
+        }
     }
     if (newinput < 48) {
         {   /* ★ K4 追踪：这条路径不写 ol_stop_site，必须单独打点 */
