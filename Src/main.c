@@ -4564,7 +4564,7 @@ int main(void)
     esc_cal.ch_g[0] = 664;  esc_cal.ch_g[1] = 904;
     esc_cal.ch_g[2] = 1135; esc_cal.ch_g[3] = 1346;   /* V4_FIXED_RANK */
     { extern volatile uint8_t esc_cal_state; extern void v2_apply(void);
-      if (esc_cal_state != 1u) { v2_apply(); } }
+      (void)esc_cal_state; v2_apply(); }   /* ★ V4：强制应用最新标定常量 */
 #endif
 
     /* ★★ 上电就把六路门极显式关成"断开(coast)" —— 别依赖引脚的上电默认状态 ★★
