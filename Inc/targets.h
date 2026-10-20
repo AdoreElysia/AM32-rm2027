@@ -4,6 +4,12 @@
  *   ⚠ 事故教训：这些调试值我曾以"打开"状态提交，导致"一上电自己转、永远不进闭环、
  *     电机抖" —— 用户当场发现。以后所有实验性开关一律默认关。
  */
+/* 校准分支：三段式开环 */
+#define RM2027_OL_MODE  1
+
+/* 校准分支：速度环开 */
+#define RM2027_USE_SPEED_LOOP  1
+
 #ifndef RM2027_CAL_BUILD
 #define RM2027_CAL_BUILD       0
 #endif
