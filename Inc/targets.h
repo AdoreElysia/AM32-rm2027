@@ -65,7 +65,7 @@
 /* ★ 连续升频参数：按 test-12 原样 554 Hz/s；启动链保持原样。
  *   运行时可经 SWD 再调：tools/esc-dbg.sh poke16 ol_freq_slope 400/300。 */
 #ifndef XIEN_OL_FREQ_SLOPE
-#define XIEN_OL_FREQ_SLOPE 1500
+#define XIEN_OL_FREQ_SLOPE 4000   /* V4Ff1a659c5761 1500->4000 Hz/sFf0c400Hz21924900Hz 7ea6 1.1s 52304f4d */
 #endif
 /* ★ 开环总时长上限（ms）：按 test-12 原样 8s；8/10 不影响本次试验。 */
 #ifndef XIEN_OL_RUN_MS
