@@ -1330,7 +1330,7 @@ void ol_meas_cross(uint16_t cnt)
 }
 
 /* 由主循环每轮调用（与 olStepTick 同层）。返回时若已交棒，ol_startup_arm 已清 0。 */
-static void olStartupTick(void)
+__attribute__((unused)) static void olStartupTick(void)
 {
     if (!OL_STARTUP_ACTIVE() || !running) {
         return;

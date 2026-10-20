@@ -5,7 +5,7 @@
  *     电机抖" —— 用户当场发现。以后所有实验性开关一律默认关。
  */
 /* ★ 2026-10-20 开环引擎选择：1=三段式(校准)；0=原生 AM32 */
-#define RM2027_OL_MODE  1
+#define RM2027_OL_MODE  0
 
 #ifndef RM2027_CAL_BUILD
 #define RM2027_CAL_BUILD       0
