@@ -3792,6 +3792,45 @@ void tenKhzRoutine()
             extern volatile uint8_t adc_order_auto;
             extern volatile uint8_t adc_order_pending;
             if (cal_compute_req) { cal_compute_req = 0u; rk_compute(); }   /* ★ K15 按需计算 */
+            /* ★★ K17：交棒进闭环 ⇒ 必须【停掉 order 轮转】★★
+             *   轮转是 rank 校准用的（开环段采数据需要），但闭环判据【不能吃轮转序】：
+             *   项目 n3e 结论原话"闭环判据不能这样交替（会注入交替偏移）"。
+             *   实测现象：交棒后 order 仍在转 ⇒ 每圈采样槽位不同 ⇒ 过零时刻逐圈跳变
+             *   ⇒ 电机明显抖动。ol_startup_arm 由 1 变 0 就是交棒时刻。 */
+            {
+                extern volatile uint8_t ol_startup_arm;
+                if (cal_run != 0u && ol_startup_arm == 0u) {
+                    adc_order_auto    = 0u;
+                    adc_order_pending = 0u;
+                }
+            }
+#if RM2027_CAL_AUTO
+            /* ★★ K16：烧录/上电后【自动跑一轮校准】，跑完自己停，等下次烧录 ★★ */
+            {
+                static uint8_t  auto_started = 0;
+                static uint32_t auto_t0      = 0;
+                extern volatile uint32_t adc_frame_total;
+                if (!auto_started && cal_run == 0u) {          /* 只在开机后触发一次 */
+                    auto_started = 1u;
+                    auto_t0 = adc_frame_total;
+#if RM2027_CAL_AUTO_APPLY
+                    { extern volatile uint8_t cal_apply; cal_apply = 1u; }
+#endif
+                    cal_run = 1u;                              /* 启动自驱校准 */
+                } else if (cal_run != 0u &&
+                           (uint32_t)(adc_frame_total - auto_t0) > (uint32_t)(RM2027_CAL_AUTO_MS * 24u)) {
+                    /* 硬超时：不管电机状态如何，强制收尾 + 计算 + 停机 */
+                    extern void allOff(void);
+                    cal_run = 0u;                /* 先清标志，allOff 才会真的关断 */
+                    adc_order_auto = 0u;
+                    adc_order_pending = 0u;
+                    allOff();
+                    running = 0;
+                    rk_compute();
+                    auto_started = 1u;           /* 已完成，不再重启 */
+                }
+            }
+#endif
             if (cal_run == 1u) {                        /* 请求：等正常状态机自己起步 */
                 { extern void rk_reset(void); extern volatile uint8_t rk_arm;
                   rk_reset(); rk_arm = 1u; }           /* ★ K5：开始累计 rank 增益 */

@@ -1,3 +1,13 @@
+/* ★★★ 2026-10-19【总开关】校准构建 vs 正常电调 ★★★（必须在文件最前，后面多处依赖）
+ *   0 = 正常电调（默认）：不自动跑、正常交棒进闭环、CL_RUN_MS=6000、OL_RUN_LIMIT=8s
+ *   1 = 校准固件：自动跑一次 + 纯开环(不交棒) + 长采样 + 闭环只跑 2.5s(仅验证)
+ *   ⚠ 事故教训：这些调试值我曾以"打开"状态提交，导致"一上电自己转、永远不进闭环、
+ *     电机抖" —— 用户当场发现。以后所有实验性开关一律默认关。
+ */
+#ifndef RM2027_CAL_BUILD
+#define RM2027_CAL_BUILD       0
+#endif
+
 
 
 /*
@@ -2670,7 +2680,11 @@
  *   RM2027_NEVER_HANDOVER ：1 = 永不交棒（纯开环调试）。
  *   改这两个数字 ⇒ 重编译 ⇒ 烧录，即可控制"何时切闭环"。 */
 #ifndef RM2027_OL_RUN_MS
-#define RM2027_OL_RUN_MS        3000
+#if RM2027_CAL_BUILD
+#define RM2027_OL_RUN_MS        8000   /* 校准：开环拉长到 8s 多采数据 */
+#else
+#define RM2027_OL_RUN_MS        3000   /* 正常：3s（原值）*/
+#endif
 #endif
 /* ★★ 2026-10-14 窗口流【降采样】（用户方案）★★
  *   问题：窗口包 12+512*12 = 6156 B / 21.3ms ⇒ 需要 ~289 KB/s，而 1Mbaud 串口只有 ~125 KB/s
@@ -2693,11 +2707,9 @@
 #endif
 
 #ifndef RM2027_NEVER_HANDOVER
-#if XIEN_OL_SCAN_MODE
-#define RM2027_NEVER_HANDOVER   1
-#else
-#define RM2027_NEVER_HANDOVER   0
-#endif
+/* 校准构建才强制纯开环（实测交棒由 ol_verify_ok 触发，OL_RUN_MS 只是超时上限）。
+ * ⚠ 绝不能默认 1：那样电机永远不进闭环、只能开环硬踹 ⇒ 抖。 */
+#define RM2027_NEVER_HANDOVER   RM2027_CAL_BUILD
 #endif  /* 20kHz 拍：1000 = 50ms 持续才切（躲瞬时尖峰）*/
 
 /* ★★ 2026-10-12 闭环自动停机（用户要求："不只是脚本停，固件自己跑完也要停"）★★
@@ -2713,7 +2725,11 @@
  *   原因：6000ms 的闭环自动收油会被误当成"卡顿"（实测 ol_stop_reason=1 就是这个闸）。
  *   对比参数优劣时需要一段【连续稳态】，故临时放长；过流/失速/开环 8s 三道闸都不动。
  *   对比做完建议改回 6000（或按最终需求定）。 */
-#define RM2027_CL_RUN_MS        20000    /* ★ 2026-10-13 6000→3000→1500：
+#if RM2027_CAL_BUILD
+#define RM2027_CL_RUN_MS        2500   /* 校准：闭环只做验证 2.5s */
+#else
+#define RM2027_CL_RUN_MS        6000   /* 正常：6s（原值）*/
+#endif    /* ★ 2026-10-13 6000→3000→1500：
                                         *   依据（复测#3 逐窗口分析）—— 补偿类失败在【交棒后 ~50ms】就现形，
                                         *   判定不需要 3 秒。同时砍发热与周期（用户："开环闭环都短一点"）。
                                         *   要判"稳态转速/长期漂移"时临时调回 3000。*/
@@ -3293,7 +3309,31 @@
 #define OL_INPUT_START     400     /* 回归档值（同上）*/
 #endif
 
-#define OL_RUN_LIMIT       240000  /* 运行上限：240000 拍 = 12.0 秒（临时，A/B 用；原 160000=8s）（斜坡本身要 ~3.3s，5s 里只剩
+/* ★★★ 2026-10-19 烧录后自动跑一次校准（用户要求"烧完自己跑、跑完自己停、等下次烧录"）★★★
+ *   RM2027_CAL_AUTO      1 = 上电/烧录后自动启动一轮校准自驱跑（0 = 关闭，恢复正常待命）
+ *   RM2027_CAL_AUTO_MS   硬超时（毫秒）：到点强制收尾并计算，防止电机卡顿导致"永远跑不完"
+ *                        （实测卡顿时 running 反复通断 ⇒ ol_run_ticks 被清零 ⇒ OL_RUN_LIMIT 到不了）
+ *   RM2027_CAL_AUTO_APPLY 1 = 算完立刻应用到判据（cal_apply=1）；0 = 只算不用（安全）
+ *   ⚠ 校准跑会让电机转起来 —— 台架必须拆桨或确认保护措施。
+ */
+
+
+#ifndef RM2027_CAL_AUTO
+#define RM2027_CAL_AUTO        RM2027_CAL_BUILD
+#endif
+#ifndef RM2027_CAL_AUTO_MS
+#define RM2027_CAL_AUTO_MS     15000
+#endif
+#ifndef RM2027_CAL_AUTO_APPLY
+#define RM2027_CAL_AUTO_APPLY  0
+#endif
+
+#if RM2027_CAL_BUILD
+#define OL_RUN_LIMIT       240000  /* 校准：12s */
+#else
+#define OL_RUN_LIMIT       160000  /* 正常：8s（原值）*/
+#endif
+/* 说明（原注释）：斜坡本身要 ~3.3s，5s 里只剩
                                     * 1.5s 在目标转速；起步失败一次整轮就报废 ⇒ 放宽到 8s）*/
 #define OL_COOL_LIMIT      0       /* 停机后冷却拍数：0 = 不自动重跑（一次只跑一轮）*/
 #define OL_TRIP_CURRENT    800     /* 过流阈值：800 厘安 = 8.0A 相电流（0 = 关闭）*/
