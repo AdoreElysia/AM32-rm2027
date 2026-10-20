@@ -2627,6 +2627,12 @@
 
 #ifdef RM2027_ESC_G071
 #define FILE_NAME "RM2027_ESC_G071"
+/* ★ 2026-10-21 修：原来全工程没有 VOLTAGE_DIVIDER 的定义（只有 TARGET_VOLTAGE_DIVIDER）
+ *   ⇒ battery_voltage 的公式乘 0，恒为 0V。按实测：12.3V 时 ADC 原始 1387
+ *   → 分压比 ≈ 11 ⇒ VOLTAGE_DIVIDER = 110。 */
+#ifndef VOLTAGE_DIVIDER
+#define VOLTAGE_DIVIDER 110
+#endif
 
 /* ★★ 强制开环 + DShot 仅解锁（台架调试模式）
  *   目的：把【换相编排 + 门极/驱动链】与【无感过零判据】解耦，单独验证前者。
