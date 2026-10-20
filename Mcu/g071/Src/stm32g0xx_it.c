@@ -430,8 +430,11 @@ void DMA1_Channel2_3_IRQHandler(void)
                 int16_t zd = adc_bemf_get_delta();
                 int16_t a1 = (zd > zp1) ? (int16_t)(zd - zp1) : (int16_t)(zp1 - zd);
                 int16_t a2 = (zp1 > zp2) ? (int16_t)(zp1 - zp2) : (int16_t)(zp2 - zp1);
-                uint8_t up = (zp2 < zp1) && (zp1 < zd) && (zp1 <= 0) && (zd > 0);
-                uint8_t dn = (zp2 > zp1) && (zp1 > zd) && (zp1 >= 0) && (zd < 0);
+                /* ★ 2026-10-20 第二修：严格单调会被噪声（±3~5 码）打断 ⇒ 高转速下拒真过零。
+                 *   改成「容差单调 + 净变化量下限」：允许逐点小回头（≤4 码），
+                 *   但两点净变化必须≥8 码（真过零的斜率远大于噪声）。 */
+                uint8_t up = (zp2 <= zp1 + 4) && (zp1 <= zd + 4) && (zp1 <= 0) && (zd > 0) && (((int32_t)zd - zp2) > 8);
+                uint8_t dn = (zp2 >= zp1 - 4) && (zp1 >= zd - 4) && (zp1 >= 0) && (zd < 0) && (((int32_t)zp2 - zd) > 8);
                 if ((up || dn) && a1 < 150 && a2 < 150) {
                     edge_rise = 1;      /* 判据与方向无关（沿用原语义）*/
                 }
