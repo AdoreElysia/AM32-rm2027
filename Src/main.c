@@ -3110,14 +3110,18 @@ void startMotor()
      *   注意此间 old_routine 置 1 是【故意】的语义："不要走中断闭环换相"；
      *   但主循环那条 22.5ms 超时兜底必须让开（见其调用处加的条件），
      *   否则两套时基会打架。 */
-    old_routine = 1;
+#if RM2027_OL_MODE
+    old_routine = 1;          /* 三段式：开环期间不走中断闭环换相 */
+#else
+    old_routine = 0;          /* 原生 AM32：过零中断驱动换相 */
+#endif
 #endif
     if (running == 0) {
         commutate();
         commutation_interval = 10000;
         SET_INTERVAL_TIMER_COUNT(5000);
         running = 1;
-#if !RM2027_OL_ARM_ONLY
+#if !RM2027_OL_ARM_ONLY && RM2027_OL_MODE
         /* 进入/重置开环起步链：对齐阶段先钉住门极并计时 */
         ol_startup_arm   = 1;
         ol_startup_stage = OL_STARTUP_ALIGN;
@@ -3141,7 +3145,7 @@ void startMotor()
         maskPhaseInterrupts();
 #endif
     }
-#if RM2027_OL_ARM_ONLY
+#if RM2027_OL_ARM_ONLY || !RM2027_OL_MODE
     enableCompInterrupts();
 #endif
 }
@@ -3851,7 +3855,11 @@ void tenKhzRoutine()
 #if RM2027_OL_ARM_ONLY
         olStepTick(); /* ★ 开环调试：本函数独占换相，上面的 BEMF 轮询换相已关掉 */
 #else
-        olStartupTick(); /* ★ 闭环的开环起步链：对齐 → 斜坡 → 认到过零交棒 */
+#if RM2027_OL_MODE
+        olStartupTick(); /* ★ 三段式开环起步链：对齐 → 斜坡 → 认到过零交棒 */
+#else
+        /* ★ 原生 AM32：开环换相由「比较器过零中断 + 22.5ms 兜底」驱动，本处不调三段式 */
+#endif
         { extern void evt_pump(void); evt_pump(); }   /* ★ 串口事件流：主循环发送 */
         { extern void win_pump(void); win_pump(); }    /* ★ 窗口式全速采样 */
         { extern void telem_text_pump(void); telem_text_pump(); }   /* ★ 文本遥测 20Hz */
