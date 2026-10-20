@@ -4753,7 +4753,7 @@ int main(void)
      *   而 2222RPM 时是 ~400 码 —— 是"转速塌了"，不是"没信号"。
      *   advance_level = 10 ⇒ temp_advance = 0（见 loadEEpromSettings 的换算），
      *   这里直接写 temp_advance 更直白，不受 EEPROM 分支影响。 */
-    temp_advance = 8;   /* ★ 2026-10-20 试验：advance = ci×8/64（相位补偿）*/
+    temp_advance = 30;  /* ★ 2026-10-20 试验：advance = ci×30/64（相位补偿，上限32）*/
     eepromBuffer.advance_level = 10;
     /* ★ 还有一处旁路必须一起关掉：换成 auto_advance 后 advance 用的是
      *   auto_advance_level，而它是 main 循环里按【占空比】算的
