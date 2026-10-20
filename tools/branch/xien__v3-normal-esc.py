@@ -43,7 +43,9 @@ def main():
                                              cwd=REPO, capture_output=True, text=True, timeout=20)
                         # parse 会写 npz；用最近一次 npz 判断油门
                         d = np.load(RAW.replace('.bin','.npz'))
-                        thr = d['dbg'].astype(int) * 8 if 'dbg' in d.files else None
+                        raw = d['dbg'].astype(int) if 'dbg' in d.files else None
+    thr = (raw >> 1) * 16 if raw is not None else None
+    hov = (raw & 1) if raw is not None else None
                         if thr is not None and thr.max() > 0:
                             seen = True
                             # 最近 200 帧全为 0 ⇒ 油门已收，结束
@@ -68,11 +70,13 @@ def main():
         cand = [f for f in os.listdir('/tmp') if f.endswith('.npz')]
         print("  无 npz（解析失败）", flush=True); return
     d = np.load(p)
-    thr = d['dbg'].astype(int) * 8 if 'dbg' in d.files else None
+    raw = d['dbg'].astype(int) if 'dbg' in d.files else None
+    thr = (raw >> 1) * 16 if raw is not None else None
+    hov = (raw & 1) if raw is not None else None
     if thr is None: print("  npz 里没有 dbg 字段", flush=True); return
     s = d['step'].astype(int) & 7
     cur = d['cur'].astype(float)
-    print("\n油门(dbg×8) | 帧数 | 中位电流码 | 换相次数 | 方向(正/反)", flush=True)
+    print("\n油门(~/16) | 帧数 | 开环帧占比 | 中位电流 | 换相次数 | 正/反", flush=True)
     res = {}
     for v in sorted(set(int(x) for x in thr)):
         m = thr == v
@@ -84,7 +88,8 @@ def main():
                 if (ss[i-1] % 6) + 1 == ss[i]: tr += 1
                 elif ss[i-1] == (ss[i] % 6) + 1: rev += 1
         med = int(np.median(cur[m]))
-        print(f"  {v:5d}     | {int(m.sum()):5d} | {med:8d} | {tr:6d} | {tr}/{rev}", flush=True)
+        lo = (hov[m].sum()*100//int(m.sum())) if hov is not None else 0
+        print(f"  {v:5d}    | {int(m.sum()):5d} | {lo:3d}%     | {med:5d} | {tr:6d} | {tr}/{rev}", flush=True)
         res[str(v)] = {'n': int(m.sum()), 'med_cur': med, 'fwd': tr, 'rev': rev}
     json.dump(res, open(os.path.join(OUT,'xien__v3-normal-esc.json'),'w'), ensure_ascii=False, indent=1)
     print("已存 firmware/xien__v3-normal-esc.json", flush=True)

@@ -2502,7 +2502,7 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
         q[ 6]=(uint8_t)( v0 & 0xFF); q[ 7]=(uint8_t)((v0>>8)&0xFF);
         q[ 8]=(uint8_t)( cu & 0xFF); q[ 9]=(uint8_t)((cu>>8)&0xFF);
         q[10]=(uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));
-        q[11]=(uint8_t)(input >> 3);   /* ★ dbg 字节改放「油门/8」：串口数据里就能分段 */
+        q[11]=(uint8_t)((((input >> 4) & 0x7Fu) << 1) | (ol_startup_arm ? 1u : 0u));   /* ★ dbg: bit7..1=油门/16, bit0=交棒标志(1=开环) */
     }
     {
         static uint8_t last_st = 0;
