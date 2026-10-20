@@ -7,6 +7,9 @@
 /* ★ 2026-10-20 开环引擎选择：1=三段式(校准)；0=原生 AM32 */
 #define RM2027_OL_MODE  0
 
+/* ★ 2026-10-20 速度环：0=关（油门直接给占空比，正常电调行为）；1=开（油门映射目标转速） */
+#define RM2027_USE_SPEED_LOOP  0
+
 #ifndef RM2027_CAL_BUILD
 #define RM2027_CAL_BUILD       0
 #endif

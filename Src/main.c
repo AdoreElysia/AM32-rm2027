@@ -4601,7 +4601,7 @@ int main(void)
     newinput = 48;
 		comStep(2);
 #ifdef FIXED_SPEED_MODE
-    use_speed_control_loop = 1;
+    use_speed_control_loop = RM2027_USE_SPEED_LOOP;
     eepromBuffer.use_sine_start = 0;
     target_e_com_time = 60000000 / FIXED_SPEED_MODE_RPM / (eepromBuffer.motor_poles / 2);
     input = 48;
@@ -4637,7 +4637,7 @@ int main(void)
     // checkForHighSignal();     // will reboot if signal line is high for 10ms
     receiveDshotDma();
     if (drive_by_rpm) {
-        use_speed_control_loop = 1;
+        use_speed_control_loop = RM2027_USE_SPEED_LOOP;
     }
 #endif
 
@@ -4717,11 +4717,11 @@ int main(void)
      *     · 台架油门约 400 ⇒ (400-47)/2000 = 17.6% ⇒ 要让工作点落在 1667 机械 RPM
      *       （= 开环的终速，在齿槽门槛 900RPM 之上）：
      *         800 + 0.176 x (5700-800) ≈ 1665 ⇒ 取 MIN=800 / MAX=5700 ✓ */
-    drive_by_rpm = 1;
+    drive_by_rpm = RM2027_USE_SPEED_LOOP;
     /* ★ 注意顺序：main() 里第 3159 行有 `if (drive_by_rpm) use_speed_control_loop = 1;`
      *   而它在本行【之前】执行 ⇒ 只靠 drive_by_rpm 拉不起来 ⇒ 这里再显式置一次，
      *   不依赖执行顺序。 */
-    use_speed_control_loop = 1;
+    use_speed_control_loop = RM2027_USE_SPEED_LOOP;
     MINIMUM_RPM_SPEED_CONTROL  = 800;
     MAXIMUM_RPM_SPEED_CONTROL  = 5700;
     /* ---- 堵直通隐患：temp_comp_pwm 非 0 时 phaseXPWM() 会把低边栅极常开
