@@ -14,7 +14,8 @@ def main():
     secs = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
     try: os.unlink(RAW)
     except OSError: pass
-    sp = subprocess.Popen(['python3','tools/serial-spool.py',RAW], cwd=REPO,
+    env = dict(os.environ); env.setdefault('ESC_BAUD','921600')   # ★ serial-spool 默认 1.5M，固件是 921600
+    sp = subprocess.Popen(['python3','tools/serial-spool.py',RAW], cwd=REPO, env=env,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"采集 {secs:.0f}s（串口 {os.environ.get('ESC_SERIAL','/dev/ttyUSB0')}）… 请手动给油门", flush=True)
     t0 = time.time()
