@@ -117,3 +117,6 @@ def main():
             np.median(ee) if len(ee) else 0, np.median(cc) if len(cc) else 0,
             100-int(ol[m].sum()*100/int(m.sum())), tr))
 
+
+if __name__ == "__main__":
+    main()
