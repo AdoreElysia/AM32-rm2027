@@ -123,6 +123,11 @@ extern volatile int16_t  cal_so[7];
 extern volatile int16_t  rk_so[7];
 extern volatile int32_t  rk_sum[7][4];
 extern volatile uint16_t rk_n[7][4];
+extern volatile int16_t  rank_g[4];   /* ★ 4 个采样顺序增益 ×1000（order0=1.000）*/
+void rank_g_compute(void);
+/* ★ 调试：把两轮产物直接写进校准页空闲区（v1@0x180, v2@0x1C0），供 SWD 回读 */
+void v2_apply(void);   /* ★ 把 V2 标定结果应用到判据（正常电调）*/
+void dbg_two_save(uint8_t which, const volatile int16_t *rank4, const volatile int16_t *fg, const volatile int16_t *fo);
 extern volatile uint8_t  cal_tables_ready;
 extern volatile uint8_t  cal_apply;
 void cal_sg_guard(void);   /* cal_sg 越界 ⇒ 回落编译期表（硬保险）*/

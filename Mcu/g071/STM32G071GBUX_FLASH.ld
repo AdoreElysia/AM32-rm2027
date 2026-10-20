@@ -51,11 +51,16 @@ MEMORY
    *       往 0x20008800 写魔数再读回，一致才算落地。
    *   注：仓库里的 CMSIS 头 stm32g071xx.h 写 SRAM_SIZE_MAX=0x8000(32K)，
    *   那是 G0 系列通用的保守值，不如 ST 针对本型号生成的脚本具体。 */
+  /* ★ 2026-10-20：按真实 128KB 布局重排（原来是 64KB 器件的算法，且忘了减 4KB bootloader）
+   *   · EEPROM/校准页 = 0x0801F800（与 bootloader devinfo 的 0x2b 一致；运行时 eeprom_address 就是它）
+   *   · FILE_NAME = EEPROM-32 = 0x0801F7E0（bootloader 的 ADDRESS_MAGIC_FILE_NAME 就是 EEPROM_START-32）
+   *   · app 可用 = 0x080010C0 ~ 0x0801F7E0 ≈ 121.8KB（原来只有 57.8KB）*/
   RAM          (xrw) : ORIGIN = 0x20000000, LENGTH = 36K
   FLASH_VECTAB  (rx)  : ORIGIN = 0x08001000, LENGTH = 192
-  FLASH         (rx)  : ORIGIN = ORIGIN(FLASH_VECTAB) + LENGTH(FLASH_VECTAB), LENGTH = 62K - 32 - LENGTH(FLASH_VECTAB)
-  EEPROM        (rx)  : ORIGIN = 0x0800F800, LENGTH = 2K
+  EEPROM        (rx)  : ORIGIN = 0x0801F800, LENGTH = 2K
   FILE_NAME     (rx)  : ORIGIN = ORIGIN(EEPROM) - 32, LENGTH = 32
+  FLASH         (rx)  : ORIGIN = ORIGIN(FLASH_VECTAB) + LENGTH(FLASH_VECTAB),
+                        LENGTH = ORIGIN(FILE_NAME) - ORIGIN(FLASH_VECTAB) - LENGTH(FLASH_VECTAB)
 }
 
 /* Sections */

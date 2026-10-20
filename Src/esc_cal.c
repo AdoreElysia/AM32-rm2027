@@ -480,6 +480,53 @@ static uint8_t rk_rank_of(uint8_t st, uint8_t o)
     return t[o & 3u];
 }
 
+/* ★ 2026-10-20 rank_g[4]：4 个采样顺序（ADC order）的增益，用于把 ABC0 电压归一化。
+ *   用开环稳定段按 (step,order) 累加的 rk_sum/rk_n 做秩-1 迭代：m[st][o] ≈ g[o]·t[st]，g[0]=1 基准。
+ *   只统计 rk_n>=32 的格子。 */
+volatile int16_t rank_g[4] = { 1000, 1000, 1000, 1000 };
+
+void rank_g_compute(void)
+{
+    int32_t g[4] = { 256, 256, 256, 256 };   /* Q8：256 = 1.000 */
+    int32_t m[7][4];
+    int32_t t[7];
+    uint8_t ok[7][4];
+    uint8_t st, o, runs;
+    for (st = 1u; st <= 6u; st++) {
+        for (o = 0u; o < 4u; o++) {
+            ok[st][o] = (rk_n[st][o] >= 32u) ? 1u : 0u;
+            m[st][o]  = ok[st][o] ? (rk_sum[st][o] / (int32_t)rk_n[st][o]) : 0;
+        }
+    }
+    for (runs = 0u; runs < 8u; runs++) {
+        for (st = 1u; st <= 6u; st++) {
+            int32_t sum = 0; uint8_t c = 0u;
+            for (o = 0u; o < 4u; o++) {
+                if (!ok[st][o] || g[o] == 0) { continue; }
+                sum += (m[st][o] * 256) / g[o]; c++;
+            }
+            t[st] = c ? (sum / (int32_t)c) : 0;
+        }
+        for (o = 0u; o < 4u; o++) {
+            int32_t sum = 0; uint8_t c = 0u;
+            for (st = 1u; st <= 6u; st++) {
+                int32_t mm, tt, r;
+                if (!ok[st][o] || t[st] == 0) { continue; }
+                mm = m[st][o]; if (mm < 0) { mm = -mm; }
+                tt = t[st];    if (tt < 0) { tt = -tt; }
+                r = (mm * 256) / tt;
+                sum += r; c++;
+            }
+            if (c) { g[o] = sum / (int32_t)c; }
+        }
+        if (g[0] > 0) {
+            for (o = 0u; o < 4u; o++) { g[o] = (g[o] * 256) / g[0]; }
+            g[0] = 256;
+        }
+    }
+    for (o = 0u; o < 4u; o++) { rank_g[o] = (int16_t)((g[o] * 1000) / 256); }
+}
+
 void rk_compute(void)
 {
     uint32_t rsum[5] = {0,0,0,0,0};
@@ -679,5 +726,47 @@ void cal_sg_guard(void)
             cal_tables_ready = 0u;
             return;
         }
+    }
+}
+
+/* ★ 2026-10-20 调试用：把两轮产物写到校准页空闲区（不碰 0x100 的正式校准结构）
+ *   v1 @ +0x180，v2 @ +0x1C0：[0]=0xD1 [1]=which [2..9]=rank4 [10..21]=fit_g [22..33]=fit_o
+ *   在两个停机点调用（电机已停），不会影响换相时序。 */
+void dbg_two_save(uint8_t which, const volatile int16_t *rank4, const volatile int16_t *fg, const volatile int16_t *fo)
+{
+    static uint8_t page[2048];
+    uint16_t off = (which == 1u) ? 0x180u : 0x1C0u;
+    read_flash_bin(page, ESC_CAL_ADDR, (int)sizeof(page));
+    page[off + 0u] = 0xD1u;
+    page[off + 1u] = which;
+    for (uint8_t i = 0u; i < 4u; i++) { page[off + 2u + i*2u] = (uint8_t)((uint16_t)rank4[i] & 0xFFu); page[off + 3u + i*2u] = (uint8_t)(((uint16_t)rank4[i] >> 8) & 0xFFu); }
+    for (uint8_t i = 0u; i < 6u; i++) {
+        page[off + 10u + i*2u] = (uint8_t)((uint16_t)fg[i+1] & 0xFFu); page[off + 11u + i*2u] = (uint8_t)(((uint16_t)fg[i+1] >> 8) & 0xFFu);
+        page[off + 22u + i*2u] = (uint8_t)((uint16_t)fo[i+1] & 0xFFu); page[off + 23u + i*2u] = (uint8_t)(((uint16_t)fo[i+1] >> 8) & 0xFFu);
+    }
+    save_flash_nolib(page, (int)sizeof(page), ESC_CAL_ADDR);
+}
+
+/* ★★ 2026-10-20 V2 标定结果（第二轮：ci=2298、闭环 duty=300）——正常电调直接用 ★★
+ *   用法：cal_sg[st] = rank4[V0槽] / rank4[悬空相在 order0 的槽] × fit_g[st]
+ *            cal_so[st] = fit_o[st]
+ *   order0 固定（adc_order_auto=0）⇒ 每步悬空相的槽位固定，rank 因子可以提前乘进去。 */
+static const int16_t V2_RANK[5] = { 0, 664, 904, 1135, 1346 };
+static const int16_t V2_FG[7]   = { 0, 1016, 1052, 923, 1333, 857, 937 };
+static const int16_t V2_FO[7]   = { 0, 0, 0, 0, 0, 0, 0 };   /* 514851736389 offsetFf0865e77ecf9a8cFf1aoffset 4f1a79fb8fc796f670b9Ff09*/
+
+void v2_apply(void)
+{
+    for (uint8_t st = 1u; st <= 6u; st++) {
+        uint8_t rf = rk_rank_of(st, 0u);
+        int32_t kf = (rf >= 1u && rf <= 4u) ? (int32_t)V2_RANK[rf] : 1000;
+        int32_t g;
+        if (kf == 0) { kf = 1000; }
+        g = (int32_t)((int32_t)V2_RANK[4] * 1000) / kf;   /* rank 修正（V0/悬空相）*/
+        g = g * (int32_t)V2_FG[st] / 1000;                /* × 六步增益 */
+        if (g < 200)  { g = 200; }
+        if (g > 4000) { g = 4000; }
+        cal_sg[st] = (int16_t)g;
+        cal_so[st] = V2_FO[st];
     }
 }

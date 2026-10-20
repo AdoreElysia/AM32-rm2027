@@ -532,7 +532,7 @@ volatile uint8_t  ccm_step[CCM_N];
  *   1 Mbaud 下发一窗 61.6ms @1000 次/s ≈ 62 个事件 ⇒ 每发一窗丢 ~40 个。
  *   4096 B = 83 个事件 ≈ 83ms，覆盖 2 Mbaud 的一次窗口发送（30.8ms）绰绰有余。
  *   ⚠ RAM +3KB（本芯片 16KB，注意 targets.h 里 64KB 宏的坑）。 */
-#define EVT_BUF_N   4096
+#define EVT_BUF_N   512    /* 事件流本分支已关，缓冲 4096->512 省 3.5KB */
 #define EVT_BATCH   200          /* 攒 10 个事件发一次 */
 volatile uint8_t  evt_buf[EVT_BUF_N];
 volatile uint16_t evt_head;
@@ -548,6 +548,16 @@ volatile uint32_t evt_drop;      /* 缓冲满而丢弃的 */
 #endif
 volatile uint8_t  evt_enable = RM2027_EVT_STREAM;
 volatile uint8_t  evt_tx[EVT_BATCH];
+
+/* ★ 2026-10-20 两轮标定产物快照（供 SWD 一次读；v1=第一轮开环稳定段后，v2=第二轮）*/
+volatile int16_t  v1_sg[7], v1_so[7], v1_fg[7], v1_fo[7];
+volatile int16_t  v2_sg[7], v2_so[7], v2_fg[7], v2_fo[7];
+volatile uint16_t v1_rkn[7][4], v2_rkn[7][4];
+volatile int32_t  v1_rks[7][4], v2_rks[7][4];
+volatile int16_t  fin_erpm, fin_duty, fin_cur;
+volatile int16_t  v1_rank_g[4], v2_rank_g[4];
+volatile int16_t  cl_duty_match;   /* ★ 第一次闭环稳态 duty，第二轮开环直接用它 */
+volatile uint8_t  v1_ok, v2_ok, cal_snap_req;
 volatile uint32_t adc_frame_total;   /* 24kHz 总帧数（u32，不会回绕）*/
 
 /* ★ 2026-10-12 延时交棒计时：给编译期宏 RM2027_OL_RUN_MS 用
@@ -2264,7 +2274,9 @@ void    uart_tx_dma(uint8_t *p, uint16_t len)
  *       IBUS = 母线电流 mA（actual_current 的单位是 10mA）
  *   关掉：poke telem_text_en 0
  */
-volatile uint8_t telem_text_en = 1u;
+volatile uint8_t telem_text_en = 0u;
+volatile uint8_t  bench_run = 0u;   /* SWD 台架油门开关 */
+volatile int16_t  bench_thr = 0;    /* SWD 台架油门值 */
 static char     telem_text_buf[72];
 static uint32_t telem_text_last = 0u;
 
@@ -2449,7 +2461,7 @@ static uint16_t __attribute__((unused)) crc16_upd(uint16_t crc, uint8_t b)
 /* ★★★ 2026-10-11 串口【窗口式全速采样】（串口测试分支固化）★★★
  *   窗内：24kHz 全速采 512 帧（≈21.3ms），一帧不抽；窗间：整窗 DMA 发。
  *   proto2 包：magic8 + ver/type/len/seq/ts/n + 512×12B + crc16。 */
-#define WIN_N        512
+#define WIN_N        128   /* 512->128：窗 5.3ms，RAM 省 13.8KB（校准构建够用）*/
 #define WIN_HDR      20
 #define WIN_CRC      2
 #define WIN_TOTAL    (WIN_HDR + WIN_N * 12 + WIN_CRC)
@@ -3747,6 +3759,12 @@ void tenKhzRoutine()
         ol_bench_oc_count = 0;
     }
 #endif
+    /* ★ 2026-10-20 修：DShot 输入下 zero_input_count 原本只在 USE_ADC_INPUT 分支里累加
+     *   ⇒ 解锁条件 zero_input_count>30 永远不成立 ⇒ 油门回零也解不了锁。 */
+    if (dshot) {
+        if (input == 0) { if (zero_input_count < 60000u) { zero_input_count++; } }
+        else            { zero_input_count = 0; }
+    }
     if (!armed) {
         if (cell_count == 0) {
             if (inputSet) {
@@ -3853,6 +3871,13 @@ void tenKhzRoutine()
             extern void rk_compute(void);
             extern volatile uint8_t adc_order_auto;
             extern volatile uint8_t adc_order_pending;
+            /* ★★ 2026-10-20 两轮标定（用户新流程）★
+             *   第一轮：开环跑 → 算参数（cal_run 1→2→3）
+             *   然后：闭环在油门 400 跑 2s 测 e_rpm → 回写 ol_ci_tgt（cal_run=4）
+             *   第二轮：用对齐后的工作点再跑一遍开环 → 算"精确参数"（cal_run 1→2→3）
+             *   cal_pass: 0=第一轮 1=第二轮 */
+            static uint32_t cl_rs = 0u, cl_rn = 0u, pause_t0 = 0u, snap_t0 = 0u;
+            static uint8_t cal_pass = 0u;
             if (cal_compute_req) { cal_compute_req = 0u; rk_compute(); }   /* ★ K15 按需计算 */
             /* ★★ K17：交棒进闭环 ⇒ 必须【停掉 order 轮转】★★
              *   轮转是 rank 校准用的（开环段采数据需要），但闭环判据【不能吃轮转序】：
@@ -3909,31 +3934,40 @@ void tenKhzRoutine()
              */
             if (cal_run == 4u) {
                 static uint32_t rt_t0 = 0;
+                static uint32_t rt_enter = 0;
                 static uint32_t rt_sum = 0;
                 static uint16_t rt_n = 0;
                 extern volatile uint32_t ol_ci_tgt;
-                if (!running) { startMotor(); }
-                if (running && ol_startup_arm == 0u) {          /* 已在闭环 */
-                    if (rt_t0 == 0u) { rt_t0 = adc_frame_total; rt_sum = 0u; rt_n = 0u; }
-                    if ((uint32_t)(adc_frame_total - rt_t0) > 48000u) {   /* 2 秒 */
-                        uint32_t avg = rt_n ? (rt_sum / (uint32_t)rt_n) : 0u;
-                        uint32_t ci;
-                        if (avg < 50u)   { avg = 50u; }          /* 500 eRPM 下限 */
-                        ci = 20000000UL / avg;
-                        if (ci < 200u)   { ci = 200u; }
-                        if (ci > 20000u) { ci = 20000u; }
-                        ol_ci_tgt = ci;
-                        cal_run = 0u;                            /* 先清零，allOff 才真关断 */
-                        allOff();
-                        running = 0;
-                        rt_t0 = 0u; rt_sum = 0u; rt_n = 0u;
-                        cal_run = 1u;                            /* → 用新 ci 自动跑校准 */
-                    } else {
-                        rt_sum += (uint32_t)e_rpm;
-                        if (rt_n < 60000u) { rt_n++; }
+                if (rt_enter == 0u) { rt_enter = adc_frame_total; }
+                if ((uint32_t)(adc_frame_total - rt_enter) > 144000u) {
+                    /* ★ 6s 硬兜底：交棒/闭环没成功也不能一直转 */
+                    allOff(); running = 0;
+                    rt_enter = 0u; rt_t0 = 0u; rt_sum = 0u; rt_n = 0u;
+                    cal_run = 1u;                            /* 跳过对齐，直接第二轮校准 */
+                } else {
+                    if (!running) { startMotor(); }
+                    if (running && ol_startup_arm == 0u) {          /* 已在闭环 */
+                        if (rt_t0 == 0u) { rt_t0 = adc_frame_total; rt_sum = 0u; rt_n = 0u; }
+                        if ((uint32_t)(adc_frame_total - rt_t0) > 48000u) {   /* 2 秒 */
+                            uint32_t avg = rt_n ? (rt_sum / (uint32_t)rt_n) : 0u;
+                            uint32_t ci;
+                            if (avg < 50u)   { avg = 50u; }          /* 500 eRPM 下限 */
+                            ci = 200000UL / avg;   /* avg 单位=100eRPM ⇒ 20e6/(avg*100) */
+                            if (ci < 200u)   { ci = 200u; }
+                            if (ci > 20000u) { ci = 20000u; }
+                            ol_ci_tgt = ci;
+                            cal_run = 0u;                            /* 先清零，allOff 才真关断 */
+                            allOff();
+                            running = 0;
+                            rt_enter = 0u; rt_t0 = 0u; rt_sum = 0u; rt_n = 0u;
+                            cal_run = 1u;                            /* → 用新 ci 跑第二轮校准 */
+                        } else {
+                            rt_sum += (uint32_t)e_rpm;
+                            if (rt_n < 60000u) { rt_n++; }
+                        }
+                    } else if (rt_t0 != 0u) {
+                        rt_t0 = 0u; rt_sum = 0u; rt_n = 0u;          /* 回到开环 ⇒ 重新等交棒 */
                     }
-                } else if (rt_t0 != 0u) {
-                    rt_t0 = 0u; rt_sum = 0u; rt_n = 0u;          /* 回到开环 ⇒ 重新等交棒 */
                 }
             }
             if (cal_run == 1u) {                        /* 请求：等正常状态机自己起步 */
@@ -3959,7 +3993,56 @@ void tenKhzRoutine()
                   rk_arm = 0u; rk_compute(); }         /* ★ K5：跑完在片上算出六步增益 */
                 adc_order_auto = 0u;                    /* ★ 必须还原：判据不许吃轮转序 */
                 adc_order_pending = 0u;
-                cal_run = 0u;                           /* PC 侧看到 0 = 本轮跑完 */
+                /* ★ 2026-10-20 用户流程：S1 开环(5s 算 v1) → 闭环测自然转速 → 停机冷却 2.5s
+                 *   → S2 开环(ci*=对齐值, 油门 400, 5s 算 v2) → 最后闭环 → 收工 */
+                if (cal_pass == 0u) {
+                    uint32_t avg = cl_rn ? (cl_rs / (uint32_t)cl_rn) : 0u;
+                    uint32_t ci;
+                    if (avg < 50u)   { avg = 50u; }
+                    ci = 200000UL / avg;                 /* avg 单位=100eRPM */
+                    if (ci < 200u)   { ci = 200u; }
+                    if (ci > 12000u) { ci = 12000u; }
+                    ol_ci_tgt = ci;                      /* S4：开环频率对齐闭环自然转速 */
+                    fin_erpm  = (int16_t)e_rpm;
+                    cl_duty_match = (int16_t)duty_cycle;
+                    { extern void dbg_two_save(uint8_t, const volatile int16_t*, const volatile int16_t*, const volatile int16_t*);
+                      extern volatile int16_t rk_k[5]; extern volatile int16_t fit_g[7], fit_o[7];
+                      dbg_two_save(1u, (const volatile int16_t*)&rk_k[1], fit_g, fit_o); }   /* v1=第一轮停机时的结果 */   /* S4 开环占空比与闭环一致 */
+                    cal_pass  = 1u;
+                    cal_run   = 5u;                      /* 停机 + 冷却 2.5s */
+                    pause_t0  = adc_frame_total;
+                } else {
+                    fin_erpm = (int16_t)e_rpm;
+                    fin_duty = (int16_t)duty_cycle;
+                    fin_cur  = (int16_t)actual_current;
+                    { extern void dbg_two_save(uint8_t, const volatile int16_t*, const volatile int16_t*, const volatile int16_t*);
+                      extern volatile int16_t rk_k[5]; extern volatile int16_t fit_g[7], fit_o[7];
+                      dbg_two_save(2u, (const volatile int16_t*)&rk_k[1], fit_g, fit_o); }   /* v2=第二轮停机时的结果 */
+                    cal_run  = 0u;                       /* 收工 */
+                }
+                cl_rs = 0u; cl_rn = 0u;
+            }
+            /* ★ S4：停机冷却 2.5s（60000 帧）后进第二轮开环 */
+            if (cal_run == 5u) {
+                if (pause_t0 == 0u) { pause_t0 = adc_frame_total; }
+                if ((uint32_t)(adc_frame_total - pause_t0) > 60000u) {
+                    pause_t0 = 0u;
+                    cal_run  = 1u;
+                }
+            }
+            /* ★ 开环稳定段 5s：ISR 只置请求，真正算参数在主循环里做（不阻塞中断）*/
+            if (cal_run == 3u && snap_t0 == 0u) { snap_t0 = adc_frame_total; }
+            if (cal_snap_req == 0u && snap_t0 != 0u &&
+                ((cal_pass == 0u && v1_ok == 0u) || (cal_pass == 1u && v2_ok == 0u)) &&
+                (uint32_t)(adc_frame_total - snap_t0) >= 90000u) {   /* 6.4s 稳定开环 */
+                { extern volatile uint16_t cal_dbg[8]; cal_dbg[0] = 0x5A01u; }
+                cal_snap_req = (cal_pass == 0u) ? 1u : 2u;
+                snap_t0 = 0u;
+            }
+            /* ★ 闭环段（交棒后）累计 e_rpm：S3 用来算自然转速 */
+            if (cal_run == 3u && running && ol_startup_arm == 0u) {
+                cl_rs += (uint32_t)e_rpm;
+                if (cl_rn < 60000u) { cl_rn++; }
             }
         }
         /* ★ 校准命令（SWD 可写）：1=存默认 2=重载 3=存当前 */
@@ -4426,6 +4509,7 @@ int main(void)
     initCorePeripherals();
     enableCorePeripherals();
     loadEEpromSettings();
+    { extern void v2_apply(void); v2_apply(); }   /* ★ 正常电调：V2 标定结果直接生效 */
 #endif
 
     /* ★★ 上电就把六路门极显式关成"断开(coast)" —— 别依赖引脚的上电默认状态 ★★
@@ -4711,10 +4795,43 @@ e_com_time = ((commutation_intervals[0] + commutation_intervals[1] + commutation
          *   所以这里只假装"我一直在给油、信号一直在"，让【解锁/起步/保护原样跑】。
          *   ⚠ 不绕过任何保护：过流、失速、到点(OL_RUN_LIMIT=8s)、失锁、掉信号 全部照旧。 */
         {
+            /* ★ 2026-10-20：两轮标定的"算参数"放在主循环（ISR 里只置 cal_snap_req），
+             *   避免在 20kHz 中断里跑 rk_compute 造成时序抖动。*/
+            if (cal_snap_req != 0u) {
+                uint8_t w = cal_snap_req; cal_snap_req = 0u;
+                { extern void rk_compute(void);
+                  extern volatile int16_t rk_k[5];
+                  extern volatile int16_t rank_g[4];
+                  for (uint8_t i=0u;i<4u;i++) { rank_g[i] = rk_k[i+1u]; }   /* ★ 现成的 4 个 rank 槽增益 */
+                  if (w == 1u) { for (uint8_t i=0u;i<4u;i++) { v1_rank_g[i]=rank_g[i]; } }
+                  else         { for (uint8_t i=0u;i<4u;i++) { v2_rank_g[i]=rank_g[i]; } }
+                  rk_compute(); }
+                { extern volatile uint16_t cal_dbg[8]; cal_dbg[1] = 0x5A02u; }
+                if (w == 1u) {
+                    for (uint8_t i = 0u; i < 7u; i++) { v1_fg[i]=fit_g[i]; v1_fo[i]=fit_o[i]; }
+                    for (uint8_t sx=0u; sx<7u; sx++) for (uint8_t ox=0u; ox<4u; ox++) { v1_rkn[sx][ox]=rk_n[sx][ox]; v1_rks[sx][ox]=rk_sum[sx][ox]; }
+                    v1_ok = 1u;
+                } else {
+                    for (uint8_t i = 0u; i < 7u; i++) { v2_fg[i]=fit_g[i]; v2_fo[i]=fit_o[i]; }
+                    for (uint8_t sx=0u; sx<7u; sx++) for (uint8_t ox=0u; ox<4u; ox++) { v2_rkn[sx][ox]=rk_n[sx][ox]; v2_rks[sx][ox]=rk_sum[sx][ox]; }
+                    v2_ok = 1u;
+                }
+            }
             extern volatile uint8_t cal_run;
-            if (cal_run == 2u || cal_run == 3u) {
-                input         = 350;      /* 台架已验证刻度（与 OL_INPUT_START 同级）*/
-                newinput      = 350;      /* ★ 必须一起钉！olStartupTick() 判"收油门即停"
+            {
+                extern volatile uint8_t bench_run;
+                extern volatile int16_t bench_thr;
+                if (bench_run != 0u) {
+                    input         = (int16_t)bench_thr;
+                    newinput      = (int16_t)bench_thr;
+                    armed         = 1;
+                    signaltimeout = 0;
+                    if (!running) { startMotor(); }
+                }
+            }
+            if (cal_run != 0u) {   /* ★ 从 cal_run=1 起就置油门：避免 startMotor 第一次跑在 input=0 */
+                input         = (cl_duty_match > 0) ? (int16_t)(cl_duty_match * 115 / 100 + 47) : 400;      /* ★ 统一油门 400：开环段与闭环(400)同工作点 */
+                newinput      = (cl_duty_match > 0) ? (int16_t)(cl_duty_match * 115 / 100 + 47) : 400;      /* ★ 必须一起钉！olStartupTick() 判"收油门即停"
                                            *   用的是【原始油门 newinput】（main.c:1332），
                                            *   只钉 input ⇒ 起步链第一个 tick 就 allOff。 */
                 armed         = 1;        /* 虚拟解锁 */

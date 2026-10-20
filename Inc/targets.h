@@ -3333,7 +3333,7 @@
 #define RM2027_CAL_AUTO        RM2027_CAL_BUILD
 #endif
 #ifndef RM2027_CAL_AUTO_MS
-#define RM2027_CAL_AUTO_MS     15000
+#define RM2027_CAL_AUTO_MS     60000
 #endif
 #ifndef RM2027_CAL_AUTO_APPLY
 #define RM2027_CAL_AUTO_APPLY  RM2027_CAL_BUILD   /* 校准构建：算完即应用；正常构建：0 */

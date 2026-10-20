@@ -29,7 +29,7 @@ OUTD="${RM2027_DATA}"
 FW_DIR="$REPO/firmware"
 BIN="$REPO/obj/AM32_RM2027_ESC_G071_2.21.bin"
 APP_ADDR="0x08001000"
-MAX_SIZE=59392                    # app 区上限（再多就碰 EEPROM）
+MAX_SIZE=124928                    # app 区上限（再多就碰 EEPROM）
 SERIAL="${ESC_SERIAL}"
 ESC_DBG="$REPO/tools/esc-dbg.sh"
 

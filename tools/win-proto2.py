@@ -45,7 +45,7 @@ MAGIC = bytes([0xA5, 0x5A, 0xA5, 0x5A, 0xC3, 0x3C, 0x96, 0x69])
 MAGIC4 = bytes([0xA5, 0x5A, 0xA5, 0x5A])
 HDR = 20
 CRC_LEN = 2
-NOM_FRAMES = 512
+NOM_FRAMES = 128
 FRAME = 12
 
 # ---------------------------------------------------------------- CRC16
