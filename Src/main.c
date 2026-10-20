@@ -2298,7 +2298,8 @@ void    uart_tx_dma(uint8_t *p, uint16_t len)
  *   关掉：poke telem_text_en 0
  */
 volatile uint8_t telem_text_en = 0u;
-volatile uint8_t  bench_run = 0u;   /* SWD 台架油门开关 */
+volatile uint8_t  bench_run = 0u;
+volatile uint16_t bench_ol = 0;   /* V4：台架开环油门（不经校准状态，窗口流保持）*/   /* SWD 台架油门开关 */
 volatile int16_t  bench_thr = 0;    /* SWD 台架油门值 */
 static char     telem_text_buf[72];
 static uint32_t telem_text_last = 0u;
@@ -4333,6 +4334,8 @@ void processDshot()
         compute_dshot_flag = 0;
         return;
     }
+    { extern volatile uint16_t bench_ol;
+      if (bench_ol != 0u) { newinput = bench_ol; input = bench_ol; armed = 1; signaltimeout = 0; } }
     setInput();
 }
 
