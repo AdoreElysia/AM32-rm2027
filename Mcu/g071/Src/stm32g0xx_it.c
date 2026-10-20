@@ -420,7 +420,23 @@ void DMA1_Channel2_3_IRQHandler(void)
 #else
             adc_bemf_take_edges(0, 0, 1, 1);      /* 清掉上一帧的残留 */
             (void)getCompOutputLevel();           /* 用本帧新采样更新滞回状态 */
-            adc_bemf_take_edges(&edge_rise, &edge_fall, 1, 1);  /* 读本帧翻转并清掉 */
+            adc_bemf_take_edges(&edge_rise, &edge_fall, 1, 1);  /* 读本帧翻转并清掉（保留供旧路径） */
+            /* ★★★ 2026-10-20：过零判据改成「三点单调 + 差值限幅 + 末点跨零」★★★
+             *   实测依据（throttle=496 波形）：旧判据在换相尖峰（跳变 400~500 码）就认“过零”，
+             *   而真过零是平缓斜坡（20~40 码/点）。用差值限幅直接拒掉尖峰，
+             *   不需要“跳过 N 个采样”的时间窗。 */
+            {
+                static int16_t zp2 = 0, zp1 = 0;
+                int16_t zd = adc_bemf_get_delta();
+                int16_t a1 = (zd > zp1) ? (int16_t)(zd - zp1) : (int16_t)(zp1 - zd);
+                int16_t a2 = (zp1 > zp2) ? (int16_t)(zp1 - zp2) : (int16_t)(zp2 - zp1);
+                uint8_t up = (zp2 < zp1) && (zp1 < zd) && (zp1 <= 0) && (zd > 0);
+                uint8_t dn = (zp2 > zp1) && (zp1 > zd) && (zp1 >= 0) && (zd < 0);
+                if ((up || dn) && a1 < 150 && a2 < 150) {
+                    edge_rise = 1;      /* 判据与方向无关（沿用原语义）*/
+                }
+                zp2 = zp1; zp1 = zd;
+            }
 #endif
 
             /* ★ 2026-10-09 观测：记住本步内 |delta| 的峰值（= 反电势幅值）。
