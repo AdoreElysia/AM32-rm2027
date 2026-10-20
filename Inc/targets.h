@@ -5,13 +5,13 @@
  *     电机抖" —— 用户当场发现。以后所有实验性开关一律默认关。
  */
 /* ★ 2026-10-20 开环引擎选择：1=三段式(校准)；0=原生 AM32 */
-#define RM2027_OL_MODE  0
+#define RM2027_OL_MODE  1
 
 /* ★ 2026-10-20 速度环：0=关（油门直接给占空比，正常电调行为）；1=开（油门映射目标转速） */
 #define RM2027_USE_SPEED_LOOP  0
 
 /* ★ V4：当前测试工作点（开环函数用）*/
-#define RM2027_V4_DUTY  400
+#define RM2027_V4_DUTY  500
 
 #ifndef RM2027_CAL_BUILD
 #define RM2027_CAL_BUILD       0
@@ -2688,6 +2688,7 @@
  *   RM2027_OL_RUN_MS      ：交棒前先【纯开环】跑多久（毫秒）。0 = 斜坡跑完立刻交棒。
  *   RM2027_NEVER_HANDOVER ：1 = 永不交棒（纯开环调试）。
  *   改这两个数字 ⇒ 重编译 ⇒ 烧录，即可控制"何时切闭环"。 */
+#define RM2027_OL_RUN_MS        8000   /* V4：校准阶段强制 8s（不受 CAL_BUILD 影响）*/
 #ifndef RM2027_OL_RUN_MS
 #if RM2027_CAL_BUILD
 #define RM2027_OL_RUN_MS        8000   /* 校准：开环拉长到 8s 多采数据 */
@@ -2760,7 +2761,7 @@
  *     · 上限 startup_max_duty_cycle=400（20%）—— 300 没有加大占空比，热风险不增加。
  *   0 = 关闭（恢复原行为：占空比由速度环决定）。 */
 #ifndef RM2027_CL_ANCHOR_DUTY
-#define RM2027_CL_ANCHOR_DUTY   0     /* 2026-10-20 关闭闭环锚定占空比（曾把 duty 钉死在 300） */
+#define RM2027_CL_ANCHOR_DUTY   500     /* 2026-10-20 关闭闭环锚定占空比（曾把 duty 钉死在 300） */
 #endif
 
 /* ★★ 2026-10-12 奇偶偏置（分支 test-cl-补偿方式-奇偶偏置，本分支唯一新变量）★★

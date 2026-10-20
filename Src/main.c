@@ -1348,7 +1348,14 @@ __attribute__((unused)) static void olStartupTick(void)
             newinput = 350; input = 350;
             /* ★ V4：开环工作点随测试 duty（频率+电压都对齐该 duty）*/
             ol_ci_tgt    = (uint32_t)(2924u - (335u * (uint32_t)RM2027_V4_DUTY) / 100u);
-            ol_input_tgt = (uint16_t)(RM2027_V4_DUTY + 47u);
+            /* ★ V4 微调：开环占空比下限 447（duty≈400）
+             *   保证开环段反电势足够大、能稳定认到过零（ol_meas_ci 有效）
+             *   否则交棒只能用命令值、与转子不匹配 ⇒ 交棒不无缝 */
+            {
+                uint32_t _in = (uint32_t)RM2027_V4_DUTY + 47u;
+                if (_in < 447u) { _in = 447u; }
+                ol_input_tgt = (uint16_t)_in;
+            }
         }
     }
     if (newinput < 48) {
@@ -1491,8 +1498,18 @@ __attribute__((unused)) static void olStartupTick(void)
              * 之前的转速低、反电势小，数出来的都不是可靠的过零。 */
             int16_t d = adc_bemf_get_delta();
             ol_zc_delta = d;
-            uint8_t lvl = (d > OL_ZC_MIN_DELTA) ? 1u
-                        : ((d < -(int16_t)OL_ZC_MIN_DELTA) ? 0u : ol_zc_level);
+            /* ★★ 2026-10-22：自适应阈值（抗噪声误判）★★
+             *   固定 8 码与噪声底 ±5 太近 ⇒ 噪声被当成过零。
+             *   用本步实测峰值 bemf_dmax/4 作阈值（限 12~80）。 */
+            {
+                int16_t _thr = OL_ZC_MIN_DELTA;
+                if (bemf_dmax > 48) {
+                    _thr = (int16_t)(bemf_dmax / 4);
+                    if (_thr < 12) { _thr = 12; }
+                    if (_thr > 80) { _thr = 80; }
+                }
+                lvl = (d > _thr) ? 1u : ((d < -_thr) ? 0u : ol_zc_level);
+            }
             ol_zc_level = lvl;
             /* 只认"落在本步中间段"的跨越：真过零在换相后约半个步长处，
              * 振铃紧跟在换相之后 ⇒ 用时间窗把两者分开（与幅度无关，最可靠）。 */
