@@ -2501,8 +2501,8 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
         q[ 4]=(uint8_t)( vc & 0xFF); q[ 5]=(uint8_t)((vc>>8)&0xFF);
         q[ 6]=(uint8_t)( v0 & 0xFF); q[ 7]=(uint8_t)((v0>>8)&0xFF);
         q[ 8]=(uint8_t)( cu & 0xFF); q[ 9]=(uint8_t)((cu>>8)&0xFF);
-        q[10]=(uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));
-        q[11]=(uint8_t)((((input >> 4) & 0x7Fu) << 1) | (ol_startup_arm ? 1u : 0u));   /* ★ dbg: bit7..1=油门/16, bit0=交棒标志(1=开环) */
+        q[10]=(uint8_t)((st & 0x07u) | (((duty_cycle >> 9) & 0x07u) << 3) | ((adc_frame_order & 0x03u) << 6));   /* bit3..5: duty/512 粗值 */
+        q[11]=(uint8_t)((((input >> 4) & 0x7Fu) << 1) | (old_routine ? 1u : 0u));   /* ★ dbg: bit7..1=油门/16, bit0=old_routine(1=开环/无闭环) */
     }
     {
         static uint8_t last_st = 0;
