@@ -1651,7 +1651,15 @@ __attribute__((unused)) static void olStartupTick(void)
             last_average_interval = average_interval;
         }
         if (!eepromBuffer.auto_advance) {
-            advance = (uint16_t)((commutation_interval * temp_advance) >> 6);
+            /* ★ 2026-10-20：逆变量（容許 SWD 直接覆盖）*/
+            /* ★★★ 2026-10-21：advance 按转速自适应★★★
+             *   延迟约 2 个采样（41.67µs/采样）⇒ 所需提前量 = 2彩样 / 步长（采样）
+             *   ci 单位：0.5µs 拍（1采样 = 83.3 拍）
+             *   ⇒ level = 64 × (2×83.3)/ci = 10662/ci，限 0..12。
+             *   （temp_advance=30 是 0.47×ci，把 waitTime 压到 3%⇒高速直接认不到过零）*/
+            uint32_t lvl = (commutation_interval > 0u) ? (10662u / (uint32_t)commutation_interval) : 0u;
+            if (lvl > 12u) { lvl = 12u; }
+            advance = (uint16_t)((commutation_interval * lvl) >> 6);
         } else {
             advance = (uint16_t)((commutation_interval * auto_advance_level) >> 6);
         }
