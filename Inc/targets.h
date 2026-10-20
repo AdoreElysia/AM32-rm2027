@@ -10,11 +10,6 @@
 /* ★ 2026-10-20 速度环：0=关（油门直接给占空比，正常电调行为）；1=开（油门映射目标转速） */
 #define RM2027_USE_SPEED_LOOP  0
 
-/* ★ 2026-10-21：补上分压比，否则 battery_voltage 公式乘 0 恒为 0V（12.3V/1387 码 ⇒ 110）*/
-#ifndef VOLTAGE_DIVIDER
-#define VOLTAGE_DIVIDER 110
-#endif
-
 #ifndef RM2027_CAL_BUILD
 #define RM2027_CAL_BUILD       0
 #endif
