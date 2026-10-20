@@ -3026,6 +3026,13 @@ void interruptRoutine()
 #if RM2027_OL_ARM_ONLY
     return; /* 开环调试：过零中断路径不参与换相（换相由 olStepTick 独占） */
 #endif
+    /* ★ 2026-10-20 安全修：停机后（running==0）绝不允许过零中断再换相。
+     *   原生开环模式（RM2027_OL_MODE=0）下 old_routine=0 + 比较器中断会一直调这里，
+     *   收油后主循环虽然 allOff()+running=0，但中断又把门极打开 ⇒ 电机不停。 */
+    if (running == 0) {
+        old_routine = 1;
+        return;
+    }
 //   if (average_interval > 125) {
 //        if ((INTERVAL_TIMER_COUNT < 125) && (duty_cycle < 600) && (zero_crosses < 500)) { // should be impossible, desync?exit anyway
 //           return;
