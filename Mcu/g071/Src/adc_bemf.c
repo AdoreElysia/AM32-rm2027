@@ -14,6 +14,7 @@
  *   3. 触发源不再是比较器 EXTI，而是定时器/ADC-DMA 中断（见 stm32g0xx_it.c）。
  */
 #include "adc_bemf.h"
+#include "esc_cal.h"
 #include "comparator.h"   /* 只为了 step / rising 等 extern 声明 */
 #include "common.h"
 #include "targets.h"
@@ -184,10 +185,28 @@ int16_t adc_bemf_get_delta(void)
          *   校准跑完后由 rk_compute() 覆盖 ⇒ 校准结果无需重编译就生效。 */
         extern volatile int16_t cal_sg[7];
         extern volatile int16_t cal_so[7];
-        uint8_t _s = (uint8_t)step;      /* step 已在 comparator.h 里声明为 char */
-        int16_t _d = (int16_t)((int16_t)bemf_adc_vph - (int16_t)bemf_adc_v0);
+        extern esc_cal_t esc_cal;            /* ch_g[4]/ch_o[4]：A/B/C/V0 通道(rank)增益 */
+        static const uint8_t PH_OF[7] = {0, 2, 0, 1, 2, 0, 1};   /* step → 悬空相 A=0,B=1,C=2 */
+        uint8_t _s = (uint8_t)step;
+        int16_t vph = (int16_t)bemf_adc_vph;
+        int16_t v0r = (int16_t)bemf_adc_v0;
+        int16_t _d;
+        /* ---- 第一级：通道(rank)增益 —— 作用在 A/B/C/V0 四个通道上 ---- */
         if (_s >= 1u && _s <= 6u) {
-            _d = (int16_t)(((int32_t)_d * cal_sg[_s]) / 1000) + cal_so[_s];
+            uint8_t ph = PH_OF[_s];
+            int16_t vph_c = (int16_t)(((int32_t)(vph - esc_cal.ch_o[ph]) * esc_cal.ch_g[ph]) / 1000);
+            int16_t v0_c  = (int16_t)(((int32_t)(v0r - esc_cal.ch_o[3])  * esc_cal.ch_g[3])  / 1000);
+            _d = (int16_t)(vph_c - v0_c);
+            /* ---- 第二级：六步增益/偏移 —— 只作用在悬空相（与 rank 解耦）---- */
+            {
+                int32_t rank_corr = (int32_t)esc_cal.ch_g[3] * 1000 / esc_cal.ch_g[ph];
+                int32_t fg = (rank_corr != 0) ? ((int32_t)cal_sg[_s] * 1000 / rank_corr) : (int32_t)cal_sg[_s];
+                if (fg < 200)  { fg = 200; }
+                if (fg > 4000) { fg = 4000; }
+                _d = (int16_t)(((int32_t)_d * fg) / 1000) + cal_so[_s];
+            }
+        } else {
+            _d = (int16_t)(vph - v0r);
         }
         return _d;
     }
