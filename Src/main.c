@@ -747,8 +747,13 @@ uint16_t ol_step_div_cur = OL_STEP_DIV;     /* 当前实际步长（斜坡中变
 #ifndef XIEN_OL_INPUT_TGT
 #define XIEN_OL_INPUT_TGT OL_INPUT_RUN
 #endif
-volatile uint32_t ol_ci_tgt = XIEN_OL_CI_TGT;
-volatile uint16_t ol_input_tgt = XIEN_OL_INPUT_TGT;
+/* ★★ 2026-10-22：开环工作点跟随锚定 duty（校准数据与闭环工作点一致）
+ *   duty → ci 关系由闭环实测拟合：ci ≈ 2924 − 3.35·duty（duty 251→2083、400→1584、450→1417）
+ *   ol_input_tgt 单位是 input（油门），而 duty ≈ input − 47 *。*/
+#define RM2027_OL_INPUT_FROM_ANCHOR  ((uint16_t)(RM2027_CL_ANCHOR_DUTY + 47u))
+#define RM2027_OL_CI_FROM_ANCHOR     ((uint32_t)(2924u - (335u * (uint32_t)RM2027_CL_ANCHOR_DUTY) / 100u))
+volatile uint32_t ol_ci_tgt = RM2027_OL_CI_FROM_ANCHOR;
+volatile uint16_t ol_input_tgt = RM2027_OL_INPUT_FROM_ANCHOR;
 volatile uint32_t ol_ci_cur = 500000UL;     /* 起步 ci：OL_STEP_DIV_START*100，startMotor 会覆盖 */
 volatile uint8_t  ol_tgt_armed = 0;         /* 目标首次到达时只武装一次捕获环 */
 uint16_t ol_trip_count = 0;                 /* 观测：过流连续超限计数 */

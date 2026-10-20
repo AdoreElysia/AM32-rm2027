@@ -2757,7 +2757,7 @@
  *     · 上限 startup_max_duty_cycle=400（20%）—— 300 没有加大占空比，热风险不增加。
  *   0 = 关闭（恢复原行为：占空比由速度环决定）。 */
 #ifndef RM2027_CL_ANCHOR_DUTY
-#define RM2027_CL_ANCHOR_DUTY   300
+#define RM2027_CL_ANCHOR_DUTY   450
 #endif
 
 /* ★★ 2026-10-12 奇偶偏置（分支 test-cl-补偿方式-奇偶偏置，本分支唯一新变量）★★
