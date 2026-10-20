@@ -2707,9 +2707,9 @@
 #endif
 
 #ifndef RM2027_NEVER_HANDOVER
-/* 校准构建才强制纯开环（实测交棒由 ol_verify_ok 触发，OL_RUN_MS 只是超时上限）。
- * ⚠ 绝不能默认 1：那样电机永远不进闭环、只能开环硬踹 ⇒ 抖。 */
-#define RM2027_NEVER_HANDOVER   RM2027_CAL_BUILD
+/* ★ 2026-10-19 解绑：校准构建也【要交棒】——流程是"开环采数据 → 闭环验证 2.5s → 停机算表"。
+ *   置 1 只用于"纯开环排查"，绝不能用于正常/校准流程（等于永远不进闭环、开环硬踹 ⇒ 抖）。 */
+#define RM2027_NEVER_HANDOVER   0
 #endif  /* 20kHz 拍：1000 = 50ms 持续才切（躲瞬时尖峰）*/
 
 /* ★★ 2026-10-12 闭环自动停机（用户要求："不只是脚本停，固件自己跑完也要停"）★★
@@ -2928,11 +2928,22 @@
  *   ⚠ 与旧表差异最大的是 A 相（step2/5）：hw V0 下 A 相弧幅只有 C 的 ~0.4 倍
  *     （采样顺序效应 + 硬件 V0 逐步失真）⇒ g 从 1.16 涨到 ~1.80。
  *   ⚠ 闭环行为待测（历史上这一族失败过两次，但用的都是"参考不匹配"的旧表）。 */
+/* ★ 优先用【自动生成的校准参数】（Inc/cal_params_gen.h，由脚本 bake 写入）；
+ *   没有就用 V2.9 的原始表。这样"校准一次 → 写回代码 → 以后烧录直接带着"。*/
+#include "cal_params_gen.h"
 #ifndef RM2027_SG_NUM
-#define RM2027_SG_NUM { 0, 1152, 1629, 1325, 1152, 1629, 1325 }   /* ×1000（2026-10-15 hw V0 重标） */
+#ifdef RM2027_USE_BAKED
+#define RM2027_SG_NUM RM2027_SG_NUM_GEN
+#else
+#define RM2027_SG_NUM { 0, 1152, 1629, 1325, 1152, 1629, 1325 }
+#endif
 #endif
 #ifndef RM2027_SO_OFF
-#define RM2027_SO_OFF { 0, 0, 0, 0, 0, 0, 0 }          /* 码（2026-10-15 hw V0 重标） */
+#ifdef RM2027_USE_BAKED
+#define RM2027_SO_OFF RM2027_SO_OFF_GEN
+#else
+#define RM2027_SO_OFF { 0, 0, 0, 0, 0, 0, 0 }
+#endif
 #endif
 
 /* ★★ 2026-10-14 丢过零滤波（RM2027_ZCL_FILTER）★★ —— 用户方案
@@ -3325,7 +3336,7 @@
 #define RM2027_CAL_AUTO_MS     15000
 #endif
 #ifndef RM2027_CAL_AUTO_APPLY
-#define RM2027_CAL_AUTO_APPLY  0
+#define RM2027_CAL_AUTO_APPLY  RM2027_CAL_BUILD   /* 校准构建：算完即应用；正常构建：0 */
 #endif
 
 #if RM2027_CAL_BUILD

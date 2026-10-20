@@ -3799,10 +3799,16 @@ void tenKhzRoutine()
              *   ⇒ 电机明显抖动。ol_startup_arm 由 1 变 0 就是交棒时刻。 */
             {
                 extern volatile uint8_t ol_startup_arm;
-                if (cal_run != 0u && ol_startup_arm == 0u) {
+                /* ★ 必须先"见过开环"再谈"交棒"：启动瞬间 ol_startup_arm 还是 0，
+                 *   若无条件清轮转，会把还没开始的 rank 采集直接掐死
+                 *   （实测：rk_k 全 1000 退化、rank 一个样本都没采到）。*/
+                static uint8_t seen_open_loop = 0;
+                if (ol_startup_arm != 0u) { seen_open_loop = 1u; }
+                if (seen_open_loop && cal_run != 0u && ol_startup_arm == 0u) {
                     adc_order_auto    = 0u;
                     adc_order_pending = 0u;
                 }
+                if (cal_run == 0u) { seen_open_loop = 0u; }   /* 本轮结束，复位 */
             }
 #if RM2027_CAL_AUTO
             /* ★★ K16：烧录/上电后【自动跑一轮校准】，跑完自己停，等下次烧录 ★★ */

@@ -125,6 +125,106 @@ def run_rank(bus_mv, save=False):
         print('→ 已写',p)
     return 0
 
+def _rd(name, n_words):
+    """按符号读 n_words 个 32 位字（符号地址现取）"""
+    a = sym(name)
+    if not a: return []
+    a = int(a, 16)
+    o = sh(f"openocd -f interface/stlink.cfg -f target/stm32g0x.cfg -c 'adapter speed 1800' -c init "
+           f"-c halt -c 'mww 0x40003000 0xAAAA' -c 'mdw 0x{a:08X} {n_words}' "
+           f"-c 'mww 0x40003000 0xAAAA' -c resume -c shutdown")
+    ws = []
+    for line in o.splitlines():
+        m = re.match(r'^0x[0-9a-fA-F]+: (.*)', line)
+        if m: ws += m.group(1).split()
+    return [int(w, 16) for w in ws]
+
+def _i16(words, i):
+    w = words[i // 2]; return (w >> 16) & 0xFFFF if (i % 2) else w & 0xFFFF
+def _s16(v): return v - 0x10000 if v & 0x8000 else v
+def _s32(v): return v - 0x100000000 if v & 0x80000000 else v
+
+def run_params():
+    """读片上标定结果并打印（rk 因子 / 每步增益 / 偏置 / 已应用的表）"""
+    print('→ 读片上参数…')
+    rk  = _rd('rk_k', 3)          # int16[5]
+    fA  = _rd('fit_A', 7)         # int32[7]
+    fM  = _rd('fit_M', 7)
+    fg  = _rd('fit_g', 4)         # int16[7]
+    fo  = _rd('fit_o', 4)
+    sg  = _rd('cal_sg', 4)
+    so  = _rd('cal_so', 4)
+    fc  = _rd('f_cnt', 4)
+    st  = _rd('fit_ready', 1); ap = _rd('cal_apply', 1)
+    ready = (st[0] & 0xFF) if st else -1
+    applied = (ap[0] & 0xFF) if ap else -1
+    print(f"fit_ready={ready}  cal_apply={applied}")
+    if ready != 1:
+        print('⚠ 本轮没有完成校准（fit_ready!=1）—— 检查母线是否有电、电机是否真转')
+    if len(rk) >= 3:
+        print('\nrank 因子（rank1..3，rank4 未用）:',
+              [_s16(_i16(rk,i)) for i in range(1,4)],
+              f"  k3/k1 = {_s16(_i16(rk,3))/max(1,_s16(_i16(rk,1))):.2f}")
+    if len(fg) >= 4:
+        g = [_s16(_i16(fg,i)) for i in range(1,7)]
+        o = [_s16(_i16(fo,i)) for i in range(1,7)]
+        A = [_s32(fA[i]) for i in range(1,7)] if len(fA) >= 7 else [0]*6
+        M = [_s32(fM[i]) for i in range(1,7)] if len(fM) >= 7 else [0]*6
+        n = [_i16(fc,i) for i in range(1,7)] if len(fc) >= 4 else [0]*6
+        print('\n步 | 相 | 实例 |  A_s  |  M_s  | fit_g | fit_o')
+        ph = {1:'C',2:'A',3:'B',4:'C',5:'A',6:'B'}
+        for i in range(6):
+            print(f' {i+1} | {ph[i+1]}  | {n[i]:4d} | {A[i]:4d} | {M[i]:+5d} | {g[i]:5d} | {o[i]:+5d}')
+        if all(v>0 for v in g):
+            base = sum(g[i] for i in (0,3))/2.0
+            print(f'  fit_g 归一(以 C 为 1): A={((g[1]+g[4])/2)/base:.2f}  B={((g[2]+g[5])/2)/base:.2f}')
+    if len(sg) >= 4:
+        s_ = [_s16(_i16(sg,i)) for i in range(1,7)]
+        o_ = [_s16(_i16(so,i)) for i in range(1,7)]
+        print('\n★ 已应用（判据在用）:')
+        print('  cal_sg = { 0,', ', '.join(str(v) for v in s_), '}')
+        print('  cal_so = { 0,', ', '.join(str(v) for v in o_), '}')
+        base = (s_[0]+s_[3])/2.0 or 1
+        print(f'  归一(以 C 为 1): A={((s_[1]+s_[4])/2)/base:.2f}  B={((s_[2]+s_[5])/2)/base:.2f}')
+        print('  对照 V2.9: 1152/1629/1325 → 归一 A=1.41 B=1.15')
+    return 0
+
+def run_bake():
+    """把片上算出的 cal_sg / cal_so 写进 Inc/cal_params_gen.h（永久生效）"""
+    print('→ 从片上读取校准结果…')
+    sg = _rd('cal_sg', 4); so = _rd('cal_so', 4)
+    st = _rd('fit_ready', 1)
+    if len(sg) < 4 or len(so) < 4:
+        print('❌ 读不到 cal_sg / cal_so'); return 1
+    S = [_s16(_i16(sg, i)) for i in range(1, 7)]
+    O = [_s16(_i16(so, i)) for i in range(1, 7)]
+    ready = (st[0] & 0xFF) if st else 0
+    print('  cal_sg =', S)
+    print('  cal_so =', O)
+    if ready != 1:
+        print('⚠ fit_ready=%d（本轮校准没完成）—— 建议先重跑一轮再 bake' % ready)
+    if all(v in (0, 1000) for v in S):
+        print('⚠ cal_sg 全是 1000，像未校准的默认值 —— 确认真的校准过再 bake')
+        if input('   仍要写入？(y/N) ').strip().lower() != 'y':
+            return 1
+    p = os.path.join(ROOT, 'Inc', 'cal_params_gen.h')
+    txt = ('/* ★★★ 自动生成，勿手改 ★★★\n'
+           ' *   由 tools/branch/xien__v3-cal.py --stage bake 写入（%s）\n'
+           ' *   cal_sg / cal_so = 片上校准结果（rank 因子 × fit_g 合成 + fit_o）\n'
+           ' *   用法：本文件存在且 RM2027_USE_BAKED=1 ⇒ 固件默认就用这套参数，不再需要跑校准。\n'
+           ' *   回退：删掉本文件，或把 RM2027_USE_BAKED 改成 0。\n'
+           ' */\n'
+           '#ifndef CAL_PARAMS_GEN_H\n#define CAL_PARAMS_GEN_H\n\n'
+           '#define RM2027_USE_BAKED   1\n'
+           '#define RM2027_SG_NUM_GEN { 0, %s }\n'
+           '#define RM2027_SO_OFF_GEN { 0, %s }\n\n'
+           '#endif\n') % (time.strftime('%Y-%m-%d %H:%M:%S'),
+                          ', '.join(str(v) for v in S), ', '.join(str(v) for v in O))
+    open(p, 'w', encoding='utf-8').write(txt)
+    print('→ 已写入', p)
+    print('下一步：① 把 Inc/targets.h 的 RM2027_CAL_BUILD 改回 0；② 重新编译 + 烧录')
+    return 0
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--bus-mv',type=int,default=None)
@@ -133,8 +233,8 @@ def main():
     ap.add_argument('--duty-hi',type=int,default=None,
                     help='高档占空比(0..2000)：必须 > CAL_CCR4+180，让 rank1~4 都落在导通窗（不给就用固件默认）')
     ap.add_argument('--save',action='store_true')
-    ap.add_argument('--stage',default='adc',choices=['adc','rank'],
-                    help='adc=K2 静态通道校准（已判定无需，保留）；rank=K3 rank 偏差校准')
+    ap.add_argument('--stage',default='params',choices=['adc','rank','params','bake'],
+                    help='params=读片上标定结果并打印（默认）；adc/rank=旧的静态标定')
     a=ap.parse_args()
     print(f'分支 {BRANCH} @ {COMMIT}')
     if a.bus_mv is None:
@@ -148,6 +248,10 @@ def main():
     if a.duty_hi is not None: poke16('cal_duty_hi',a.duty_hi)
     if a.stage=='rank':
         return run_rank(a.bus_mv, save=a.save)
+    if a.stage=='params':
+        return run_params()
+    if a.stage=='bake':
+        return run_bake()
 
     # ★ 两档 duty 只用于"把采样时刻排进正确的窗口"，不参与增益计算：
     #   低档 < CCR4 ⇒ 落在关断窗（0V 参考点）；高档 > CCR4+扫描 ⇒ 落在导通窗（≈Vbus）。

@@ -621,6 +621,21 @@ void rk_compute(void)
                     fit_o[st] = (int16_t)o;
                 }
                 fit_ready = 1u;
+                /* ★★ 合成最终运行时表：rank(可移植) × fit_g(残余) ★★
+                 *   cal_sg 此刻存的是 rank 那一层（K10 算的 kv*1000/kf），
+                 *   乘上残余增益才是"对原始 d 的完整修正"；偏置直接用 fit_o。*/
+                /* ★ 只有拟合真的出结果（fit_ready）才应用；否则保持原表（V2.9 宏）。
+                 *   事故：fit_ready=0 时也应用 ⇒ 把 cal_sg 覆盖成全 1000（等于不做补偿）。*/
+                if (cal_apply && fit_ready) {
+                    for (uint8_t st = 1u; st <= 6u; st++) {
+                        int32_t gtot = ((int32_t)cal_sg[st] * (int32_t)fit_g[st]) / 1000;
+                        if (gtot < 500)  { gtot = 500; }
+                        if (gtot > 4000) { gtot = 4000; }
+                        cal_sg[st] = (int16_t)gtot;
+                        cal_so[st] = fit_o[st];
+                    }
+                    cal_tables_ready = 1u;
+                }
             }
         }
         rk_so[0] = 0; rk_gain[0] = 0;
