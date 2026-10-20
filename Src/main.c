@@ -4534,7 +4534,10 @@ int main(void)
     initCorePeripherals();
     enableCorePeripherals();
     loadEEpromSettings();
-    { extern void v2_apply(void); v2_apply(); }   /* ★ 正常电调：V2 标定结果直接生效 */
+    /* ★ 2026-10-20：正确流程——上电验证 flash 里的校准（esc_cal_state==1）就直接用
+     *   esc_cal.sg / esc_cal.so（含 fit_o 偏差）；只有 flash 无效时才用烘焙常量兜底。 */
+    { extern volatile uint8_t esc_cal_state; extern void v2_apply(void);
+      if (esc_cal_state != 1u) { v2_apply(); } }
 #endif
 
     /* ★★ 上电就把六路门极显式关成"断开(coast)" —— 别依赖引脚的上电默认状态 ★★
