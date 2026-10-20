@@ -15,17 +15,43 @@ def main():
     cm = os.environ.get('ESC_COMMIT', '')
     print(f"== 分支脚本：{br} @ {cm} ==", flush=True)
     print("== 烧录后自动运行：串口常发 + 按油门分段（不占 J-Link）==", flush=True)
-    secs = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
+    secs = float(sys.argv[1]) if len(sys.argv) > 1 else 180.0   # ★ 最长 3 分钟
     try: os.unlink(RAW)
     except OSError: pass
     env = dict(os.environ); env.setdefault('ESC_BAUD','921600')   # ★ serial-spool 默认 1.5M，固件是 921600
     sp = subprocess.Popen(['python3','tools/serial-spool.py',RAW], cwd=REPO, env=env,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"采集 {secs:.0f}s（串口 {os.environ.get('ESC_SERIAL','/dev/ttyUSB0')}）… 请手动给油门", flush=True)
-    t0 = time.time()
+    print(f"最长采集 {secs:.0f}s（3min 上限）… 给油后会自动结束", flush=True)
+    t0 = time.time(); last_chk = 0.0; seen = False
     try:
         while time.time() - t0 < secs:
             time.sleep(0.5)
+            now = time.time()
+            if now - last_chk >= 2.0 and os.path.exists(RAW):
+                last_chk = now
+                # 用当前 raw 快照做"油门出现/归零"检测（只在 partial 上解析）
+                try:
+                    r = subprocess.run(['python3','tools/win-proto2.py','parse',RAW],
+                                       cwd=REPO, capture_output=True, text=True, timeout=20)
+                    ok = int(re.search(r'有效整包 (\d+) 个', r.stdout).group(1)) if re.search(r'有效整包 (\d+) 个', r.stdout) else 0
+                except Exception:
+                    ok = 0
+                if ok >= 2:
+                    try:
+                        import numpy as np
+                        npz = subprocess.run(['python3','tools/win-proto2.py','parse',RAW],
+                                             cwd=REPO, capture_output=True, text=True, timeout=20)
+                        # parse 会写 npz；用最近一次 npz 判断油门
+                        d = np.load(RAW.replace('.bin','.npz'))
+                        thr = d['dbg'].astype(int) * 8 if 'dbg' in d.files else None
+                        if thr is not None and thr.max() > 0:
+                            seen = True
+                            # 最近 200 帧全为 0 ⇒ 油门已收，结束
+                            if seen and thr[-200:].max() == 0:
+                                print(f"[{time.strftime('%H:%M:%S')}] 检测到油门出现并已收油 ⇒ 结束采集", flush=True)
+                                break
+                    except Exception:
+                        pass
     except KeyboardInterrupt:
         pass
     sp.send_signal(signal.SIGINT); sp.wait(timeout=3)
