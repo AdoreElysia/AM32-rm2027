@@ -2495,13 +2495,14 @@ void win_push(int16_t va, int16_t vb, int16_t vc, int16_t v0, int16_t cu, uint8_
         uint8_t *q = &win_pkt[win_buf_i][WIN_HDR + (uint16_t)i * 12u];
         extern volatile uint16_t adc_frame_cnt;
         uint16_t el = (uint16_t)(adc_frame_cnt - ccm_last_frame);
+        (void)el;   /* ★ el 不再用于 dbg（dbg 改放油门）*/
         q[ 0]=(uint8_t)( va & 0xFF); q[ 1]=(uint8_t)((va>>8)&0xFF);
         q[ 2]=(uint8_t)( vb & 0xFF); q[ 3]=(uint8_t)((vb>>8)&0xFF);
         q[ 4]=(uint8_t)( vc & 0xFF); q[ 5]=(uint8_t)((vc>>8)&0xFF);
         q[ 6]=(uint8_t)( v0 & 0xFF); q[ 7]=(uint8_t)((v0>>8)&0xFF);
         q[ 8]=(uint8_t)( cu & 0xFF); q[ 9]=(uint8_t)((cu>>8)&0xFF);
         q[10]=(uint8_t)((st & 0x07u) | ((adc_frame_order & 0x03u) << 6));
-        q[11]=(uint8_t)((el > 255u) ? 255u : el);
+        q[11]=(uint8_t)(input >> 3);   /* ★ dbg 字节改放「油门/8」：串口数据里就能分段 */
     }
     {
         static uint8_t last_st = 0;
