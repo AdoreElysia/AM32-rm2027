@@ -7,7 +7,7 @@
 #define XIEN_CAL_ENABLE  1u   /* 1 = 编入校准功能；0 = 纯读 flash/默认 */
 #endif
 #ifndef XIEN_CAL_FORCE
-#define XIEN_CAL_FORCE   0u   /* 1 = 开��强制重新校准（忽略 flash 里的旧值）*/
+#define XIEN_CAL_FORCE   1u   /* 1 = 开��强制重新校准（忽略 flash 里的旧值）*/
 #endif
 
 #define ESC_CAL_MAGIC 0x4C414345u   /* "ECAL" */
