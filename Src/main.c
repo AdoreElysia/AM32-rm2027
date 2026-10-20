@@ -1655,6 +1655,10 @@ __attribute__((unused)) static void olStartupTick(void)
         } else {
             advance = (uint16_t)((commutation_interval * auto_advance_level) >> 6);
         }
+        /* ★ 2026-10-20：advance 只在闭环稳态生效 —— 开环/起步段必须 0，
+         *   否则 ci=10000 时 waitTime=ci/2-advance 只剩几百拍 ⇒ 起步换相被拉快十几倍 ⇒ 根本起不来。 */
+        { extern volatile uint8_t ol_startup_arm;
+          if (ol_startup_arm != 0u) { advance = 0; } }
         /* ★★★ 2026-10-10 相位连续交棒 ★★★
          *   原来这里一律用"过零后 0.5 步(理想 30°)"当 waitTime，并把定时器重设到半步处
          *   —— 等于在交棒瞬间把相位【往前跳】。而开环实测真过零落在 0.91 步处
