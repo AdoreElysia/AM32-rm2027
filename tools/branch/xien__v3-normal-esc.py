@@ -70,10 +70,12 @@ def main():
             except Exception:
                 continue
             thr = (d['dbg'].astype(int) >> 1) * 16
-            if thr.max() > 0:
+            nz = set(int(x) for x in thr if x > 0)
+            if len(nz) >= 2:          # 至少看到 2 个不同油门档
                 seen = True
-            if seen and thr[-200:].max() == 0:
-                print("检测到油门出现并已收回 => 结束", flush=True)
+            # 收油后要保持 3s 真零才结束（避免一次收油就提前结束）
+            if seen and thr[-600:].max() == 0:
+                print("检测到多个油门档且已收油 3s => 结束", flush=True)
                 break
     except KeyboardInterrupt:
         pass
