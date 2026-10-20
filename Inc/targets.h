@@ -74,6 +74,14 @@
 /* ★ 细粒度终点：直接给“换相间隔 ci（0.5µs 拍）”，不是整数 step_div。
  *   例：1700、1650、1600、1550 ... 每 1 拍都有效（1700 处约 0.06% 分辨率）。
  *   默认仍从 XIEN_OL_STEP_DIV*100 来；运行时 poke32 ol_ci_tgt <ticks> 可改。 */
+/* V4_PROP_TARGETS：带桨 3S、20%油门≈7000RPM：ci=408拍（换相 4900Hz）、input=414 */
+#ifndef XIEN_OL_CI_TGT
+#define XIEN_OL_CI_TGT    408UL
+#endif
+#ifndef XIEN_OL_INPUT_TGT
+#define XIEN_OL_INPUT_TGT  414u
+#endif
+
 #ifndef XIEN_OL_CI_TGT
 #define XIEN_OL_CI_TGT     ((uint32_t)XIEN_OL_STEP_DIV * 100UL)
 #endif
