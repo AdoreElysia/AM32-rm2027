@@ -57,6 +57,10 @@ def main():
         fn = '/tmp/edge_%d.bin' % (len(files) if False else 0)
         return out
     kept = []
+    KEEP = '/tmp/edge_keep.bin'
+    kf = open(KEEP, 'wb')
+    def flush_keep():
+        kf.seek(0); kf.write(b''.join(kept)); kf.truncate(); kf.flush()
     t0 = time.time()
     try:
         while time.time() - t0 < secs:
@@ -81,6 +85,8 @@ def main():
                     active = True; last_nz = now
                 if active:
                     kept.append(pkt)
+                    if len(kept) % 50 == 0:
+                        flush_keep()
                 if active and thr == 0 and (now - last_nz) > 0.5:
                     active = False
                 buf = buf[k+total:]
@@ -88,6 +94,7 @@ def main():
                 active = False
     except KeyboardInterrupt:
         pass
+    flush_keep(); kf.close()
     sp.send_signal(signal.SIGINT); sp.wait(timeout=3)
     if not kept:
         print("没有捕获到油门段"); return
