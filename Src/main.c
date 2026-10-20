@@ -1501,6 +1501,7 @@ __attribute__((unused)) static void olStartupTick(void)
             /* ★★ 2026-10-22：自适应阈值（抗噪声误判）★★
              *   固定 8 码与噪声底 ±5 太近 ⇒ 噪声被当成过零。
              *   用本步实测峰值 bemf_dmax/4 作阈值（限 12~80）。 */
+            uint8_t lvl;
             {
                 int16_t _thr = OL_ZC_MIN_DELTA;
                 if (bemf_dmax > 48) {

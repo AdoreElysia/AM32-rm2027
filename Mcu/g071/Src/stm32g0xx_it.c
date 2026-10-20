@@ -427,7 +427,11 @@ void DMA1_Channel2_3_IRQHandler(void)
              *   不需要“跳过 N 个采样”的时间窗。 */
             {
                 static int16_t zp2 = 0, zp1 = 0;
+                static uint8_t zskip = 0;         /* ★ 换相后跳过前 3 个采样（续流/振铃区）*/
                 int16_t zd = adc_bemf_get_delta();
+                if (blanked) { zskip = 0; }
+                if (zskip < 3u) { zskip++; zp2 = zp1; zp1 = zd; goto zc_skip_judge; }
+                zskip = 0;
                 int16_t a1 = (zd > zp1) ? (int16_t)(zd - zp1) : (int16_t)(zp1 - zd);
                 int16_t a2 = (zp1 > zp2) ? (int16_t)(zp1 - zp2) : (int16_t)(zp2 - zp1);
                 /* ★ 2026-10-20 第二修：严格单调会被噪声（±3~5 码）打断 ⇒ 高转速下拒真过零。
@@ -439,6 +443,7 @@ void DMA1_Channel2_3_IRQHandler(void)
                 if ((up || dn) && a1 < 150 && a2 < 150) {
                     edge_rise = 1;      /* 判据与方向无关（沿用原语义）*/
                 }
+            zc_skip_judge:
                 zp2 = zp1; zp1 = zd;
             }
 #endif
