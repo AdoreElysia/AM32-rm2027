@@ -1819,6 +1819,22 @@ void loadEEpromSettings()
     /* ★ 校准流程（宏控制，不依赖 SWD）：
      *   默认：先读 flash 校验 → 合法就用；不合法（或 XIEN_CAL_FORCE=1）→ 自动校准 → 存回 flash */
     esc_cal_load();
+    /* ★★ flash 持久化（应用侧）：加载成功 ⇒ 立刻覆盖判据用的 RAM 表 ★★
+     *   校准结果存在 flash 最后一页(0x0801F800+0x100)，而 app 区只到 0x0800F800
+     *   ⇒ esc-lab.sh 的 `flash write_image erase <bin> 0x08001000` 只擦 app 扇区，
+     *     【重烧固件不会丢掉校准结果】。 */
+    if (esc_cal_state == 1u) {
+        /* ★ 只有"看起来合理"的 flash 表才采用（防止历史上写入的退化表把补偿关掉）：
+         *   6 个增益都在 [700,3500] 且不全为 1000。不合格 ⇒ 保留编译期/烘焙的默认表。*/
+        uint8_t _ok = 1u, _diff = 0u;
+        for (uint8_t i = 1u; i <= 6u; i++) {
+            if (esc_cal.sg[i] < 700 || esc_cal.sg[i] > 3500) { _ok = 0u; }
+            if (esc_cal.sg[i] != 1000) { _diff = 1u; }
+        }
+        if (_ok && _diff) {
+            for (uint8_t i = 0; i < 7u; i++) { cal_sg[i] = esc_cal.sg[i]; cal_so[i] = esc_cal.so[i]; }
+        }
+    }
 #if XIEN_CAL_ENABLE
     if (esc_cal_state != 1u || XIEN_CAL_FORCE) {
         esc_cal_auto();

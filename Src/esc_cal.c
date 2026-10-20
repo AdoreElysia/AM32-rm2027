@@ -635,6 +635,25 @@ void rk_compute(void)
                         cal_so[st] = fit_o[st];
                     }
                     cal_tables_ready = 1u;
+                    /* ★★ flash 持久化（保存侧）：把结果写回最后一页 ★★
+                     *   开机 esc_cal_load() 会读回来并应用 ⇒ 断电/重烧都不丢。
+                     *   sg/so = 判据用的两张表；ch_g = rank 因子（留作溯源）。*/
+                    /* ★ 合理性闸门：不合格的结果【绝不写 flash】（否则会把好表永久冲掉）。
+                     *   判据：① 6 个增益都在 [700,3500]；② 不能全等于 1000（退化）。
+                     *   事故：一次没采到数据的校准把全 1000 写进 flash，开机又被加载应用
+                     *   ⇒ 增益补偿被彻底关掉。*/
+                    {
+                        uint8_t ok = 1u, diff = 0u;
+                        for (uint8_t i = 1u; i <= 6u; i++) {
+                            if (cal_sg[i] < 700 || cal_sg[i] > 3500) { ok = 0u; }
+                            if (cal_sg[i] != 1000) { diff = 1u; }
+                        }
+                        if (ok && diff) {
+                            for (uint8_t i = 1u; i <= 6u; i++) { esc_cal.sg[i] = cal_sg[i]; esc_cal.so[i] = cal_so[i]; }
+                            for (uint8_t i = 0u; i < 4u; i++)  { esc_cal.ch_g[i] = rk_k[i + 1u]; }
+                            (void)esc_cal_save(&esc_cal);
+                        }
+                    }
                 }
             }
         }

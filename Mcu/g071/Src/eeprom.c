@@ -36,7 +36,18 @@ void save_flash_nolib(uint8_t* data, int length, uint32_t add)
     // erase page if address even divisable by 1024
     if ((add % 2048) == 0) {
         FLASH->CR |= FLASH_CR_PER;
-        FLASH->CR |= (add / 2048) << 3;
+        /* ★★★ 2026-10-20 修 bug ★★★
+         *   原来写的是 `FLASH->CR |= (add / 2048) << 3;`
+         *   add=0x0801F800 ⇒ 65600<<3 = 524800 ⇒ 溢出到 PNB 位域之外（PNB 只有 6 位，
+         *   掩码 0x3F<<3）⇒ 【页号错误/擦除根本没执行】⇒ 之后往没擦的 flash 里写必然失败
+         *   ⇒ esc_cal_save() 读回不一致、esc_cal_state=2。
+         *   正确：页号要相对 flash 基址算，并掩进 PNB 位域。
+         *   本芯片 128KB / 2KB 页 ⇒ 页号 0..63，0x0801F800 ⇒ 63（最后一页）。*/
+        {
+            uint32_t pnb = (add - 0x08000000u) / 2048u;
+            FLASH->CR = (FLASH->CR & ~FLASH_CR_PNB_Msk) |
+                        ((pnb << FLASH_CR_PNB_Pos) & FLASH_CR_PNB_Msk);
+        }
         FLASH->CR |= FLASH_CR_STRT;
         while ((FLASH->SR & FLASH_SR_BSY1) != 0) {
             /*  add time-out */
