@@ -25,3 +25,8 @@ windows-tools.zip
 .settings/
 /dist/
 /build/
+
+# 分支感知构建的产物与临时文件（见 .vscode/build-branch.ps1）
+# builds/<分支名>/ 存放按分支归档的编译产物；.build/ 存放编译器包装脚本
+/builds/
+/.build/
