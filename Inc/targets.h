@@ -2823,15 +2823,30 @@
  * 4 合 1 的四路 MCU 硬件对称（同一份原理图 ESC_2 复用 4 次），
  * 因此一个 target 即可，无需按 ESC1..4 分别建。
  *
- * 不定义 USE_SERIAL_TELEMETRY：本板 PB6 为空焊盘（epro2 PAD_NET pad26 = 空），
- * 遥测走双向 DShot（gcr 回读），不走 UART。
- * 不定义 MILLIVOLT_PER_AMP / CURRENT_OFFSET：本板无电流采样。
- * 不定义 SIXTY_FOUR_KB_MEMORY：G071GBU6 是 128 KB Flash。 */
+ * 硬件事实（4 合 1 板 PCB uuid 578f0e00f401012a，10-29 epro2 的 PAD_NET 原始数据）：
+ *   - 无电池电压采样：四路 MCU 的 pad6(PA0)/pad10(PA4)/pad11(PA5) 全是空焊盘，
+ *     全板 147 个网络里只有 VIN / 3.3V 两个电源网络，不存在 VBAT_SENSE
+ *   - 无电流采样：同理，无 INA240 一类器件，无 ADC_INx 网络
+ *   - 无遥测 UART：pad26(PB6) 空焊盘
+ *
+ * 因此：
+ *   - 定义 NO_VOLTAGE_SENSE / NO_CURRENT_SENSE，让 main.c 把原始 ADC 值强制为 0。
+ *     这两个宏是 AM32 既有机制（OPENESC_30_F421 / OPENESC_20_F421 同样用法），
+ *     无需改动 main.c。
+ *   - 不定义 USE_SERIAL_TELEMETRY：遥测走双向 DShot（gcr 回读）
+ *   - 不定义 MILLIVOLT_PER_AMP / CURRENT_OFFSET / TARGET_VOLTAGE_DIVIDER：
+ *     无采样硬件，这些参数无意义
+ *   - 不定义 SIXTY_FOUR_KB_MEMORY：G071GBU6 是 128 KB Flash
+ *
+ * ⚠️ 代价：电压补偿（VOLTAGE_BASED_RAMP）、低压保护、电流限流全部失效。
+ *    本板只能靠固定占空比 + COMP2 过零换相运行，属预期行为。 */
 #ifdef RM2027_ESC_G071
 #define FILE_NAME "RM2027_ESC_G071"
 #define FIRMWARE_NAME "RM2027 G071 "
 #define DEAD_TIME 60
 #define HARDWARE_GROUP_G0_RM2027
+#define NO_VOLTAGE_SENSE
+#define NO_CURRENT_SENSE
 #define USE_LED_STRIP
 #endif
 
@@ -4042,7 +4057,18 @@
 #define PHASE_B_COMP LL_COMP_INPUT_MINUS_IO1 /* PB3 = VB_SENSE1 */
 #define PHASE_C_COMP LL_COMP_INPUT_MINUS_IO3 /* PA2 = VC_SENSE1 */
 
-/* 电池电压：PA0 = VBAT_SENSE。必须显式定义，见上方注释。 */
+/* 电池电压采样：本板【没有】。
+ *
+ * 依据：10-29 epro2 的 4 合 1 板（PCB uuid 578f0e00f401012a）PAD_NET 原始数据，
+ *       ESC1-EESC4 四路 MCU 的 pad6(PA0) / pad10(PA4) / pad11(PA5) 全部为空焊盘，
+ *       整块板不存在 VBAT_SENSE / ADC_INx 任何电压采样网络。
+ *
+ * 但 AM32 的 ADC 初始化路径无条件读取电压通道，不定义就无法编译。
+ * 这里退而用 PA0 占位，代价是电压读数无意义 —— 因此必须配合：
+ *   - 关闭电压补偿 / 低压保护（VOLTAGE_* 相关运行时阈值）
+ *   - 或后续给 AM32 增加 NO_VOLTAGE_SENSE 宏（需改 main.c，单独 commit）
+ *
+ * 注意：pad6 在【单路板】0f56 上接的是 ADC_IN0，那是另一种板，不能拿来套 4 合 1。 */
 #define VOLTAGE_ADC_PIN LL_GPIO_PIN_0
 #define VOLTAGE_ADC_CHANNEL LL_ADC_CHANNEL_0
 
