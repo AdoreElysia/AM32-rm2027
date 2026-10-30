@@ -2819,6 +2819,22 @@
 #define RAMP_SPEED_HIGH_RPM 4
 #endif
 
+/* RM2027 自研 4 合 1 电调板，单路 target。
+ * 4 合 1 的四路 MCU 硬件对称（同一份原理图 ESC_2 复用 4 次），
+ * 因此一个 target 即可，无需按 ESC1..4 分别建。
+ *
+ * 不定义 USE_SERIAL_TELEMETRY：本板 PB6 为空焊盘（epro2 PAD_NET pad26 = 空），
+ * 遥测走双向 DShot（gcr 回读），不走 UART。
+ * 不定义 MILLIVOLT_PER_AMP / CURRENT_OFFSET：本板无电流采样。
+ * 不定义 SIXTY_FOUR_KB_MEMORY：G071GBU6 是 128 KB Flash。 */
+#ifdef RM2027_ESC_G071
+#define FILE_NAME "RM2027_ESC_G071"
+#define FIRMWARE_NAME "RM2027 G071 "
+#define DEAD_TIME 60
+#define HARDWARE_GROUP_G0_RM2027
+#define USE_LED_STRIP
+#endif
+
 #ifdef  ZTW_A_LV_G071
 #define FILE_NAME "ZTW_A_LV_G071"
 #define FIRMWARE_NAME "ZTW_A_LV_G0 "
@@ -3976,6 +3992,63 @@
 #define PHASE_A_COMP LL_COMP_INPUT_MINUS_IO2 // pb7
 #define PHASE_B_COMP LL_COMP_INPUT_MINUS_IO1 // pb3
 #define PHASE_C_COMP LL_COMP_INPUT_MINUS_IO3 // pa2
+
+#endif
+
+/* RM2027 自研 4 合 1 电调板（G071GBU6 非 N 版，UFQFPN-28）
+ * 依据：ProPrj_26无人机飞控&电调_2026-10-29.epro2 的 PCB PAD_NET 原始数据
+ *       PCB uuid 578f0e00f401012a（4 合 1），原理图页 9671f33109701110（2026-10-23 ESC_2）
+ *
+ * 与 G0_A 的差异只有两处：
+ *   1. DShot 输入在 PA6（TIM3_CH1），不是 G0_A 的 PB4
+ *   2. 显式定义 VOLTAGE_ADC_PIN=PA0。G0_A 未定义该宏，会走 G071 兜底的 PB6，
+ *      而本板 PB6 是空焊盘 —— 若沿用兜底，电池电压会读到悬空脚。
+ *
+ * 六路 PWM 与三相 COMP2 负端沿用 G0_A（已被 24 个量产 target 复用）；
+ * 本板无电流采样（epro2 中 ADC_IN1 不存在），CURRENT_ADC_* 仅作占位，
+ * 运行时必须保证 use_current_limit 为 0，否则会把电池电压当电流去限流。 */
+#ifdef HARDWARE_GROUP_G0_RM2027
+
+#define MCU_G071
+#define USE_TIMER_3_CHANNEL_1
+
+#define INPUT_PIN LL_GPIO_PIN_6          /* PA6 - 本板 DShot 输入 */
+#define INPUT_PIN_PORT GPIOA
+#define IC_TIMER_CHANNEL LL_TIM_CHANNEL_CH1
+#define IC_TIMER_REGISTER TIM3
+#define IC_TIMER_POINTER htim3
+
+#define INPUT_DMA_CHANNEL LL_DMA_CHANNEL_1
+#define DMA_HANDLE_TYPE_DEF hdma_tim3_ch1
+#define IC_DMA_IRQ_NAME DMA1_Channel1_IRQn
+
+#define PHASE_A_GPIO_LOW LL_GPIO_PIN_1   /* PB1  TIM1_CH3N */
+#define PHASE_A_GPIO_PORT_LOW GPIOB
+#define PHASE_A_GPIO_HIGH LL_GPIO_PIN_10 /* PA10 TIM1_CH3  */
+#define PHASE_A_GPIO_PORT_HIGH GPIOA
+
+#define PHASE_B_GPIO_LOW LL_GPIO_PIN_0   /* PB0  TIM1_CH2N */
+#define PHASE_B_GPIO_PORT_LOW GPIOB
+#define PHASE_B_GPIO_HIGH LL_GPIO_PIN_9  /* PA9  TIM1_CH2  */
+#define PHASE_B_GPIO_PORT_HIGH GPIOA
+
+#define PHASE_C_GPIO_LOW LL_GPIO_PIN_7   /* PA7  TIM1_CH1N */
+#define PHASE_C_GPIO_PORT_LOW GPIOA
+#define PHASE_C_GPIO_HIGH LL_GPIO_PIN_8  /* PA8  TIM1_CH1  */
+#define PHASE_C_GPIO_PORT_HIGH GPIOA
+
+/* 三相共用 COMP2：正端固定 PA3(V0)，负端按换相 step 轮流切换 */
+#define PHASE_A_COMP LL_COMP_INPUT_MINUS_IO2 /* PB7 = VA_SENSE1 */
+#define PHASE_B_COMP LL_COMP_INPUT_MINUS_IO1 /* PB3 = VB_SENSE1 */
+#define PHASE_C_COMP LL_COMP_INPUT_MINUS_IO3 /* PA2 = VC_SENSE1 */
+
+/* 电池电压：PA0 = VBAT_SENSE。必须显式定义，见上方注释。 */
+#define VOLTAGE_ADC_PIN LL_GPIO_PIN_0
+#define VOLTAGE_ADC_CHANNEL LL_ADC_CHANNEL_0
+
+/* 本板无电流采样，以下仅为让编译通过占位；运行时限流必须关闭。 */
+#define CURRENT_ADC_PIN LL_GPIO_PIN_0
+#define CURRENT_ADC_CHANNEL LL_ADC_CHANNEL_0
 
 #endif
 
