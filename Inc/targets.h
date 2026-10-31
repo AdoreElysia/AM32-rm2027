@@ -3518,12 +3518,6 @@
 /* 1 = 强制双向 DShot：信号线空闲高、命令帧 CRC 取反，电调在原线上回传 EDT。
  * 配套改过的 F1 测试台；用普通单向 DShot 飞控时改成 0（走原自动检测）。 */
 #define RM2027_FORCE_BDSHOT 1
-/* 1 = 电调端开环起转：收到 0→大油门的突变时，先在电调内部做
- *     对齐(200ms) → 强制换相斜坡(步长 250ms→0.8ms) → 交棒 BEMF 闭环。
- * 上游标准 AM32 的起步只靠 22.5ms 固定超时硬踹，高 KV/低惯量电机
- * 在突变油门下会失步、原地发热；开环斜坡能把转子先拖到能稳定认过零
- * 的转速。0 = 回到标准 AM32 起步。 */
-#define RM2027_OPENLOOP_START 1
 #define NO_VOLTAGE_SENSE
 #define NO_CURRENT_SENSE
 #define VOLTAGE_ADC_PIN LL_GPIO_PIN_4
