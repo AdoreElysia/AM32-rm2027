@@ -1855,19 +1855,9 @@ int main(void)
 
 #if defined(RM2027_FORCE_BDSHOT) && (RM2027_FORCE_BDSHOT == 1)
     /* 双向 DShot：信号线空闲高、命令帧 CRC 取反；电调在原线上回传 EDT。
-     * 不等 100 帧自动检测，保证和改过的 F1 测试台从第一帧就对得上。 */
+     * 不等 100 帧自动检测，保证和改过的 F1 测试台从第一帧就对得上。
+     * 起步/斜坡保持 AM32 上游原样，不用本地自定义的慢斜坡。 */
     dshot_telemetry = 1;
-
-    /* 软启动放在电调端：上游油门本来就会突变（例如 0→400），不能要求
-     * 飞控先帮电调爬坡。ramp_count 在 20kHz 的 tenKhzRoutine 里递增：
-     *   ramp_divider=19   → 每 1ms 允许更新一次占空比
-     *   max_ramp_startup=1 → 起转阶段每 1ms 只加 1（0→353 约 350ms）
-     * 起转完成（zero_crosses 与 last_duty_cycle 都过 150）后切到
-     * 低/高速斜坡，正常油门响应不会被拖慢。 */
-    ramp_divider = 19;
-    max_ramp_startup = 1;
-    max_ramp_low_rpm = 8;
-    max_ramp_high_rpm = 32;
 #endif
 
     if (VERSION_MAJOR != eepromBuffer.version.major || VERSION_MINOR != eepromBuffer.version.minor || EEPROM_VERSION > eepromBuffer.eeprom_version) {
