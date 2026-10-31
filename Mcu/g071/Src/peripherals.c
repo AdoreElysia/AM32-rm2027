@@ -18,16 +18,56 @@
 
 // extern uint16_t DEAD_TIME;
 
+/* 把上一次运行（或调试器只复位内核）留下的外设状态清干净。
+ * 调试器烧录后的“复位”可能只复位 CPU，RCC/TIM/DMA/GPIO 还停在上一次
+ * 运行的状态；不先复位就重新初始化，容易出现“烧完没反应、断电重上电才好”。 */
+static void resetG071Peripherals(void)
+{
+    /* 内核复位可能不会清 NVIC 的使能/挂起位，先全部关掉并清挂起；
+     * 各外设初始化时会重新打开自己需要的 IRQ。 */
+    NVIC->ICER[0] = 0xFFFFFFFFu;
+    NVIC->ICPR[0] = 0xFFFFFFFFu;
+
+    /* 先开时钟再复位：复位寄存器本身不受时钟影响，但复位后外设要能立即访问 */
+    RCC->IOPENR |= RCC_IOPENR_GPIOAEN | RCC_IOPENR_GPIOBEN;
+    RCC->AHBENR |= RCC_AHBENR_DMA1EN;
+    RCC->APBENR1 |= RCC_APBENR1_TIM2EN | RCC_APBENR1_TIM3EN
+        | RCC_APBENR1_TIM6EN | RCC_APBENR1_TIM7EN;
+    RCC->APBENR2 |= RCC_APBENR2_TIM1EN | RCC_APBENR2_TIM14EN
+        | RCC_APBENR2_TIM15EN | RCC_APBENR2_TIM16EN | RCC_APBENR2_TIM17EN
+        | RCC_APBENR2_USART1EN | RCC_APBENR2_ADCEN;
+
+    RCC->IOPRSTR = RCC_IOPRSTR_GPIOARST | RCC_IOPRSTR_GPIOBRST;
+    RCC->IOPRSTR = 0;
+
+    RCC->AHBRSTR = RCC_AHBRSTR_DMA1RST;
+    RCC->AHBRSTR = 0;
+
+    RCC->APBRSTR1 = RCC_APBRSTR1_TIM2RST | RCC_APBRSTR1_TIM3RST
+        | RCC_APBRSTR1_TIM6RST | RCC_APBRSTR1_TIM7RST;
+    RCC->APBRSTR1 = 0;
+
+    RCC->APBRSTR2 = RCC_APBRSTR2_SYSCFGRST | RCC_APBRSTR2_TIM1RST
+        | RCC_APBRSTR2_TIM14RST | RCC_APBRSTR2_TIM15RST
+        | RCC_APBRSTR2_TIM16RST | RCC_APBRSTR2_TIM17RST
+        | RCC_APBRSTR2_USART1RST | RCC_APBRSTR2_ADCRST;
+    RCC->APBRSTR2 = 0;
+}
+
 void initCorePeripherals(void)
 {
     LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
     LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
+
+    resetG071Peripherals();
+
+    FLASH->ACR |= FLASH_ACR_PRFTEN; //// prefetch buffer enable
+    SystemClock_Config();
+
   #ifndef NO_PA11_PA12_REMAP
     LL_SYSCFG_EnablePinRemap(LL_SYSCFG_PIN_RMP_PA11);
     LL_SYSCFG_EnablePinRemap(LL_SYSCFG_PIN_RMP_PA12);
   #endif
-    FLASH->ACR |= FLASH_ACR_PRFTEN; //// prefetch buffer enable
-    SystemClock_Config();
     MX_GPIO_Init();
     MX_DMA_Init();
     MX_COMP2_Init();
@@ -54,11 +94,36 @@ void initCorePeripherals(void)
 void initAfterJump()
 {
     SCB->VTOR = 0x08001000;
+
+    /* 调试器内核复位可能留下 NVIC 挂起位；先清掉再开总中断，
+     * 避免在还没初始化完时跳进某个旧中断。 */
+    NVIC->ICER[0] = 0xFFFFFFFFu;
+    NVIC->ICPR[0] = 0xFFFFFFFFu;
     __enable_irq();
 }
 
 void SystemClock_Config(void)
 {
+    uint32_t timeout;
+
+    /* ★ 先切回 HSI、关 PLL。
+     *   调试器烧录后的“复位”可能只复位内核，RCC 里的 PLL/分频还停在上一次
+     *   运行的状态；此时直接写 PLLCFGR 会被忽略，甚至卡在等 PLLRDY。
+     *   先回到 HSI 再关 PLL，保证下面能从头配置。 */
+    LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_HSI);
+    timeout = 200000u;
+    while ((LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_HSI)
+        && (--timeout != 0u)) {
+    }
+
+    LL_RCC_PLL_Disable();
+    timeout = 200000u;
+    while ((LL_RCC_PLL_IsReady() != 0u) && (--timeout != 0u)) {
+    }
+
+    LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
+    LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
+
     LL_FLASH_SetLatency(LL_FLASH_LATENCY_2);
     if (LL_FLASH_GetLatency() != LL_FLASH_LATENCY_2) {
         //  Error_Handler();
@@ -79,19 +144,25 @@ void SystemClock_Config(void)
         LL_RCC_PLLR_DIV_2);
     LL_RCC_PLL_Enable();
     LL_RCC_PLL_EnableDomain_SYS();
-    while (LL_RCC_PLL_IsReady() != 1) {
-    };
 
-    /* Set AHB prescaler*/
-    LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
+    timeout = 200000u;
+    while ((LL_RCC_PLL_IsReady() != 1) && (--timeout != 0u)) {
+    };
+    if (LL_RCC_PLL_IsReady() != 1) {
+        /* 彻底复位 RCC 再试一次；继续跑在 HSI 下会让 PWM/DShot 时序全错 */
+        NVIC_SystemReset();
+    }
 
     /* Sysclk activation on the main PLL */
     LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_PLL);
-    while (LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_PLL) {
+    timeout = 200000u;
+    while ((LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_PLL)
+        && (--timeout != 0u)) {
     };
+    if (LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_PLL) {
+        NVIC_SystemReset();
+    }
 
-    /* Set APB1 prescaler*/
-    LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
     LL_Init1msTick(64000000);
     LL_SetSystemCoreClock(64000000);
     /* Update CMSIS variable (which can be updated also through
@@ -432,6 +503,15 @@ void MX_TIM1_Init(void)
     GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
     GPIO_InitStruct.Alternate = LL_GPIO_AF_2;
     LL_GPIO_Init(PHASE_A_GPIO_PORT_HIGH, &GPIO_InitStruct);
+
+#if defined(PHASE_A_GPIO_HIGH_ALT) && defined(PHASE_B_GPIO_HIGH_ALT)
+    /* 28 脚 G071：把 PA10/PA9 这两个重映射源也配成 AF2。它们的 MODER/AFR
+     * 在 PA11/PA12 焊盘上同样被 phaseouts.c 同步操作。 */
+    GPIO_InitStruct.Pin = PHASE_A_GPIO_HIGH_ALT;
+    LL_GPIO_Init(PHASE_A_GPIO_PORT_HIGH, &GPIO_InitStruct);
+    GPIO_InitStruct.Pin = PHASE_B_GPIO_HIGH_ALT;
+    LL_GPIO_Init(PHASE_B_GPIO_PORT_HIGH, &GPIO_InitStruct);
+#endif
 }
 
 /**

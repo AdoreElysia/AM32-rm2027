@@ -619,6 +619,41 @@ void loadEEpromSettings()
       eepromBuffer.reserved_eeprom_3[1] = 0;
       eepromBuffer.reserved_eeprom_3[2] = 0;
     }
+#ifdef RM2027_4IN1_G071
+    /* 本板 EEPROM 可能是整片擦除态（0xFF）：输入类型/双向模式/互补 PWM/正弦
+     * 启动等都是垃圾值。直接用会让 DShot 油门进不来、零油门反而转、换相
+     * 提前量也偏掉。这里只在明显未配置时（input_type 不在合法枚举内）填
+     * 一组安全默认值；配置器写入合法值后本段不再生效。 */
+    if (eepromBuffer.input_type > 5) {
+        eepromBuffer.input_type = DSHOT_IN;
+        eepromBuffer.bi_direction = 0;
+        eepromBuffer.rc_car_reverse = 0; /* 否则下面的车用反向分支会把 bi_direction 又改回 1 */
+        eepromBuffer.comp_pwm = 0;
+        eepromBuffer.use_sine_start = 0;
+        eepromBuffer.variable_pwm = 0;
+        eepromBuffer.low_voltage_cut_off = 0;
+        eepromBuffer.advance_level = 10; /* 换相提前量 0：过零后 30° 换相 */
+        eepromBuffer.brake_on_zero_throttle = 0;
+        eepromBuffer.brake_on_stop = 0;
+    }
+    /* 这两个字节只接受 0/1，擦除态 0xFF 会被判成“开”。上面按 input_type
+     * 判断的默认值块只在第一次启动生效（之后 input_type 已被写回合法值），
+     * 所以这里单独钳位：保护值若是垃圾值就按关闭处理，配置器写入的 1 仍生效。
+     * 堵转保护一旦在起步失败时触发，setInput() 会把 input 钉成 0
+     * （bemf_timeout_happened=102），表现就是 newinput=400 但 input=0。 */
+    if (eepromBuffer.stuck_rotor_protection > 1) {
+        eepromBuffer.stuck_rotor_protection = 0;
+    }
+    if (eepromBuffer.stall_protection > 1) {
+        eepromBuffer.stall_protection = 0;
+    }
+#endif
+#ifdef RM2027_FORCE_BDSHOT
+    /* 台架 DShot：EEPROM 空白时 AM32 会把持续 0 油门当成摇杆校准请求，
+     * 一直响校准音且 zero_input_count 不增长，永远不解锁。
+     * DShot 输入不需要摇杆校准，这里强制关掉。 */
+    eepromBuffer.disable_stick_calibration = 1;
+#endif
     if(eepromBuffer.brake_on_zero_throttle > 9){ // byte 13 held a firmware name character (0x30 or similar) before eeprom version 4
       eepromBuffer.brake_on_zero_throttle = 0;
     }
@@ -983,8 +1018,215 @@ void startMotor()
     enableCompInterrupts();
 }
 
+#ifdef RM2027_OPENLOOP_START
+/* ---- 电调端开环起转：对齐 → 强制换相斜坡 → 交棒 BEMF 闭环 ----
+ * 时间单位全部是 20kHz 拍（50µs），状态机在 tenKhzRoutine() 里推进。
+ * 上游 AM32 的起步只靠 22.5ms 固定超时强制换相；高 KV/低惯量电机在
+ * 0→大油门的突变下会失步、原地发热。这里先把转子用固定时基拖到足够
+ * 转速，再交给 BEMF 闭环。
+ *
+ * 台架调节点：
+ *   转不起来        → 加大 OL_DUTY_ALIGN / OL_DUTY_END
+ *   起步太猛/发热   → 减小这两个占空比
+ *   斜坡太慢/太快   → 改 OL_STEP_START、OL_STEP_END、OL_RAMP_SHIFT
+ */
+#define OL_ALIGN_TICKS       4000u   /* 对齐保持 200ms */
+#define OL_STEP_START        5000u   /* 起始步长 250ms/步 */
+#define OL_STEP_END          16u     /* 终点步长 0.8ms/步（< 轮询转中断阈值 1ms）*/
+#define OL_RAMP_SHIFT        4u      /* 每换一步，步长缩短 1/16 */
+#define OL_SOAK_TICKS        8000u   /* 到终点速度后再强制转 400ms 才交棒 */
+#define OL_VERIFY_ZC         6u      /* 恒速段至少认出 6 次过零才允许交棒 */
+#define OL_TIMEOUT_TICKS     120000u /* 6s 还没交棒 ⇒ 停机并锁存故障 */
+#define OL_DUTY_ALIGN        60u     /* 对齐/低速占空比（0..2000，约 3%）*/
+#define OL_DUTY_END          160u    /* 未指定目标时的开环末端占空比（约 8%）*/
+#define OL_DUTY_END_MAX      200u    /* 开环末端最多给到 10%：本板没有电流采样，
+                                      * 再高在低转速段容易灌大电流。交棒后正常
+                                      * 斜坡会继续升到油门请求的占空比。 */
+
+#define OL_PHASE_ALIGN       0u
+#define OL_PHASE_RAMP        1u
+#define OL_PHASE_SOAK        2u
+
+static volatile uint8_t openloop_active = 0;
+static uint8_t  openloop_phase = OL_PHASE_ALIGN;
+static volatile uint8_t openloop_fault = 0; /* 起转失败锁存：油门回 0 才允许重试 */
+static uint32_t openloop_ticks = 0;       /* 本次起转总拍数（超时用）*/
+static uint32_t openloop_phase_ticks = 0; /* 当前阶段/当前步已过拍数 */
+static uint32_t openloop_soak_ticks = 0;  /* 恒速段累计拍数 */
+static uint16_t openloop_interval = OL_STEP_START;
+static uint16_t openloop_end_duty = OL_DUTY_END; /* 本次起转末端的占空比 */
+static uint16_t openloop_zc = 0;          /* 恒速段“边驱动边听”到的过零数 */
+
+static uint16_t openloopDuty(void)
+{
+    if (openloop_phase == OL_PHASE_ALIGN) {
+        return OL_DUTY_ALIGN;
+    }
+    if (openloop_interval <= OL_STEP_END) {
+        return openloop_end_duty;
+    }
+    {
+        uint32_t span = (uint32_t)(OL_STEP_START - OL_STEP_END);
+        uint32_t done = (uint32_t)(OL_STEP_START - openloop_interval);
+        return (uint16_t)(OL_DUTY_ALIGN
+            + (done * (uint32_t)(openloop_end_duty - OL_DUTY_ALIGN)) / span);
+    }
+}
+
+static void openloopStart(void)
+{
+    __disable_irq();
+    maskPhaseInterrupts();  /* 开环期间只轮询比较器，不让过零中断抢换相 */
+    NVIC_ClearPendingIRQ(COMPARATOR_IRQ); /* 清掉上一轮可能挂起的过零中断 */
+    DISABLE_COM_TIMER_INT();
+    NVIC_ClearPendingIRQ(COM_TIMER_IRQ); /* 清掉上一轮可能挂起的换相中断 */
+    old_routine = 1;        /* commutate() 在此状态下不会重开比较器中断 */
+    prop_brake_active = 0;  /* 否则 commutate() 会跳过 comStep()，门极不换相 */
+    zero_throttle_brake_active = 0; /* 保证第一拍就输出起转占空比 */
+    step = 1;
+    rising = forward ? 1 : 0;
+    comStep(1);             /* 对齐：把转子钉在已知位置 */
+    changeCompInput();
+    openloop_active = 1;
+    openloop_phase = OL_PHASE_ALIGN;
+    openloop_ticks = 0;
+    openloop_phase_ticks = 0;
+    openloop_soak_ticks = 0;
+    openloop_zc = 0;
+    openloop_interval = OL_STEP_START;
+    {
+        /* 末端占空比跟随本次油门，但设上限：本板没有电流采样。 */
+        long req = map(input, 47, 2047, minimum_duty_cycle, 2000);
+        if (req < (long)OL_DUTY_ALIGN) {
+            req = OL_DUTY_ALIGN;
+        }
+        if (req > (long)OL_DUTY_END_MAX) {
+            req = OL_DUTY_END_MAX;
+        }
+        openloop_end_duty = (uint16_t)req;
+    }
+    commutation_interval = (uint32_t)OL_ALIGN_TICKS * 100; /* 0.5µs 单位 */
+    SET_INTERVAL_TIMER_COUNT(0);
+    duty_cycle_setpoint = OL_DUTY_ALIGN; /* 第一拍就按起转占空比，不沿用旧值 */
+    bemfcounter = 0;
+    bad_count = 0;
+    zcfound = 0;
+    zero_crosses = 0;
+    bemf_timeout_happened = 0;
+    running = 1;
+    __enable_irq();
+}
+
+/* 在 20kHz 中断里推进；返回 1 表示本拍仍由开环状态机驱动 */
+static uint8_t openloopTick(void)
+{
+    if (!openloop_active) {
+        return 0;
+    }
+    if (!armed || !running || input < 47) {
+        openloop_active = 0;
+        if (input < 47) {
+            allOff();
+            running = 0;
+            duty_cycle_setpoint = 0;
+        }
+        return 0;
+    }
+
+    openloop_ticks++;
+    if (openloop_ticks > OL_TIMEOUT_TICKS) {
+        allOff();
+        running = 0;
+        openloop_active = 0;
+        openloop_fault = 1;
+        duty_cycle_setpoint = 0;
+        return 0;
+    }
+
+    openloop_phase_ticks++;
+
+    if (openloop_phase == OL_PHASE_ALIGN) {
+        if (openloop_phase_ticks >= OL_ALIGN_TICKS) {
+            openloop_phase = OL_PHASE_RAMP;
+            openloop_phase_ticks = 0;
+            openloop_interval = OL_STEP_START;
+        }
+    } else if (openloop_phase == OL_PHASE_RAMP) {
+        if (openloop_phase_ticks >= openloop_interval) {
+            openloop_phase_ticks = 0;
+            commutate();       /* 固定时基强制换相，不看 BEMF */
+            if (openloop_interval > OL_STEP_END) {
+                uint16_t dec = openloop_interval >> OL_RAMP_SHIFT;
+                if (dec == 0) {
+                    dec = 1;
+                }
+                if (openloop_interval > (OL_STEP_END + dec)) {
+                    openloop_interval -= dec;
+                } else {
+                    openloop_interval = OL_STEP_END;
+                    openloop_phase = OL_PHASE_SOAK;
+                    openloop_soak_ticks = 0;
+                }
+            }
+            commutation_interval = (uint32_t)openloop_interval * 100;
+        }
+    } else { /* OL_PHASE_SOAK */
+        openloop_soak_ticks++;
+        if (openloop_phase_ticks >= openloop_interval) {
+            openloop_phase_ticks = 0;
+            commutate();
+            bad_count = 0;      /* 每一步给一个干净的过零检测窗 */
+            commutation_interval = (uint32_t)openloop_interval * 100;
+        }
+        /* 边开环驱动边“听”比较器：commutate() 已清 bemfcounter/zcfound，
+         * 每一步都有一个干净的检测窗。认不到过零就不交棒，继续开环到
+         * 超时停机 —— 避免切到闭环后立刻失步、原地发热。 */
+        if (!zcfound) {
+            getBemfState();
+            if (rising) {
+                if (bemfcounter > min_bemf_counts_up) {
+                    zcfound = 1;
+                    openloop_zc++;
+                }
+            } else {
+                if (bemfcounter > min_bemf_counts_down) {
+                    zcfound = 1;
+                    openloop_zc++;
+                }
+            }
+        }
+        if (openloop_soak_ticks >= OL_SOAK_TICKS && openloop_zc >= OL_VERIFY_ZC) {
+            /* 交棒：保持当前转速切回轮询模式。commutation_interval 已小于
+             * polling_mode_changeover，第一次认到过零后 zcfoundroutine()
+             * 会自动切到中断闭环。 */
+            openloop_active = 0;
+            old_routine = 1;
+            zero_crosses = 0;
+            bemfcounter = 0;
+            bad_count = 0;
+            zcfound = 0;
+            commutation_interval = (uint32_t)OL_STEP_END * 100;
+            SET_INTERVAL_TIMER_COUNT(0);
+            duty_cycle_setpoint = openloopDuty();
+            last_duty_cycle = duty_cycle_setpoint;
+            return 0;
+        }
+    }
+
+    duty_cycle_setpoint = openloopDuty(); /* 开环期间由电调自己定占空比 */
+    last_duty_cycle = duty_cycle_setpoint;
+    return 1;
+}
+#endif /* RM2027_OPENLOOP_START */
+
 void setInput()
 {
+#ifdef RM2027_OPENLOOP_START
+    /* 起转失败锁存后，只有把原始油门收回 0 才允许重新尝试 */
+    if (newinput < 48) {
+        openloop_fault = 0;
+    }
+#endif
     if (eepromBuffer.bi_direction) {
         if (dshot == 0) {
             if (eepromBuffer.rc_car_reverse) {
@@ -1205,11 +1447,18 @@ if (!stepper_sine && armed) {
         if (input >= 47 + (80 * eepromBuffer.use_sine_start)) {
             if (running == 0) {
                 allOff();
+#ifdef RM2027_OPENLOOP_START
+                if (!openloop_fault) {
+                    openloopStart();
+                    last_duty_cycle = OL_DUTY_ALIGN;
+                }
+#else
                 if (!old_routine) {
                     startMotor();
                 }
                 running = 1;
                 last_duty_cycle = min_startup_duty;
+#endif
             }
 
             if (eepromBuffer.use_sine_start) {
@@ -1352,6 +1601,11 @@ if (!stepper_sine && armed) {
 
 void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
+#ifdef RM2027_OPENLOOP_START
+    /* 开环起转状态机必须在取 duty_cycle_setpoint 之前推进：
+     * 它会覆盖 setInput() 按油门算出来的目标占空比，改成起转用的低占空比。 */
+    openloopTick();
+#endif
     duty_cycle = duty_cycle_setpoint;
     tenkhzcounter++;
     ledcounter++;
@@ -1361,6 +1615,14 @@ void tenKhzRoutine()
         if (cell_count == 0) {
             if (inputSet) {
                 if (adjusted_input == 0) {
+#ifdef RM2027_FORCE_BDSHOT
+                    /* BDShot 的 EDT 路径在 transfercomplete 里提前 return，
+                     * zero_input_count 不会像单向 DShot 那样递增；
+                     * 这里在 20kHz 解锁判断里补上，否则永远差 >30 这一条。 */
+                    if (zero_input_count <= 100) {
+                        zero_input_count++;
+                    }
+#endif
                     armed_timeout_count++;
                     if (armed_timeout_count > LOOP_FREQUENCY_HZ) { // one second
                         if (zero_input_count > 30) {
@@ -1417,7 +1679,11 @@ void tenKhzRoutine()
 
     if (!stepper_sine) {
 #ifndef CUSTOM_RAMP
+#ifdef RM2027_OPENLOOP_START
+        if (!openloop_active && old_routine && running) {
+#else
         if (old_routine && running) {
+#endif
 	//				send_LED_RGB(255, 0, 0);
             maskPhaseInterrupts();
             getBemfState();
@@ -1809,6 +2075,23 @@ int main(void)
     loadEEpromSettings();
 #endif
 
+#if defined(RM2027_FORCE_BDSHOT) && (RM2027_FORCE_BDSHOT == 1)
+    /* 双向 DShot：信号线空闲高、命令帧 CRC 取反；电调在原线上回传 EDT。
+     * 不等 100 帧自动检测，保证和改过的 F1 测试台从第一帧就对得上。 */
+    dshot_telemetry = 1;
+
+    /* 软启动放在电调端：上游油门本来就会突变（例如 0→400），不能要求
+     * 飞控先帮电调爬坡。ramp_count 在 20kHz 的 tenKhzRoutine 里递增：
+     *   ramp_divider=19   → 每 1ms 允许更新一次占空比
+     *   max_ramp_startup=1 → 起转阶段每 1ms 只加 1（0→353 约 350ms）
+     * 起转完成（zero_crosses 与 last_duty_cycle 都过 150）后切到
+     * 低/高速斜坡，正常油门响应不会被拖慢。 */
+    ramp_divider = 19;
+    max_ramp_startup = 1;
+    max_ramp_low_rpm = 8;
+    max_ramp_high_rpm = 32;
+#endif
+
     if (VERSION_MAJOR != eepromBuffer.version.major || VERSION_MINOR != eepromBuffer.version.minor || EEPROM_VERSION > eepromBuffer.eeprom_version) {
         eepromBuffer.version.major = VERSION_MAJOR;
         eepromBuffer.version.minor = VERSION_MINOR;
@@ -1816,6 +2099,12 @@ int main(void)
         saveEEpromSettings();
     }
     
+#if defined(RM2027_DEFAULT_DIR_REVERSED) && (RM2027_DEFAULT_DIR_REVERSED == 1)
+    // EEPROM 未编程或数值无效时按本板相序默认反转；配置器写入的 0/1 优先
+    if (eepromBuffer.dir_reversed != 0 && eepromBuffer.dir_reversed != 1) {
+        eepromBuffer.dir_reversed = 1;
+    }
+#endif
     if (eepromBuffer.dir_reversed == 1) {
         forward = 0;
     } else {
@@ -2282,7 +2571,11 @@ if(zero_crosses < 5){
                 }
             }
 #endif
+#ifdef RM2027_OPENLOOP_START
+            if (!openloop_active && INTERVAL_TIMER_COUNT > 45000) {
+#else
             if (INTERVAL_TIMER_COUNT > 45000) {
+#endif
               zero_throttle_brake_active = 0;   // reset zero throttle brake on back emf timeout (rotation stop)
               if(running){
                 bemf_timeout_happened++;

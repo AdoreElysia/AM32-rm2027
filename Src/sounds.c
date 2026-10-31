@@ -126,15 +126,19 @@ comStep(3);
         setCaptureCompare();
         comStep(3); // activate a pwm channel
         SET_PRESCALER_PWM(55); // frequency of beep
+        RELOAD_WATCHDOG_COUNTER(); /* IWDG 可能已被 bootloader 打开；放音期间关中断，必须手动喂 */
         delayMillis(200); // duration of beep
+        RELOAD_WATCHDOG_COUNTER();
 
         comStep(5);
         SET_PRESCALER_PWM(40); // next beep is higher frequency
         delayMillis(200);
+        RELOAD_WATCHDOG_COUNTER();
 
         comStep(6);
         SET_PRESCALER_PWM(25); // higher again..
         delayMillis(200);
+        RELOAD_WATCHDOG_COUNTER();
 
         allOff(); // turn all channels low again
         SET_PRESCALER_PWM(0); // set prescaler back to 0.

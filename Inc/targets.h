@@ -3493,6 +3493,45 @@
 #define USE_SERIAL_TELEMETRY
 #endif
 
+/* 26.1 无人机飞控&电调工程（嘉立创 EDA）的 ESC_2 板：4 合 1 电调，
+ * 每路电机一颗 STM32G071GBU6 + 一颗 FD6288Q。
+ *   PA6  - ESC_DSHOT 信号输入（TIM3_CH1）
+ *   PA7/PA8   - C_LIN（TIM1_CH1N）/ C_HIN（TIM1_CH1）
+ *   PB0/PA11  - B_LIN（TIM1_CH2N）/ B_HIN（TIM1_CH2，PA9 重映射）
+ *   PB1/PA12  - A_LIN（TIM1_CH3N）/ A_HIN（TIM1_CH3，PA10 重映射）
+ *   PB7/PB3/PA2 - VA/VB/VC_SENSE -> COMP2_INM IO2/IO1/IO3
+ *   PA3  - V0_SENSE（虚拟中性点）-> COMP2_INP IO3
+ * 本芯片是 28 脚封装，PA11/PA12 才是实际焊盘；SYSCFG 重映射让它们
+ * 承载 PA9/PA10 的功能（TIM1_CH2/CH3）。但 GPIO 的 MODER/AFR 必须
+ * 配在实际焊盘 PA11/PA12 上（见 HARDWARE_GROUP_G0_M）。
+ * 本板电机相序与 AM32 默认的 A-B-C 顺序相反，所以 EEPROM 未编程时
+ * 默认按反转方向启动；配置器写入 0/1 后以配置值为准。
+ * 相电压分压只进比较器；本板没有母线电压/电流采样分压，因此遥测里
+ * 这两项强制为 0，避免把悬空 ADC 脚读成假数据。
+ */
+#ifdef RM2027_4IN1_G071
+#define FILE_NAME "RM2027_4IN1_G071"
+#define FIRMWARE_NAME "RM2027 4IN1"
+#define DEAD_TIME 60
+#define HARDWARE_GROUP_G0_M
+#define RM2027_DEFAULT_DIR_REVERSED 1
+/* 1 = 强制双向 DShot：信号线空闲高、命令帧 CRC 取反，电调在原线上回传 EDT。
+ * 配套改过的 F1 测试台；用普通单向 DShot 飞控时改成 0（走原自动检测）。 */
+#define RM2027_FORCE_BDSHOT 1
+/* 1 = 电调端开环起转：收到 0→大油门的突变时，先在电调内部做
+ *     对齐(200ms) → 强制换相斜坡(步长 250ms→0.8ms) → 交棒 BEMF 闭环。
+ * 上游标准 AM32 的起步只靠 22.5ms 固定超时硬踹，高 KV/低惯量电机
+ * 在突变油门下会失步、原地发热；开环斜坡能把转子先拖到能稳定认过零
+ * 的转速。0 = 回到标准 AM32 起步。 */
+#define RM2027_OPENLOOP_START 1
+#define NO_VOLTAGE_SENSE
+#define NO_CURRENT_SENSE
+#define VOLTAGE_ADC_PIN LL_GPIO_PIN_4
+#define VOLTAGE_ADC_CHANNEL LL_ADC_CHANNEL_4
+#define CURRENT_ADC_PIN LL_GPIO_PIN_5
+#define CURRENT_ADC_CHANNEL LL_ADC_CHANNEL_5
+#endif
+
 /********************************** F031 Targets
  * ***********************************/
 
@@ -4429,6 +4468,59 @@
 
 #define PHASE_C_EXTI_LINE LL_EXTI_LINE_18
 #define PHASE_C_COMP_NUMBER COMP2
+
+#endif
+
+/* RM2027 自研 4 合 1 电调（ESC_2 板），每路一颗 STM32G071GBU6 + FD6288Q。
+ * 引脚依据嘉立创 EDA 网表；硬件过零用 COMP2：
+ *   悬空相接 COMP2_INM，虚拟中性点 V0（PA3）接 COMP2_INP IO3。
+ * DShot 输入为 PA6（TIM3_CH1）。
+ *
+ * G071GBU6 是 28 脚 UFQFPN：PA9/PA10 没有引出，18/19 脚是
+ * PA11[PA9] / PA12[PA10]。SYSCFG 的 PA11_RMP/PA12_RMP 把 PA9/PA10 的
+ * 功能（TIM1_CH2/CH3）路由到这两个焊盘，但必须配置的是实际焊盘
+ * PA11/PA12 的 MODER/AFR。只配 PA9/PA10 会让焊盘停在模拟输入，
+ * FD6288Q 高边输入悬空（实测 AHO 常高、三相停在 VIN）。
+ * phaseouts.c / peripherals.c 会同时驱动实际焊盘和 PA9/PA10 重映射源
+ * （PHASE_x_GPIO_HIGH_ALT）。
+ */
+#ifdef HARDWARE_GROUP_G0_M
+
+#define MCU_G071
+#define USE_TIMER_3_CHANNEL_1
+#define INPUT_PIN LL_GPIO_PIN_6
+#define INPUT_PIN_PORT GPIOA
+#define IC_TIMER_CHANNEL LL_TIM_CHANNEL_CH1
+#define IC_TIMER_REGISTER TIM3
+#define IC_TIMER_POINTER htim3
+
+#define INPUT_DMA_CHANNEL LL_DMA_CHANNEL_1
+#define DMA_HANDLE_TYPE_DEF hdma_tim3_ch1
+#define IC_DMA_IRQ_NAME DMA1_Channel1_IRQn
+
+/* A 相：PB1 = A_LIN1（TIM1_CH3N），PA12 = A_HIN1 焊盘（经 PA12_RMP 作 TIM1_CH3） */
+#define PHASE_A_GPIO_LOW LL_GPIO_PIN_1
+#define PHASE_A_GPIO_PORT_LOW GPIOB
+#define PHASE_A_GPIO_HIGH LL_GPIO_PIN_12
+#define PHASE_A_GPIO_PORT_HIGH GPIOA
+#define PHASE_A_GPIO_HIGH_ALT LL_GPIO_PIN_10
+
+/* B 相：PB0 = B_LIN1（TIM1_CH2N），PA11 = B_HIN1 焊盘（经 PA11_RMP 作 TIM1_CH2） */
+#define PHASE_B_GPIO_LOW LL_GPIO_PIN_0
+#define PHASE_B_GPIO_PORT_LOW GPIOB
+#define PHASE_B_GPIO_HIGH LL_GPIO_PIN_11
+#define PHASE_B_GPIO_PORT_HIGH GPIOA
+#define PHASE_B_GPIO_HIGH_ALT LL_GPIO_PIN_9
+
+/* C 相：PA7 = C_LIN1（TIM1_CH1N），PA8 = C_HIN1（TIM1_CH1） */
+#define PHASE_C_GPIO_LOW LL_GPIO_PIN_7
+#define PHASE_C_GPIO_PORT_LOW GPIOA
+#define PHASE_C_GPIO_HIGH LL_GPIO_PIN_8
+#define PHASE_C_GPIO_PORT_HIGH GPIOA
+
+#define PHASE_A_COMP LL_COMP_INPUT_MINUS_IO2 /* PB7 = VA_SENSE */
+#define PHASE_B_COMP LL_COMP_INPUT_MINUS_IO1 /* PB3 = VB_SENSE */
+#define PHASE_C_COMP LL_COMP_INPUT_MINUS_IO3 /* PA2 = VC_SENSE */
 
 #endif
 

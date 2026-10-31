@@ -73,7 +73,14 @@ void computeDshotDMA()
 {
     dshot_frametime = dma_buffer[31] - dma_buffer[0];
     halfpulsetime = dshot_frametime >> 5;
+#ifdef RM2027_FORCE_BDSHOT
+    /* 台架 BDShot：0 油门帧 0x000F 和 400 帧 0x320E/0x321F 的帧长会随
+     * 最后一位/CRC 变化，AM32 原来的窄帧长范围会拒掉切换后的帧。
+     * 这里不再按帧长过滤，坏帧交给 CRC 判据。 */
+    if (1) {
+#else
     if ((dshot_frametime > dshot_frametime_low) && (dshot_frametime < dshot_frametime_high)) {
+#endif
 			signaltimeout = 0;
         for (int i = 0; i < 16; i++) {
             // note that dma_buffer[] is uint32_t, we cast the difference to uint16_t to handle

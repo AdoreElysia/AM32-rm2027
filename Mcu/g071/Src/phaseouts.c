@@ -30,6 +30,37 @@ extern char prop_brake_active;
 #define HIGH_BITREG_OFF BRR
 #endif
 
+#if defined(PHASE_A_GPIO_HIGH_ALT) && defined(PHASE_B_GPIO_HIGH_ALT)
+/* 28 脚 G071：A/B 高边的实际焊盘是 PA12/PA11（18/19 脚），PA10/PA9 只是
+ * 重映射源（SYSCFG 的 PA12_RMP/PA11_RMP）。两边同步切换，确保无论重映射
+ * 逻辑取哪一组寄存器，焊盘都能跟上。 */
+#define SET_AB_HIGH_MODE(port, pin, altpin, mode)     \
+    do {                                              \
+        LL_GPIO_SetPinMode((port), (pin), (mode));    \
+        LL_GPIO_SetPinMode((port), (altpin), (mode)); \
+    } while (0)
+#define AB_HIGH_OFF(port, pin, altpin)      \
+    do {                                    \
+        (port)->HIGH_BITREG_OFF = (pin);    \
+        (port)->HIGH_BITREG_OFF = (altpin); \
+    } while (0)
+#define SET_A_HIGH_MODE(mode) \
+    SET_AB_HIGH_MODE(PHASE_A_GPIO_PORT_HIGH, PHASE_A_GPIO_HIGH, PHASE_A_GPIO_HIGH_ALT, (mode))
+#define SET_B_HIGH_MODE(mode) \
+    SET_AB_HIGH_MODE(PHASE_B_GPIO_PORT_HIGH, PHASE_B_GPIO_HIGH, PHASE_B_GPIO_HIGH_ALT, (mode))
+#define A_HIGH_OFF() \
+    AB_HIGH_OFF(PHASE_A_GPIO_PORT_HIGH, PHASE_A_GPIO_HIGH, PHASE_A_GPIO_HIGH_ALT)
+#define B_HIGH_OFF() \
+    AB_HIGH_OFF(PHASE_B_GPIO_PORT_HIGH, PHASE_B_GPIO_HIGH, PHASE_B_GPIO_HIGH_ALT)
+#else
+#define SET_A_HIGH_MODE(mode) \
+    LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_HIGH, PHASE_A_GPIO_HIGH, (mode))
+#define SET_B_HIGH_MODE(mode) \
+    LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_HIGH, PHASE_B_GPIO_HIGH, (mode))
+#define A_HIGH_OFF() (PHASE_A_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_A_GPIO_HIGH)
+#define B_HIGH_OFF() (PHASE_B_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_B_GPIO_HIGH)
+#endif
+
 void proportionalBrake()
 { // alternate all channels between braking (ABC LOW)
     // and coasting (ABC float) put lower channel into
@@ -37,13 +68,11 @@ void proportionalBrake()
     // channel
     // turn all HIGH channels off for ABC
 
-    LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_HIGH, PHASE_A_GPIO_HIGH,
-        LL_GPIO_MODE_OUTPUT);
-    PHASE_A_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_A_GPIO_HIGH;
+    SET_A_HIGH_MODE(LL_GPIO_MODE_OUTPUT);
+    A_HIGH_OFF();
 
-    LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_HIGH, PHASE_B_GPIO_HIGH,
-        LL_GPIO_MODE_OUTPUT);
-    PHASE_B_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_B_GPIO_HIGH;
+    SET_B_HIGH_MODE(LL_GPIO_MODE_OUTPUT);
+    B_HIGH_OFF();
 
     LL_GPIO_SetPinMode(PHASE_C_GPIO_PORT_HIGH, PHASE_C_GPIO_HIGH,
         LL_GPIO_MODE_OUTPUT);
@@ -68,8 +97,7 @@ void phaseBPWM()
         LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_LOW, PHASE_B_GPIO_LOW,
             LL_GPIO_MODE_ALTERNATE); // low
     }
-    LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_HIGH, PHASE_B_GPIO_HIGH,
-        LL_GPIO_MODE_ALTERNATE); // high
+    SET_B_HIGH_MODE(LL_GPIO_MODE_ALTERNATE); // high
 }
 
 void phaseBFLOAT()
@@ -77,9 +105,8 @@ void phaseBFLOAT()
     LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_LOW, PHASE_B_GPIO_LOW,
         LL_GPIO_MODE_OUTPUT);
     PHASE_B_GPIO_PORT_LOW->LOW_BITREG_OFF = PHASE_B_GPIO_LOW;
-    LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_HIGH, PHASE_B_GPIO_HIGH,
-        LL_GPIO_MODE_OUTPUT);
-    PHASE_B_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_B_GPIO_HIGH;
+    SET_B_HIGH_MODE(LL_GPIO_MODE_OUTPUT);
+    B_HIGH_OFF();
 }
 
 void phaseBLOW()
@@ -88,9 +115,8 @@ void phaseBLOW()
     LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_LOW, PHASE_B_GPIO_LOW,
         LL_GPIO_MODE_OUTPUT);
     PHASE_B_GPIO_PORT_LOW->LOW_BITREG_ON = PHASE_B_GPIO_LOW;
-    LL_GPIO_SetPinMode(PHASE_B_GPIO_PORT_HIGH, PHASE_B_GPIO_HIGH,
-        LL_GPIO_MODE_OUTPUT);
-    PHASE_B_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_B_GPIO_HIGH;
+    SET_B_HIGH_MODE(LL_GPIO_MODE_OUTPUT);
+    B_HIGH_OFF();
 }
 
 //////////////////////////////PHASE
@@ -144,8 +170,7 @@ void phaseAPWM()
         LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_LOW, PHASE_A_GPIO_LOW,
             LL_GPIO_MODE_ALTERNATE);
     }
-    LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_HIGH, PHASE_A_GPIO_HIGH,
-        LL_GPIO_MODE_ALTERNATE);
+    SET_A_HIGH_MODE(LL_GPIO_MODE_ALTERNATE);
 }
 
 void phaseAFLOAT()
@@ -153,9 +178,8 @@ void phaseAFLOAT()
     LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_LOW, PHASE_A_GPIO_LOW,
         LL_GPIO_MODE_OUTPUT);
     PHASE_A_GPIO_PORT_LOW->LOW_BITREG_OFF = PHASE_A_GPIO_LOW;
-    LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_HIGH, PHASE_A_GPIO_HIGH,
-        LL_GPIO_MODE_OUTPUT);
-    PHASE_A_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_A_GPIO_HIGH;
+    SET_A_HIGH_MODE(LL_GPIO_MODE_OUTPUT);
+    A_HIGH_OFF();
 }
 
 void phaseALOW()
@@ -163,9 +187,8 @@ void phaseALOW()
     LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_LOW, PHASE_A_GPIO_LOW,
         LL_GPIO_MODE_OUTPUT);
     PHASE_A_GPIO_PORT_LOW->LOW_BITREG_ON = PHASE_A_GPIO_LOW;
-    LL_GPIO_SetPinMode(PHASE_A_GPIO_PORT_HIGH, PHASE_A_GPIO_HIGH,
-        LL_GPIO_MODE_OUTPUT);
-    PHASE_A_GPIO_PORT_HIGH->HIGH_BITREG_OFF = PHASE_A_GPIO_HIGH;
+    SET_A_HIGH_MODE(LL_GPIO_MODE_OUTPUT);
+    A_HIGH_OFF();
 }
 
 #else

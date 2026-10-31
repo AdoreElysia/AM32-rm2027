@@ -130,6 +130,12 @@ void transfercomplete()
         }
     }
 #endif
+#ifdef RM2027_FORCE_BDSHOT
+    /* 台架：F1 的 0 油门 BDShot 帧（0x000F）无法通过 detectInput 的
+     * 脉宽判据，inputSet 会一直停在 0、电调永远不解锁。
+     * 这里强制按 DShot 输入处理，让后面的 computeDshotDMA 正常解码。 */
+    inputSet = 1;
+#endif
     if (inputSet == 0) {
         detectInput();
         receiveDshotDma();

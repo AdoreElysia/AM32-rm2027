@@ -48,6 +48,9 @@ FIRMWARE_VERSION := $(VERSION_MAJOR).$(VERSION_MINOR)
 CFLAGS_BASE := -fsingle-precision-constant -fomit-frame-pointer -ffast-math
 CFLAGS_BASE += -I$(MAIN_INC_DIR) -g3 -O3 -ffunction-sections --specs=nosys.specs
 CFLAGS_BASE += -Wall -Wundef -Wextra -Werror -Wno-unused-parameter -Wno-stringop-truncation
+# GCC 13 及以上版本会把 checkDeviceInfo() 里按固定 Flash 地址读取 bootloader
+# 设备信息的写法误判为数组越界；这里的访问是有意为之，关闭该误报
+CFLAGS_BASE += -Wno-array-bounds
 
 CFLAGS_COMMON := $(CFLAGS_BASE)
 
